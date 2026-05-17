@@ -1,0 +1,27 @@
+# Node
+node_modules/
+/.svelte-kit
+/build
+/dist
+/.env
+/.env.local
+/.env.*
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Playwright artifacts
+.playwright/
+test-results/
+
+# Local Supabase CLI state (created by `supabase start`)
+supabase/.temp/
+supabase/.branches/

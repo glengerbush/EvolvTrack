@@ -1,0 +1,1256 @@
+<script lang="ts">
+  import { SvelteSet } from 'svelte/reactivity';
+  import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
+  import GearIcon from '$lib/components/icons/GearIcon.svelte';
+  import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
+  import { startWeight, currentWeight, goalWeight } from '$lib/stores/progressStore';
+  import { healthEntries } from '$lib/stores/healthStore';
+  import { symptomColors } from '$lib/stores/symptomStore';
+  import { weightUnit, toStoredLbs, type WeightUnit } from '$lib/stores/unitStore';
+  import { buildChartModel, CHART, GRAPH_SERIES, PLOT, type GraphSeriesKey } from '$lib/utils/chartModel';
+  import { localDateKey } from '$lib/utils/dateKeys';
+  import { lbsToDisplayNum } from '$lib/utils/format';
+  import type { DrugShape } from '$lib/utils/pharmacokinetics';
+
+  // Per-drug SVG markers (universal design: every series has both a color and a
+  // distinct shape, so they stay distinguishable in greyscale, when overlapping,
+  // for color-vision differences, and in print).
+  function shapePath(shape: DrugShape): string {
+    switch (shape) {
+      case 'circle':   return 'M -3.2 0 A 3.2 3.2 0 1 0 3.2 0 A 3.2 3.2 0 1 0 -3.2 0';
+      case 'square':   return 'M -2.9 -2.9 H 2.9 V 2.9 H -2.9 Z';
+      case 'triangle': return 'M 0 -3.8 L 3.4 2.1 L -3.4 2.1 Z';
+      case 'diamond':  return 'M 0 -3.6 L 3.6 0 L 0 3.6 L -3.6 0 Z';
+      case 'plus':     return 'M -1.1 -3.2 H 1.1 V -1.1 H 3.2 V 1.1 H 1.1 V 3.2 H -1.1 V 1.1 H -3.2 V -1.1 H -1.1 Z';
+      case 'star':     return 'M 0 -3.6 L 1.05 -1.05 L 3.6 0 L 1.05 1.05 L 0 3.6 L -1.05 1.05 L -3.6 0 L -1.05 -1.05 Z';
+      case 'hexagon':  return 'M 0 -3.4 L 2.95 -1.7 L 2.95 1.7 L 0 3.4 L -2.95 1.7 L -2.95 -1.7 Z';
+    }
+  }
+
+  const initialCostPerPound = 13.5;
+
+  const hiddenGraphSeries = new SvelteSet<GraphSeriesKey>();
+
+  let {
+    active = true,
+    discardSignal = 0,
+    onUnsavedChange,
+  }: {
+    active?: boolean;
+    discardSignal?: number;
+    onUnsavedChange?: (hasUnsavedChanges: boolean) => void;
+  } = $props();
+
+  let isEditingLegend = $state(false);
+  let isEditingProgress = $state(false);
+  let isEditingInputs = $state(false);
+  let inputSettingsOpen = $state(false);
+  let hasUnsavedInputRows = $state(false);
+  let addInputRowSignal = $state(0);
+  let saveInputSignal = $state(0);
+  let discardInputSignal = $state(0);
+  let draftStartWeight = $state<number | ''>(lbsToDraftInput($startWeight, $weightUnit));
+  let draftGoalWeight = $state<number | ''>(lbsToDraftInput($goalWeight, $weightUnit));
+  let progressBaseStartWeightLbs = $state<number | null>($startWeight);
+  let progressBaseGoalWeightLbs = $state<number | null>($goalWeight);
+  let progressDraftUnit = $state<WeightUnit>($weightUnit);
+  let costPerPound = $state(initialCostPerPound);
+  let progressCardRegion: HTMLElement | null = null;
+  let dataScrollEl: HTMLDivElement | null = null;
+  let hasAutoScrolled = false;
+  let lastNotifiedUnsavedChanges = false;
+  let lastDiscardSignal = getInitialDiscardSignal();
+
+  $effect(() => {
+    if (!active || !dataScrollEl || hasAutoScrolled || !chartModel.hasAnyData) return;
+    hasAutoScrolled = true;
+    requestAnimationFrame(() => {
+      if (dataScrollEl) dataScrollEl.scrollLeft = dataScrollEl.scrollWidth;
+    });
+  });
+
+  $effect(() => {
+    if (active) return;
+    isEditingLegend = false;
+    isEditingProgress = false;
+    isEditingInputs = false;
+    inputSettingsOpen = false;
+  });
+
+  $effect(() => {
+    if (hasUnsavedChanges === lastNotifiedUnsavedChanges) return;
+    lastNotifiedUnsavedChanges = hasUnsavedChanges;
+    onUnsavedChange?.(hasUnsavedChanges);
+  });
+
+  $effect(() => {
+    if (discardSignal === lastDiscardSignal) return;
+    lastDiscardSignal = discardSignal;
+    if (hasUnsavedProgress) discardProgressEdits();
+    if (hasUnsavedInputRows) discardInputEdits();
+  });
+
+  const sortedHealthRows = $derived([...$healthEntries].sort((a, b) => a.date.localeCompare(b.date)));
+  const todayKey = $derived(localDateKey());
+  const chartModel = $derived.by(() =>
+    buildChartModel(
+      sortedHealthRows,
+      $weightUnit,
+      $symptomColors,
+      $currentWeight != null ? lbsToDisplayNum(String($currentWeight), $weightUnit) : 180,
+      todayKey,
+      hiddenGraphSeries,
+    ),
+  );
+  type LegendItem = {
+    key: GraphSeriesKey;
+    label: string;
+    className: string;
+    hidden: boolean;
+    color?: string;
+    shape?: DrugShape;
+  };
+
+  const legendItems = $derived.by<LegendItem[]>(() =>
+    GRAPH_SERIES.flatMap((item) => {
+      if (item.key !== 'systemMg') {
+        return [{ ...item, hidden: hiddenGraphSeries.has(item.key) }];
+      }
+
+      return chartModel.systemSeries.map((series) => ({
+        key: series.key,
+        label: series.label,
+        className: item.className,
+        hidden: hiddenGraphSeries.has(series.key),
+        color: series.color,
+        shape: series.shape,
+      }));
+    }),
+  );
+  const showLeftAxis = $derived(!hiddenGraphSeries.has('weight'));
+  const hasVisibleSystemSeries = $derived(
+    chartModel.systemSeries.some((series) => !hiddenGraphSeries.has(series.key)),
+  );
+  const showRightAxis = $derived(
+    hasVisibleSystemSeries || !hiddenGraphSeries.has('wellness'),
+  );
+  const showAnyAxis = $derived(showLeftAxis || showRightAxis);
+  const effectiveLeftTicks = $derived(showLeftAxis ? chartModel.leftTicks : chartModel.rightTicks);
+  const effectiveRightTicks = $derived(showRightAxis ? chartModel.rightTicks : chartModel.leftTicks);
+  const effectiveLeftLabel = $derived(showLeftAxis ? chartModel.leftAxisLabel : chartModel.rightAxisLabel);
+  const effectiveRightLabel = $derived(showRightAxis ? chartModel.rightAxisLabel : chartModel.leftAxisLabel);
+  const currentWeightDisplay = $derived(
+    $currentWeight != null ? lbsToDisplayNum(String($currentWeight), $weightUnit) : null,
+  );
+  const startWeightDisplay = $derived(
+    $startWeight != null ? lbsToDisplayNum(String($startWeight), $weightUnit) : null,
+  );
+  const goalWeightDisplay = $derived(
+    $goalWeight != null ? lbsToDisplayNum(String($goalWeight), $weightUnit) : null,
+  );
+  const weightToGoal = $derived(
+    currentWeightDisplay != null && goalWeightDisplay != null
+      ? Math.max(currentWeightDisplay - goalWeightDisplay, 0)
+      : null,
+  );
+  const percentLoss = $derived.by(() => {
+    const start = $startWeight;
+    const current = $currentWeight;
+    if (start == null || current == null || start <= 0) return null;
+    return ((start - current) / start) * 100;
+  });
+  const costPerUnit = $derived($weightUnit === 'kg' ? costPerPound * 2.20462 : costPerPound);
+  const unitLabel = $derived($weightUnit === 'lbs' ? 'lb' : 'kg');
+  const draftStartWeightLbs = $derived(progressDraftValueToLbs(draftStartWeight, progressDraftUnit));
+  const draftGoalWeightLbs = $derived(progressDraftValueToLbs(draftGoalWeight, progressDraftUnit));
+  const hasUnsavedProgress = $derived.by(() => {
+    const startChanged = draftStartWeightLbs === null
+      ? progressBaseStartWeightLbs !== null
+      : progressBaseStartWeightLbs === null ||
+        Math.abs(draftStartWeightLbs - progressBaseStartWeightLbs) > 0.0001;
+    const goalChanged = draftGoalWeightLbs === null
+      ? progressBaseGoalWeightLbs !== null
+      : progressBaseGoalWeightLbs === null ||
+        Math.abs(draftGoalWeightLbs - progressBaseGoalWeightLbs) > 0.0001;
+    return startChanged || goalChanged;
+  });
+  const hasUnsavedChanges = $derived(hasUnsavedProgress || hasUnsavedInputRows);
+
+  type EfficacyRow = {
+    week: number;
+    doseDisplay: string;
+    lossLbs: number | null;
+    status: 'good' | 'warn' | 'no-data';
+  };
+
+  function isoAddDays(iso: string, n: number): string {
+    const [y, m, d] = iso.split('-').map(Number);
+    const date = new Date(y, m - 1, d + n);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  const efficacyRows = $derived.by((): EfficacyRow[] => {
+    const weightRows = sortedHealthRows.filter(
+      (r) => r.weight !== '' && Number.isFinite(parseFloat(r.weight)),
+    );
+    if (weightRows.length < 2) return [];
+
+    const anchor = weightRows[0].date;
+    const rows: EfficacyRow[] = [];
+    let prevWeightLbs: number = parseFloat(weightRows[0].weight);
+
+    for (let week = 1; week <= 52; week++) {
+      const windowStart = isoAddDays(anchor, (week - 1) * 7);
+      const windowEnd = isoAddDays(anchor, week * 7);
+
+      const weekWeightRows = weightRows.filter((r) => r.date > windowStart && r.date <= windowEnd);
+      const weekDoseRows = sortedHealthRows.filter(
+        (r) => r.dose !== '' && !r.doseSkipped && r.date > windowStart && r.date <= windowEnd,
+      );
+
+      if (weekWeightRows.length === 0 && weekDoseRows.length === 0) break;
+
+      const lastWeightRow = weekWeightRows[weekWeightRows.length - 1];
+      const lastWeightLbs = lastWeightRow ? parseFloat(lastWeightRow.weight) : null;
+
+      const lastDoseRow = weekDoseRows[weekDoseRows.length - 1];
+      const doseDisplay = lastDoseRow?.dose ? `${parseFloat(lastDoseRow.dose)} mg` : '';
+
+      const lossLbs = lastWeightLbs !== null ? prevWeightLbs - lastWeightLbs : null;
+      if (lastWeightLbs !== null) prevWeightLbs = lastWeightLbs;
+
+      const status: EfficacyRow['status'] =
+        lossLbs === null ? 'no-data' : lossLbs >= 0.5 && lossLbs <= 1.5 ? 'good' : 'warn';
+
+      rows.push({ week, doseDisplay, lossLbs, status });
+    }
+
+    return rows.reverse();
+  });
+
+  function toggleGraphSeries(key: GraphSeriesKey) {
+    if (hiddenGraphSeries.has(key)) {
+      hiddenGraphSeries.delete(key);
+      if (key === 'weight') hiddenGraphSeries.delete('weightPrediction');
+    } else {
+      hiddenGraphSeries.add(key);
+      if (key === 'weight') hiddenGraphSeries.add('weightPrediction');
+    }
+  }
+
+  $effect(() => {
+    const nextStartWeight = $startWeight;
+    const nextGoalWeight = $goalWeight;
+    const nextUnit = $weightUnit;
+    if (hasUnsavedProgress) return;
+
+    progressBaseStartWeightLbs = nextStartWeight;
+    progressBaseGoalWeightLbs = nextGoalWeight;
+    syncProgressDraftsFromSaved(nextStartWeight, nextGoalWeight, nextUnit);
+  });
+
+  $effect(() => {
+    const nextUnit = $weightUnit;
+    if (progressDraftUnit === nextUnit) return;
+
+    const startLbs = progressDraftValueToLbs(draftStartWeight, progressDraftUnit);
+    const goalLbs = progressDraftValueToLbs(draftGoalWeight, progressDraftUnit);
+    draftStartWeight = lbsToDraftInput(startLbs, nextUnit);
+    draftGoalWeight = lbsToDraftInput(goalLbs, nextUnit);
+    progressDraftUnit = nextUnit;
+  });
+
+  function progressDraftValueToLbs(value: number | string, unit: WeightUnit): number | null {
+    if (value === '' || value === null) return null;
+    const n = parseFloat(toStoredLbs(String(value), unit));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function lbsToDraftInput(lbs: number | null, unit: WeightUnit): number | '' {
+    if (lbs == null) return '';
+    const n = lbsToDisplayNum(String(lbs), unit);
+    return Number.isFinite(n) ? n : '';
+  }
+
+  function getInitialDiscardSignal(): number {
+    return discardSignal;
+  }
+
+  function syncProgressDraftsFromSaved(
+    startWeightLbs: number | null = $startWeight,
+    goalWeightLbs: number | null = $goalWeight,
+    unit: WeightUnit = $weightUnit,
+  ) {
+    draftStartWeight = lbsToDraftInput(startWeightLbs, unit);
+    draftGoalWeight = lbsToDraftInput(goalWeightLbs, unit);
+    progressDraftUnit = unit;
+  }
+
+  function beginProgressEdits() {
+    if (!hasUnsavedProgress) {
+      progressBaseStartWeightLbs = $startWeight;
+      progressBaseGoalWeightLbs = $goalWeight;
+      syncProgressDraftsFromSaved();
+    }
+    isEditingProgress = true;
+  }
+
+  function saveProgressEdits() {
+    const savedStartLbs = progressDraftValueToLbs(draftStartWeight, progressDraftUnit);
+    const savedGoalLbs = progressDraftValueToLbs(draftGoalWeight, progressDraftUnit);
+    startWeight.set(savedStartLbs);
+    goalWeight.set(savedGoalLbs);
+    progressBaseStartWeightLbs = savedStartLbs;
+    progressBaseGoalWeightLbs = savedGoalLbs;
+    syncProgressDraftsFromSaved(savedStartLbs, savedGoalLbs, $weightUnit);
+    isEditingProgress = false;
+  }
+
+  function toggleProgressEdits() {
+    isEditingProgress ? saveProgressEdits() : beginProgressEdits();
+  }
+
+  function discardProgressEdits() {
+    progressBaseStartWeightLbs = $startWeight;
+    progressBaseGoalWeightLbs = $goalWeight;
+    syncProgressDraftsFromSaved();
+    isEditingProgress = false;
+  }
+
+  function handleProgressCommitKeydown(event: KeyboardEvent) {
+    if (!isEditingProgress || !(event.target instanceof Node) || !progressCardRegion?.contains(event.target)) {
+      return;
+    }
+
+    if (
+      event.key !== 'Enter' ||
+      event.isComposing ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    saveProgressEdits();
+  }
+
+  function requestInputRow() {
+    addInputRowSignal += 1;
+  }
+
+  function saveInputEdits() {
+    saveInputSignal += 1;
+  }
+
+  function saveInputDraftRows() {
+    saveInputSignal += 1;
+  }
+
+  function finishInputEdits() {
+    isEditingInputs = false;
+    inputSettingsOpen = false;
+  }
+
+  function discardInputEdits() {
+    discardInputSignal += 1;
+    isEditingInputs = false;
+    inputSettingsOpen = false;
+  }
+
+  function toggleInputEdits() {
+    if (isEditingInputs) {
+      saveInputEdits();
+      return;
+    }
+
+    isEditingInputs = true;
+    inputSettingsOpen = false;
+  }
+
+  function toggleInputSettings() {
+    inputSettingsOpen = !inputSettingsOpen;
+  }
+</script>
+
+<svelte:document onkeydown={handleProgressCommitKeydown} />
+
+<main class="content">
+  <section class="panel-grid">
+    <article class="card chart-card">
+      <div class="chip-row">
+        <h2 class="section-chip">Overview</h2>
+        <EditPencil
+          ariaLabel="Edit graph legend"
+          active={isEditingLegend}
+          onclick={() => (isEditingLegend = !isEditingLegend)}
+        />
+      </div>
+      <div class="graph-legend" aria-label="Graph legend">
+        {#each legendItems as item (item.key)}
+          {#if (isEditingLegend || !item.hidden) && (item.key !== 'weightPrediction' || !hiddenGraphSeries.has('weight'))}
+            <label class={['legend-item', { editing: isEditingLegend }]}>
+              <span class={['legend-visual', { muted: item.hidden }]}>
+                {#if item.shape}
+                  <svg
+                    class="swatch-system-svg"
+                    viewBox="-14 -5 28 10"
+                    aria-hidden="true"
+                  >
+                    <line x1="-14" x2="14" y1="0" y2="0" style:stroke={item.color} stroke-width="3" stroke-linecap="round"/>
+                    <path d={shapePath(item.shape)} style:fill={item.color} style:stroke="var(--surface)" stroke-width="1.2"/>
+                  </svg>
+                {:else}
+                  <span class={item.className} style:--swatch-color={item.color}></span>
+                {/if}
+                <span>{item.label}</span>
+              </span>
+              {#if isEditingLegend}
+                <input
+                  type="checkbox"
+                  checked={!item.hidden}
+                  onchange={() => toggleGraphSeries(item.key)}
+                />
+              {/if}
+            </label>
+          {/if}
+        {/each}
+      </div>
+      <div class="plot-wrap">
+        <!-- Fixed left axis -->
+        {#if showAnyAxis}
+        <svg
+          class="axis-svg"
+          viewBox={`0 0 ${CHART.margin.left} ${CHART.height}`}
+          aria-hidden="true"
+        >
+          <g class="axes">
+            <line x1={CHART.margin.left - 1} x2={CHART.margin.left - 1} y1={PLOT.top} y2={PLOT.bottom} />
+          </g>
+          <g class="axis-labels">
+            {#each effectiveLeftTicks as tick (tick.label)}
+              <text x={CHART.margin.left - 11} y={tick.y + 4} text-anchor="end">{tick.label}</text>
+            {/each}
+            <text
+              class="axis-title left-title"
+              x={CHART.margin.left - 42}
+              y={(PLOT.top + PLOT.bottom) / 2}
+              transform={`rotate(-90 ${CHART.margin.left - 42} ${(PLOT.top + PLOT.bottom) / 2})`}
+              text-anchor="middle"
+            >
+              {effectiveLeftLabel}
+            </text>
+          </g>
+        </svg>
+        {/if}
+
+        <!-- Scrollable data area -->
+        <div class="data-scroll" bind:this={dataScrollEl}>
+          <svg
+            class="data-svg"
+            viewBox={`${CHART.margin.left} 0 ${chartModel.plotWidth} ${CHART.height}`}
+            style:width={`${chartModel.plotWidth}px`}
+            role="img"
+            aria-label="Health graph with weight, medication in system, wellness, and symptoms over time"
+          >
+            <defs>
+              <clipPath id="health-chart-clip">
+                <rect x={PLOT.left} y={PLOT.top} width={chartModel.plotWidth} height={PLOT.height} />
+              </clipPath>
+            </defs>
+
+            <rect class="plot-bg" x={PLOT.left} y={PLOT.top} width={chartModel.plotWidth} height={PLOT.height} />
+
+            {#if showAnyAxis}
+              <g class="grid-lines">
+                {#each effectiveLeftTicks as tick (tick.label)}
+                  <line
+                    x1={PLOT.left}
+                    x2={chartModel.plotRight}
+                    y1={tick.y}
+                    y2={tick.y}
+                  />
+                {/each}
+              </g>
+            {/if}
+
+            {#if chartModel.todayX !== null}
+              <line
+                class="today-line"
+                x1={chartModel.todayX}
+                x2={chartModel.todayX}
+                y1={PLOT.top}
+                y2={PLOT.bottom}
+              />
+            {/if}
+
+            <g clip-path="url(#health-chart-clip)">
+              {#if !hiddenGraphSeries.has('wellness')}
+                {#each chartModel.wellnessStacks as stack (stack.date)}
+                  {#if stack.blocks.length}
+                    <g role="img" aria-label={`Wellness ${stack.value} on ${stack.date}${stack.planned ? ' (planned)' : ''}`}>
+                      {#each stack.blocks as block (block.index)}
+                        <rect
+                          class="wellness-bar"
+                          class:planned={stack.planned}
+                          x={block.x}
+                          y={block.y}
+                          width={block.width}
+                          height={block.height}
+                        />
+                      {/each}
+                    </g>
+                  {/if}
+                {/each}
+              {/if}
+
+              {#each chartModel.systemSeries as series (series.key)}
+                {#if !hiddenGraphSeries.has(series.key)}
+                  <polyline points={series.actualPath} class="system-line" style:--system-color={series.color} />
+                  <polyline points={series.predictionPath} class="system-line dashed" style:--system-color={series.color} />
+                  {#each series.dosePoints as dot (dot.date)}
+                    <path
+                      class="dose-point"
+                      d={shapePath(series.shape)}
+                      transform={`translate(${dot.x} ${dot.y})`}
+                      style:--system-color={series.color}
+                    />
+                  {/each}
+                  {#each series.plannedDosePoints as dot (dot.date)}
+                    <path
+                      class="dose-point planned"
+                      d={shapePath(series.shape)}
+                      transform={`translate(${dot.x} ${dot.y})`}
+                      style:--system-color={series.color}
+                    />
+                  {/each}
+                {/if}
+              {/each}
+
+              {#if !hiddenGraphSeries.has('weight')}
+                <polyline points={chartModel.weightActualPath} class="weightline" />
+                <polyline points={chartModel.weightFuturePath} class="weightline dashed" />
+                {#each chartModel.weightPoints as point (point.date)}
+                  <circle class="weight-point" class:planned={point.planned} cx={point.x} cy={point.y} r="3.2" />
+                {/each}
+              {/if}
+
+              {#if !hiddenGraphSeries.has('weightPrediction') && !hiddenGraphSeries.has('weight')}
+                <polyline points={chartModel.weightPredictionPath} class="weightline dashed" />
+              {/if}
+            </g>
+
+            {#if !hiddenGraphSeries.has('symptoms')}
+              <g class="symptom-layer">
+                {#each chartModel.symptomStacks as stack (stack.date)}
+                  <g>
+                    {#each stack.items as item (item.symptom)}
+                      <circle
+                        class="symptom-dot"
+                        cx={stack.x}
+                        cy={item.y}
+                        r="7.5"
+                        fill={item.color}
+                      />
+                      <text class="symptom-letter" x={stack.x} y={item.y + 0.5}>{item.letter}</text>
+                    {/each}
+                  </g>
+                {/each}
+              </g>
+            {/if}
+
+            <g class="axes">
+              <line x1={PLOT.left} x2={chartModel.plotRight} y1={PLOT.bottom} y2={PLOT.bottom} />
+            </g>
+
+            <g class="axis-labels">
+              {#each chartModel.dateTicks as tick (tick.date)}
+                <line class="date-tick" x1={tick.x} x2={tick.x} y1={PLOT.bottom} y2={PLOT.bottom + 6} />
+                <text
+                  class="date-label"
+                  x={tick.x}
+                  y={PLOT.bottom + 8}
+                  transform={`rotate(-90 ${tick.x} ${PLOT.bottom + 8})`}
+                  text-anchor="end"
+                  dominant-baseline="central"
+                >
+                  {tick.label}
+                </text>
+              {/each}
+
+
+            </g>
+
+            {#if !chartModel.hasAnyData}
+              <text class="empty-chart" x={CHART.width / 2} y={(PLOT.top + PLOT.bottom) / 2} text-anchor="middle">
+                Add a weight, dose, wellness score, or symptom to start the graph.
+              </text>
+            {/if}
+          </svg>
+        </div>
+
+        <!-- Fixed right axis -->
+        {#if showAnyAxis}
+          <svg
+            class="axis-svg"
+            viewBox={`0 0 ${CHART.margin.right} ${CHART.height}`}
+            aria-hidden="true"
+          >
+            <g class="axes">
+              <line x1={1} x2={1} y1={PLOT.top} y2={PLOT.bottom} />
+            </g>
+            <g class="axis-labels">
+              {#each effectiveRightTicks as tick (tick.label)}
+                <text x={10} y={tick.y + 4}>{tick.label}</text>
+              {/each}
+              <text
+                class="axis-title right-title"
+                x={52}
+                y={(PLOT.top + PLOT.bottom) / 2}
+                transform={`rotate(90 52 ${(PLOT.top + PLOT.bottom) / 2})`}
+                text-anchor="middle"
+              >
+                {effectiveRightLabel}
+              </text>
+            </g>
+          </svg>
+        {/if}
+      </div>
+    </article>
+
+    <div class="right-col">
+      <article class="card">
+        <h2 class="section-chip">Efficacy</h2>
+        <div class="efficacy-scroll">
+          <table class="mini-table">
+            <thead>
+              <tr><th>Week</th><th>Dose Amount</th><th>Weekly Loss</th><th></th></tr>
+            </thead>
+            <tbody>
+              {#each efficacyRows as row (row.week)}
+                <tr>
+                  <td>{row.week}</td>
+                  <td>{row.doseDisplay}</td>
+                  <td>
+                    {#if row.lossLbs !== null}
+                      {lbsToDisplayNum(String(row.lossLbs), $weightUnit).toFixed(1)}
+                      {$weightUnit}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td>
+                    {#if row.status === 'good'}
+                      <span class="status success">✓</span>
+                    {:else if row.status === 'warn'}
+                      <span class="status warn">⚠</span>
+                    {:else}
+                      <span>—</span>
+                    {/if}
+                  </td>
+                </tr>
+              {:else}
+                <tr>
+                  <td colspan="4" class="empty-efficacy">No data yet</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card" bind:this={progressCardRegion}>
+        <div class="chip-row">
+          <h2 class="section-chip">Progress</h2>
+          <EditPencil
+            ariaLabel={isEditingProgress ? 'Save progress' : 'Edit progress'}
+            active={isEditingProgress}
+            onclick={toggleProgressEdits}
+          />
+          {#if hasUnsavedProgress}
+            <button
+              type="button"
+              class="discard-btn"
+              aria-label="Cancel unsaved progress changes"
+              onclick={discardProgressEdits}
+            >Cancel</button>
+          {/if}
+        </div>
+        <table class="kv-table">
+          <tbody>
+            <tr>
+              <th>Start Weight</th>
+              <td>
+                {#if isEditingProgress}
+                  <input class="progress-input" type="number" min="0" step="any" bind:value={draftStartWeight} />
+                {:else if startWeightDisplay != null}
+                  {startWeightDisplay.toFixed(1)} {$weightUnit}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>Current Weight</th>
+              <td>
+                {#if currentWeightDisplay != null}
+                  {currentWeightDisplay.toFixed(1)} {$weightUnit}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>Goal Weight</th>
+              <td>
+                {#if isEditingProgress}
+                  <input class="progress-input" type="number" min="0" step="any" bind:value={draftGoalWeight} />
+                {:else if goalWeightDisplay != null}
+                  {goalWeightDisplay.toFixed(1)} {$weightUnit}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>To Goal</th>
+              <td>
+                {#if weightToGoal != null}
+                  {weightToGoal.toFixed(1)} {$weightUnit}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>% Loss</th>
+              <td>
+                {#if percentLoss != null}
+                  {percentLoss.toFixed(1)}%
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr><th>Cost per {unitLabel}</th><td>${costPerUnit.toFixed(2)}</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </div>
+  </section>
+
+  <article class="card inputs-card">
+    <div class="chip-row">
+      <h2 class="section-chip">Inputs</h2>
+      <button
+        type="button"
+        class="icon-action add-row-button"
+        aria-label="Add input row"
+        onclick={requestInputRow}
+      >
+        +
+      </button>
+      {#if hasUnsavedInputRows && !isEditingInputs}
+        <EditPencil
+          ariaLabel="Save inputs"
+          active={true}
+          onclick={saveInputDraftRows}
+        />
+      {/if}
+      <EditPencil
+        ariaLabel={isEditingInputs ? 'Save inputs' : 'Edit inputs'}
+        active={isEditingInputs}
+        onclick={toggleInputEdits}
+      />
+      {#if isEditingInputs}
+        <button
+          type="button"
+          class={['settings-btn', { active: inputSettingsOpen }]}
+          aria-label={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
+          title={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
+          aria-pressed={inputSettingsOpen}
+          onclick={toggleInputSettings}
+        >
+          <GearIcon size="60%" color="white" />
+        </button>
+      {/if}
+      {#if hasUnsavedInputRows}
+        <button
+          type="button"
+          class="discard-btn"
+          aria-label="Cancel unsaved input changes"
+          onclick={discardInputEdits}
+        >Cancel</button>
+      {/if}
+    </div>
+    <InputsTable
+      rows={$healthEntries}
+      isEditing={isEditingInputs}
+      isSettingsOpen={inputSettingsOpen}
+      addRowSignal={addInputRowSignal}
+      saveSignal={saveInputSignal}
+      discardSignal={discardInputSignal}
+      onSaveEdits={finishInputEdits}
+      onUnsavedChangesChange={(hasRows) => (hasUnsavedInputRows = hasRows)}
+    />
+  </article>
+</main>
+
+<style>
+  .content {
+    width: min(100% - 2rem, 1240px);
+    margin-inline: auto;
+    padding: 1rem 0 1.25rem;
+    display: grid;
+    gap: 1rem;
+  }
+
+  .panel-grid {
+    --weight-color: var(--weightLine);
+    display: grid;
+    grid-template-columns: minmax(0, 1.7fr) minmax(0, 0.95fr);
+    gap: 1rem;
+    align-items: stretch;
+  }
+
+  .card {
+    border: 4px solid var(--cardBorder);
+    border-radius: 14px;
+    background: color-mix(in oklab, var(--bgTint) 18%, white 82%);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.16);
+    padding: 0.75rem;
+  }
+
+  .chart-card,
+  .right-col {
+    min-width: 0;
+  }
+
+  .chip-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .icon-action {
+    cursor: pointer;
+  }
+
+  .add-row-button {
+    border: 0;
+    border-radius: 10px;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    margin-left: 0.1rem;
+    background: color-mix(in oklab, var(--headerBg) 88%, white 12%);
+    color: var(--headerText);
+    font-size: 1.15rem;
+    font-weight: 600;
+    line-height: 0;
+    display: inline-grid;
+    place-items: center;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
+  }
+
+  .settings-btn {
+    border: 0;
+    border-radius: 10px;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    background: color-mix(in oklab, var(--headerBg) 88%, white 12%);
+    line-height: 0;
+    cursor: pointer;
+    color: var(--headerText);
+    display: inline-grid;
+    place-items: center;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
+  }
+
+  .settings-btn.active {
+    background: color-mix(in oklab, var(--headerBg) 96%, #f2ca67 4%);
+  }
+
+  .discard-btn {
+    border: 1.5px solid var(--warning);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--warning) 18%, white 82%);
+    color: color-mix(in oklab, var(--warning) 70%, black 30%);
+    font-size: 0.82rem;
+    font-weight: 800;
+    line-height: 1;
+    padding: 0.46rem 0.58rem;
+    cursor: pointer;
+  }
+
+  .discard-btn:hover {
+    background: color-mix(in oklab, var(--warning) 32%, white 68%);
+  }
+
+  .chip,
+  .section-chip {
+    border: 2px solid var(--cardBorder);
+    border-bottom-width: 0;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    background: color-mix(in oklab, var(--headerBg) 92%, white 8%);
+    color: var(--headerText);
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-variant: small-caps;
+    line-height: 1;
+    padding: 0.45rem 0.85rem 0.5rem;
+    margin: 0;
+  }
+
+  .chip {
+    cursor: pointer;
+    opacity: 0.9;
+  }
+
+  .chip.active {
+    opacity: 1;
+  }
+
+  .graph-legend {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.65rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    border-radius: 7px;
+  }
+
+  .legend-item.editing {
+    cursor: pointer;
+    padding: 0.22rem 0.4rem 0.22rem 0.38rem;
+    border: 1.5px solid color-mix(in oklab, var(--cardBorder) 50%, transparent 50%);
+    background: color-mix(in oklab, var(--surface) 55%, transparent);
+  }
+
+  .legend-visual {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+  }
+
+  .legend-visual.muted {
+    opacity: 0.38;
+  }
+
+  .legend-item input[type='checkbox'] {
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 0.9rem;
+    height: 0.9rem;
+  }
+
+  .swatch-line {
+    width: 1.5rem;
+    height: 0;
+    border-top: 3px solid var(--accent);
+    display: inline-block;
+  }
+
+  .swatch-weight,
+  .swatch-weight-prediction {
+    border-top-color: var(--weight-color);
+  }
+
+  .swatch-weight-prediction {
+    border-top-style: dashed;
+  }
+
+  .swatch-system {
+    border-top-color: var(--swatch-color, var(--accent));
+  }
+
+  .swatch-system-svg {
+    width: 1.85rem;
+    height: 0.7rem;
+    overflow: visible;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  .swatch-bar {
+    width: 0.62rem;
+    height: 0.9rem;
+    border-radius: 3px 3px 0 0;
+    background: var(--wellnessBar);
+    display: inline-block;
+  }
+
+  .swatch-dot {
+    width: 0.72rem;
+    height: 0.72rem;
+    border-radius: 999px;
+    background: var(--symptomMarker);
+    display: inline-block;
+  }
+
+  .plot-wrap {
+    padding: 0.25rem 0 0;
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    overflow: hidden;
+  }
+
+  .axis-svg {
+    flex-shrink: 0;
+    display: block;
+    height: 440px;
+    max-width: none;
+  }
+
+  .data-scroll {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .data-svg {
+    display: block;
+    height: 440px;
+    max-width: none;
+  }
+
+  .plot-bg {
+    fill: color-mix(in oklab, var(--surface) 68%, transparent);
+  }
+
+  .grid-lines line {
+    stroke: color-mix(in oklab, var(--cardBorder) 36%, #c5c5c5 64%);
+    stroke-width: 1;
+  }
+
+  .axes line,
+  .date-tick {
+    stroke: color-mix(in oklab, var(--cardBorder) 64%, #707070 36%);
+    stroke-width: 1.4;
+  }
+
+  .weightline {
+    fill: none;
+    stroke: var(--weight-color);
+    stroke-width: 4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .system-line {
+    fill: none;
+    stroke: var(--system-color, var(--accent));
+    stroke-width: 3.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .dashed {
+    stroke-dasharray: 8 7;
+  }
+
+  .weight-point {
+    fill: var(--weight-color);
+    stroke: var(--surface);
+    stroke-width: 1.5;
+  }
+
+  .weight-point.planned {
+    fill: var(--surface);
+    stroke: var(--weight-color);
+    stroke-width: 1.5;
+  }
+
+  .dose-point {
+    fill: var(--system-color, var(--accent));
+    stroke: var(--surface);
+    stroke-width: 1.5;
+  }
+
+  .dose-point.planned {
+    fill: var(--surface);
+    stroke: var(--system-color, var(--accent));
+    stroke-width: 1.5;
+  }
+
+  .wellness-bar {
+    fill: color-mix(in oklab, var(--wellnessBar) 78%, white 22%);
+    opacity: 0.72;
+  }
+
+  .wellness-bar.planned {
+    fill: none;
+    stroke: color-mix(in oklab, var(--wellnessBar) 78%, white 22%);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 2;
+    opacity: 0.85;
+  }
+
+  .today-line {
+    stroke: color-mix(in oklab, var(--text) 55%, transparent 45%);
+    stroke-width: 1.2;
+    stroke-dasharray: 4 5;
+    opacity: 0.7;
+  }
+
+  .symptom-dot {
+    stroke: color-mix(in oklab, var(--text) 45%, transparent 55%);
+    stroke-width: 1;
+  }
+
+  .symptom-letter {
+    fill: var(--text);
+    font-size: 0.58rem;
+    font-weight: 800;
+    text-anchor: middle;
+    dominant-baseline: central;
+    pointer-events: none;
+  }
+
+  .axis-labels text {
+    fill: color-mix(in oklab, var(--text) 78%, transparent 22%);
+    font-size: 0.72rem;
+  }
+
+  .axis-labels .axis-title {
+    font-size: 0.78rem;
+    font-weight: 800;
+    fill: var(--text);
+  }
+
+  .date-label {
+    font-weight: 650;
+  }
+
+  .empty-chart {
+    fill: color-mix(in oklab, var(--text) 65%, transparent 35%);
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .right-col {
+    display: grid;
+    gap: 1rem;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 1.15rem;
+  }
+
+  th,
+  td {
+    padding: 0.4rem 0.45rem;
+    border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 42%, #f2f2f2 58%);
+  }
+
+  .efficacy-scroll {
+    overflow-y: auto;
+    /* header row + 5 body rows at ~2.5rem each */
+    max-height: calc(6 * 2.5rem);
+  }
+
+  .mini-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: color-mix(in oklab, var(--headerBg) 60%, white 40%);
+    color: var(--headerText);
+  }
+
+  .mini-table td,
+  .mini-table th {
+    text-align: center;
+  }
+
+  .mini-table tbody tr:nth-child(even),
+  .kv-table tbody tr:nth-child(even) {
+    background: var(--rowAlt);
+  }
+
+  .status {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 999px;
+    display: inline-grid;
+    place-content: center;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--headerText);
+  }
+
+  .empty-efficacy {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 0.75rem;
+  }
+
+  .status.success {
+    background: var(--success);
+  }
+
+  .status.warn {
+    background: var(--warning);
+  }
+
+  .kv-table th {
+    font-weight: 500;
+    text-align: left;
+  }
+
+  .kv-table td {
+    text-align: right;
+    font-weight: 600;
+  }
+
+  .progress-input {
+    width: 6.5rem;
+    border: 2px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
+    border-radius: 8px;
+    padding: 0.2rem 0.35rem;
+    font: inherit;
+    text-align: right;
+  }
+
+  .empty-value {
+    color: color-mix(in oklab, currentColor 45%, transparent);
+  }
+
+  .inputs-card {
+    padding-top: 0.4rem;
+  }
+
+  @media (max-width: 1280px) {
+    table {
+      font-size: 1rem;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    .panel-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

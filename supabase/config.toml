@@ -1,0 +1,17 @@
+# Supabase local/self-hosted configuration as IaC.
+# Hosted projects should mirror production-only settings via dashboard, API, or `supabase config push`.
+
+project_id = "evolvtrack"
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173/auth/callback"]
+enable_signup = true
+enable_anonymous_sign_ins = false
+minimum_password_length = 8
+
+[auth.email]
+# Keep email/password auth enabled so users can log in with username (mapped email) OR real email.
+enable_signup = true
+enable_confirmations = false

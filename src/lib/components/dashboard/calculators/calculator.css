@@ -1,0 +1,192 @@
+.calculator-card {
+  border: 4px solid var(--cardBorder);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface) 86%, transparent);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.16);
+  padding: 0.75rem;
+}
+
+.calculator-heading {
+  border: 2px solid var(--cardBorder);
+  border-bottom-width: 0;
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+  background: color-mix(in oklab, var(--headerBg) 92%, white 8%);
+  color: white;
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant: small-caps;
+  line-height: 1;
+  padding: 0.45rem 0.85rem 0.5rem;
+  margin: 0 0 0.75rem;
+}
+
+.calculator-body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2rem;
+  align-items: start;
+}
+
+.calculator-body.single-column {
+  grid-template-columns: 1fr;
+}
+
+.calculator-inputs {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.calculator-fields {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.calculator-field {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.calculator-field-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.calculator-field-row,
+.calculator-button-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.calculator-field-row input {
+  width: 6.5rem;
+  padding: 0.38rem 0.5rem;
+  border: 2px solid color-mix(in oklab, var(--cardBorder) 55%, #d4d4d4 45%);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 1.05rem;
+  background: color-mix(in oklab, var(--surface) 90%, transparent);
+}
+
+.calculator-field-row input:focus {
+  outline: none;
+  border-color: var(--cardBorder);
+}
+
+.calculator-field-unit {
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.calculator-primary-button,
+.calculator-reset-button {
+  align-self: start;
+  border: 2px solid var(--cardBorder);
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.36rem 0.75rem;
+  width: fit-content;
+}
+
+.calculator-primary-button {
+  background: color-mix(in oklab, var(--headerBg) 28%, var(--surface) 72%);
+  color: var(--text);
+}
+
+.calculator-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.calculator-reset-button {
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+  color: var(--text);
+}
+
+.calculator-math {
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+  border: 2px solid color-mix(in oklab, var(--cardBorder) 28%, #e0e0e0 72%);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.92rem;
+  font-family: 'Courier New', monospace;
+}
+
+.calculator-math-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.calculator-math-label {
+  font-weight: 700;
+  color: var(--text);
+  min-width: 7.5rem;
+}
+
+.calculator-math-equals {
+  color: var(--muted);
+}
+
+.calculator-math-value {
+  color: var(--text);
+}
+
+.calculator-result {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.45rem 0.9rem;
+  background: color-mix(in oklab, var(--headerBg) 14%, var(--surface) 86%);
+  border: 3px solid var(--cardBorder);
+  border-radius: 12px;
+  width: fit-content;
+}
+
+.calculator-result.over {
+  border-color: var(--warning);
+  background: color-mix(in oklab, var(--warning) 10%, var(--surface) 90%);
+}
+
+.calculator-result-number {
+  font-size: 2.6rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1;
+}
+
+.calculator-result-label {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.calculator-warning,
+.calculator-success {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.calculator-warning {
+  color: color-mix(in oklab, var(--warning) 80%, #333 20%);
+}
+
+.calculator-success {
+  color: color-mix(in oklab, var(--success) 72%, #222 28%);
+}
+
+@media (max-width: 900px) {
+  .calculator-body {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,256 @@
+/**
+ * Background sync orchestration.
+ *
+ * Split into a testable core and a thin glue layer:
+ *  - `createSyncOrchestrator()` is the core — debounce/coalesce logic, the
+ *    pull-then-push cycle, status transitions, the concurrency guard. It has
+ *    no knowledge of the DOM or Realtime, so it is unit-testable with fake
+ *    timers and mocked sync-engine functions.
+ *  - `startSyncOrchestrator()` is the glue — wires window focus/online events,
+ *    the outbox-change nudge, and a Supabase Realtime subscription into the
+ *    core, and tears them all down again. It also re-targets Realtime on auth
+ *    state changes.
+ */
+import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
+import { getAuthenticatedUserId } from '$lib/sync/account-state';
+import { onOutboxChange } from '$lib/domain/repo';
+import { supabase, supabaseUrl } from '$lib/auth/supabase';
+import {
+  connectivity,
+  lastPullAt,
+  lastPushAt,
+  lastSyncError,
+  syncStatus,
+} from '$lib/stores/syncStore';
+
+/** How long to coalesce a burst of triggers into a single sync cycle. */
+export const SYNC_DEBOUNCE_MS = 1200;
+
+export type SyncOrchestrator = {
+  /** Trigger a debounced sync cycle (coalesces rapid calls). */
+  scheduleSync(): void;
+  /** Run a sync cycle immediately, bypassing the debounce. */
+  syncNow(): Promise<void>;
+  /** Stop the orchestrator; pending debounced work is cancelled. */
+  dispose(): void;
+};
+
+function browserSaysOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+function looksLikeNetworkError(error: unknown): boolean {
+  if (!error) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return /network|fetch|ECONN|timeout|offline|reach/i.test(message);
+}
+
+/**
+ * Honest reachability check used by the signed-out path and at startup.
+ * Pings the Supabase auth health endpoint; any HTTP response (even an error
+ * status) proves the network reached a server. Only thrown fetch errors
+ * (DNS, timeout, refused) count as offline.
+ */
+async function probeReachable(): Promise<boolean> {
+  if (typeof fetch === 'undefined') return false;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      await fetch(`${supabaseUrl}/auth/v1/health`, {
+        method: 'GET',
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      return true;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return false;
+  }
+}
+
+export function createSyncOrchestrator(): SyncOrchestrator {
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let running = false;
+  let rerunQueued = false;
+  let disposed = false;
+
+  async function runCycle(): Promise<void> {
+    if (disposed) return;
+    // Set synchronously, before any await, so two callers can't both pass.
+    if (running) {
+      rerunQueued = true;
+      return;
+    }
+    running = true;
+
+    try {
+      if (browserSaysOffline()) {
+        connectivity.set('offline');
+        syncStatus.set('idle');
+        return;
+      }
+      // Signed out (or demo) — nothing to sync; not an error. Leave
+      // connectivity alone: `getUser()` doesn't hit the network when there's
+      // no cached session, so we have no proof of reachability either way.
+      // The browser online/offline events drive connectivity in this path.
+      const userId = await getAuthenticatedUserId();
+      if (!userId) {
+        syncStatus.set('idle');
+        return;
+      }
+
+      syncStatus.set('syncing');
+      // Pull first so local LWW-merges remote state (and reconciles the
+      // outbox), then push whatever is genuinely newer locally.
+      await pullAndApply();
+      lastPullAt.set(new Date());
+      await pushOutbox();
+      lastPushAt.set(new Date());
+      connectivity.set('online');
+      lastSyncError.set(null);
+      syncStatus.set('idle');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastSyncError.set(message);
+      if (looksLikeNetworkError(error) || browserSaysOffline()) {
+        connectivity.set('offline');
+        syncStatus.set('idle');
+      } else {
+        connectivity.set('online');
+        syncStatus.set('error');
+      }
+      console.error('Sync cycle failed:', error);
+    } finally {
+      running = false;
+      if (rerunQueued && !disposed) {
+        rerunQueued = false;
+        void runCycle();
+      }
+    }
+  }
+
+  function scheduleSync(): void {
+    if (disposed) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void runCycle();
+    }, SYNC_DEBOUNCE_MS);
+  }
+
+  async function syncNow(): Promise<void> {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    await runCycle();
+  }
+
+  function dispose(): void {
+    disposed = true;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  }
+
+  return { scheduleSync, syncNow, dispose };
+}
+
+// ── App singleton + glue ───────────────────────────────────────────────────
+
+let appOrchestrator: SyncOrchestrator | null = null;
+
+/**
+ * Wire the orchestrator into the running app: window focus/online, the
+ * outbox-change nudge, and a per-user Realtime subscription that re-targets
+ * itself on auth changes. Returns a teardown function (suitable for an
+ * `onMount` cleanup).
+ */
+export function startSyncOrchestrator(): () => void {
+  appOrchestrator?.dispose();
+  const orchestrator = createSyncOrchestrator();
+  appOrchestrator = orchestrator;
+
+  const trigger = () => orchestrator.scheduleSync();
+
+  // Honest connectivity: an `online` event means the browser thinks the
+  // network came back, but we haven't *confirmed* it reaches Supabase yet —
+  // park at `connecting` until the next cycle resolves.
+  const onOnline = () => {
+    connectivity.set('connecting');
+    trigger();
+  };
+  const onOffline = () => connectivity.set('offline');
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', trigger);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    // If the browser is already offline on startup, surface that immediately
+    // rather than pretending to be `connecting` for the first 1.2s.
+    if (browserSaysOffline()) connectivity.set('offline');
+  }
+  const offOutbox = onOutboxChange(trigger);
+
+  // Realtime just nudges a sync — the client still pulls by cursor. The
+  // subscription is re-targeted whenever the signed-in user changes.
+  let channel: ReturnType<typeof supabase.channel> | null = null;
+  function teardownChannel() {
+    if (channel) {
+      void supabase.removeChannel(channel);
+      channel = null;
+    }
+  }
+  const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
+    teardownChannel();
+    const userId = session?.user?.id;
+    if (!userId) return;
+    channel = supabase
+      .channel('sync-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'sync_changes_encrypted', filter: `user_id=eq.${userId}` },
+        trigger,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'sync_changes_plain', filter: `user_id=eq.${userId}` },
+        trigger,
+      )
+      .subscribe();
+    // Catch up on anything missed while this device was away.
+    orchestrator.scheduleSync();
+  });
+
+  return () => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', trigger);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    }
+    offOutbox();
+    teardownChannel();
+    authSub.subscription.unsubscribe();
+    orchestrator.dispose();
+    if (appOrchestrator === orchestrator) appOrchestrator = null;
+  };
+}
+
+/** Trigger a debounced sync from anywhere in the app (no-op before start). */
+export function requestSync(): void {
+  appOrchestrator?.scheduleSync();
+}
+
+/** Force an immediate sync — used by the manual "Sync now" button. */
+export async function syncNow(): Promise<void> {
+  if (appOrchestrator) {
+    await appOrchestrator.syncNow();
+    return;
+  }
+  // Not started yet (e.g. called from a test harness) — run a one-off.
+  await createSyncOrchestrator().syncNow();
+}

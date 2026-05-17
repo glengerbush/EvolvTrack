@@ -1,0 +1,92 @@
+import { describe, expect, it } from 'vitest';
+import { themes, type DashboardTab, type DashboardTheme, type ThemeName } from './dashboardTheme';
+
+const THEME_NAMES: ThemeName[] = ['default', 'colorblind', 'greyscale'];
+const TAB_NAMES: DashboardTab[] = ['health', 'medication', 'calculators', 'info', 'settings'];
+
+const THEME_KEYS: Array<keyof DashboardTheme> = [
+  'bgTint',
+  'gridLine',
+  'cardBorder',
+  'headerBg',
+  'headerText',
+  'accent',
+  'warning',
+  'success',
+  'tabBase',
+  'tabText',
+  'stripe',
+  'rowAlt',
+  'vialActive',
+  'vialWarning',
+  'weightLine',
+  'wellnessBar',
+  'symptomMarker',
+  'danger',
+];
+
+const isHexColor = (s: string) => /^#[0-9a-fA-F]{3,8}$/.test(s);
+const isRgbaColor = (s: string) => /^rgba?\(/.test(s);
+
+describe('themes structure', () => {
+  it('exposes the three documented theme names', () => {
+    expect(Object.keys(themes).sort()).toEqual([...THEME_NAMES].sort());
+  });
+
+  it.each(THEME_NAMES)('theme %s has every tab', (name) => {
+    expect(Object.keys(themes[name]).sort()).toEqual([...TAB_NAMES].sort());
+  });
+
+  it.each(
+    THEME_NAMES.flatMap((name) => TAB_NAMES.map((tab) => [name, tab] as const)),
+  )('themes.%s.%s has every theme key', (name, tab) => {
+    const theme = themes[name][tab];
+    for (const key of THEME_KEYS) {
+      expect(theme[key], `themes.${name}.${tab}.${key}`).toBeDefined();
+      expect(typeof theme[key]).toBe('string');
+    }
+  });
+
+  it.each(
+    THEME_NAMES.flatMap((name) => TAB_NAMES.map((tab) => [name, tab] as const)),
+  )('themes.%s.%s values are valid CSS colors (hex or rgba)', (name, tab) => {
+    const theme = themes[name][tab];
+    for (const key of THEME_KEYS) {
+      const v = theme[key];
+      expect(isHexColor(v) || isRgbaColor(v), `${name}.${tab}.${key} = "${v}"`).toBe(true);
+    }
+  });
+});
+
+describe('default theme spot checks', () => {
+  it('health tab uses the documented green palette', () => {
+    expect(themes.default.health.headerBg).toBe('#1f7a3a');
+    expect(themes.default.health.bgTint).toBe('#c7d6b8');
+  });
+
+  it('medication tab uses the documented blue/grey palette', () => {
+    expect(themes.default.medication.headerBg).toBe('#6b84a6');
+  });
+});
+
+describe('greyscale theme', () => {
+  // Greyscale should have no hue: hex values should have R == G == B.
+  const isPureGrey = (hex: string) => {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+    const r = hex.slice(1, 3);
+    const g = hex.slice(3, 5);
+    const b = hex.slice(5, 7);
+    return r.toLowerCase() === g.toLowerCase() && g.toLowerCase() === b.toLowerCase();
+  };
+
+  it.each(
+    TAB_NAMES.flatMap((tab) =>
+      (['bgTint', 'cardBorder', 'headerBg', 'accent', 'warning', 'success', 'tabBase'] as const).map(
+        (key) => [tab, key] as const,
+      ),
+    ),
+  )('greyscale.%s.%s is a pure grey hex', (tab, key) => {
+    const v = themes.greyscale[tab][key];
+    expect(isPureGrey(v), `greyscale.${tab}.${key} = "${v}"`).toBe(true);
+  });
+});

@@ -1,0 +1,62 @@
+:root {
+  --bg: #eef1ea;
+  --surface: #ffffff;
+  --surface-soft: #d8e2cb;
+  --surface-grid: #bfc8b8;
+  --text: #111111;
+  --muted: #5f635d;
+  --brand: #1f7a3a;
+  --brand-2: #70c24a;
+  --accent-blue: #7388a6;
+  --accent-orange: #c5682f;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --shadow-soft: 0 10px 25px rgba(0, 0, 0, 0.12);
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --max-app: 1100px;
+  --motion-fast: 140ms;
+  --motion-med: 220ms;
+}
+
+html[data-color-mode='dark'] {
+  --bg: #0f0f10;
+  --surface: #1a1a1c;
+  --surface-soft: #232325;
+  --surface-grid: #2a2a2d;
+  --text: #f0f0f0;
+  --muted: #a8a8a8;
+  --shadow-soft: 0 10px 25px rgba(0, 0, 0, 0.45);
+}
+
+/* Dark-mode background overrides for components that hardcoded near-white
+ * surfaces before the dark theme existed. These selectors match Svelte
+ * components' bare class names — Svelte preserves the original class on the
+ * DOM element in addition to its scoped hash, so a global `.card` selector
+ * still wins against component-scoped styles thanks to the
+ * `html[data-color-mode='dark']` prefix bumping specificity by one. */
+html[data-color-mode='dark'] .card,
+html[data-color-mode='dark'] .panel,
+html[data-color-mode='dark'] .calculator-card,
+html[data-color-mode='dark'] .chart-card,
+html[data-color-mode='dark'] .modal {
+  background: color-mix(in oklab, var(--surface) 92%, transparent);
+  color: var(--text);
+}
+
+/* Tables on dark surfaces get extra contrast on header/even-row backgrounds. */
+html[data-color-mode='dark'] table {
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 1ms;
+    --motion-med: 1ms;
+  }
+}
