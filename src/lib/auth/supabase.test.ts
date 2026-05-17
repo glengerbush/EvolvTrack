@@ -68,20 +68,20 @@ describe('signInWithPassword identifier normalization', () => {
   it('synthesizes a local domain email for username-only identifiers', async () => {
     await signInWithPassword('Alice Smith', 'pw');
     const [arg] = h.signInWithPasswordMock.mock.calls[0];
-    expect(arg.email).toBe('alice-smith@username.evolvtrack.local');
+    expect(arg.email).toBe('alice-smith@users.evolvtrack.com');
     expect(arg.password).toBe('pw');
   });
 
   it('strips leading/trailing punctuation and collapses runs to single dashes', async () => {
     await signInWithPassword('  ___weird!!user??  ', 'pw');
     const [arg] = h.signInWithPasswordMock.mock.calls[0];
-    expect(arg.email).toBe('weird-user@username.evolvtrack.local');
+    expect(arg.email).toBe('weird-user@users.evolvtrack.com');
   });
 
   it('falls back to "user" when normalization strips everything', async () => {
     await signInWithPassword('!!!', 'pw');
     const [arg] = h.signInWithPasswordMock.mock.calls[0];
-    expect(arg.email).toBe('user@username.evolvtrack.local');
+    expect(arg.email).toBe('user@users.evolvtrack.com');
   });
 });
 
@@ -99,7 +99,7 @@ describe('signUpWithPassword', () => {
   it('marks username sign-ups with usedGeneratedEmail=true and a synthetic email', async () => {
     await signUpWithPassword('Alice', 'pw');
     const [arg] = h.signUpMock.mock.calls[0];
-    expect(arg.email).toBe('alice@username.evolvtrack.local');
+    expect(arg.email).toBe('alice@users.evolvtrack.com');
     expect(arg.password).toBe('pw');
     expect(arg.options.data).toMatchObject({
       username: 'alice',

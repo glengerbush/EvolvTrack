@@ -7,7 +7,7 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
 export const supabaseUrl = url || 'https://example.supabase.co';
 
-const USERNAME_AUTH_DOMAIN = 'username.evolvtrack.local';
+const USERNAME_AUTH_DOMAIN = 'users.evolvtrack.com';
 
 function normalizeUsername(username: string) {
   const normalized = username
