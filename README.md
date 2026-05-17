@@ -122,30 +122,15 @@ For a local production deploy, run the same commands from the repository root af
 
 ## Version numbers to keep in mind
 
-  ┌────────────────────────────┬────────────────────────────────────┐
-  │            What            │               Where                │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ App version                │ package.json                       │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ DB_SCHEMA_VERSION          │ src/lib/db/migrations.ts           │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ SYNC_PROTOCOL_VERSION      │ src/lib/sync/protocol.ts           │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ ENCRYPTION_FORMAT_VERSION  │ src/lib/crypto/e2ee.ts             │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ BACKUP_FORMAT_VERSION      │ src/lib/importExport/backup.ts     │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ SPREADSHEET_FORMAT_VERSION │ src/lib/importExport/spreadsheet.ts│
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ keyVersion                 │ per row in Dexie table `encrypted` │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ protocol_version,          │ rows inPostgres tables:            │
-  │ schema_version,            │ `sync_changes_encrypted`           │
-  │ protocol_version,          │ `sync_changes_plain`               │
-  │ schema_version             │ and Dexie:migrationBackfill        │
-  ├────────────────────────────┼────────────────────────────────────┤
-  │ encryption_version,        │ rows inPostgres tables:            │
-  │ encryptionVersion          │ `sync_changes_encrypted`           │
-  │                            │ and Dexie:migrationBackfill        │
-  └────────────────────────────┴────────────────────────────────────┘
+  |            What            |               Where                |
+  |----------------------------|------------------------------------|
+  | App version                | package.json                       |
+  | DB_SCHEMA_VERSION          | src/lib/db/migrations.ts           |
+  | SYNC_PROTOCOL_VERSION      | src/lib/sync/protocol.ts           |
+  | ENCRYPTION_FORMAT_VERSION  | src/lib/crypto/e2ee.ts             |
+  | BACKUP_FORMAT_VERSION      | src/lib/importExport/backup.ts     |
+  | SPREADSHEET_FORMAT_VERSION | src/lib/importExport/spreadsheet.ts|
+  | keyVersion                 | per row in Dexie table `encrypted` |
+  | protocol_version<br> schema_version<br> protocolVersion<br> schemaVersion| rows inPostgres tables:<br> `sync_changes_encrypted`<br> `sync_changes_plain`<br> and Dexie: `migrationBackfill`|
+  | encryption_version<br> encryptionVersion| rows inPostgres tables:<br> `sync_changes_encrypted`<br> and Dexie: `migrationBackfill`|
 
