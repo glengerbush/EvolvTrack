@@ -42,15 +42,22 @@ vi.mock('$lib/domain/repo', () => ({
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
   initializePassphrase: vi.fn(async () => 'SALT'),
+  deriveSessionKey: vi.fn(async () => 'SESSION_KEY'),
   generateRecoveryCodes: vi.fn(() => ['CODE-A', 'CODE-B']),
-  encryptRecord: vi.fn(async (_pp: string, record: unknown) => ({
+  encryptRecord: vi.fn(async (_key: string, record: unknown) => ({
     ciphertext: `ct:${JSON.stringify(record)}`,
     iv: 'iv',
   })),
-  decryptRecord: vi.fn(async (_pp: string, ciphertext: string) => {
+  decryptRecord: vi.fn(async (_key: string, ciphertext: string) => {
     return JSON.parse(ciphertext.replace(/^ct:/, ''));
   }),
   clearPassphraseMaterial: vi.fn(),
+}));
+
+vi.mock('$lib/sync/session-key', () => ({
+  setSessionKey: vi.fn(),
+  clearSession: vi.fn(),
+  getSessionKey: vi.fn(() => 'SESSION_KEY'),
 }));
 
 vi.mock('$lib/sync/account-state', () => ({
@@ -83,10 +90,12 @@ import { db } from '$lib/db/schema';
 import {
   clearPassphraseMaterial,
   decryptRecord,
+  deriveSessionKey,
   encryptRecord,
   generateRecoveryCodes,
   initializePassphrase,
 } from '$lib/crypto/e2ee';
+import { clearSession, setSessionKey } from '$lib/sync/session-key';
 import { clearPullCursor, getPullCursor, setPullCursor } from '$lib/sync/pull-cursor';
 
 beforeEach(() => {
@@ -105,7 +114,10 @@ beforeEach(() => {
   vi.mocked(decryptRecord).mockClear();
   vi.mocked(clearPassphraseMaterial).mockClear();
   vi.mocked(initializePassphrase).mockClear();
+  vi.mocked(deriveSessionKey).mockClear();
   vi.mocked(generateRecoveryCodes).mockClear();
+  vi.mocked(setSessionKey).mockClear();
+  vi.mocked(clearSession).mockClear();
   clearPullCursor();
 });
 

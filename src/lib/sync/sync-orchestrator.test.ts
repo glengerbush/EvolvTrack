@@ -6,6 +6,7 @@ const h = vi.hoisted(() => {
   const pullImpl = vi.fn();
   const pushImpl = vi.fn();
   const getUserIdImpl = vi.fn();
+  const wizardPendingImpl = vi.fn();
   const channelOn = vi.fn();
   const channelSubscribe = vi.fn();
   const removeChannel = vi.fn();
@@ -22,6 +23,7 @@ const h = vi.hoisted(() => {
     pullImpl,
     pushImpl,
     getUserIdImpl,
+    wizardPendingImpl,
     channelOn,
     channelSubscribe,
     removeChannel,
@@ -61,6 +63,10 @@ vi.mock('$lib/auth/supabase', () => ({
   },
 }));
 
+vi.mock('$lib/stores/setupWizardStore', () => ({
+  isSetupWizardPending: () => h.wizardPendingImpl(),
+}));
+
 import { connectivity, syncStatus } from '$lib/stores/syncStore';
 import {
   SYNC_DEBOUNCE_MS,
@@ -82,6 +88,7 @@ beforeEach(() => {
   h.pullImpl.mockReset().mockResolvedValue({ fetched: 0, applied: 0 });
   h.pushImpl.mockReset().mockResolvedValue({ pushed: 0 });
   h.getUserIdImpl.mockReset().mockResolvedValue('user-1');
+  h.wizardPendingImpl.mockReset().mockReturnValue(false);
   h.channelOn.mockReset().mockReturnValue(h.channelObj);
   h.channelSubscribe.mockReset().mockReturnValue(h.channelObj);
   h.channelFn.mockClear();
@@ -147,6 +154,16 @@ describe('createSyncOrchestrator — runCycle', () => {
 
     expect(get(syncStatus)).toBe('idle');
     expect(h.pullImpl).not.toHaveBeenCalled();
+  });
+
+  it('pulls but does not push while the setup wizard is pending', async () => {
+    h.wizardPendingImpl.mockReturnValue(true);
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.pullImpl).toHaveBeenCalledTimes(1);
+    expect(h.pushImpl).not.toHaveBeenCalled();
+    expect(get(syncStatus)).toBe('idle');
   });
 
   it('lands on `error` when a cycle throws, without surfacing it', async () => {

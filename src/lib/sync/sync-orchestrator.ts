@@ -11,15 +11,20 @@
  *    core, and tears them all down again. It also re-targets Realtime on auth
  *    state changes.
  */
+import { get } from 'svelte/store';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
 import { getAuthenticatedUserId } from '$lib/sync/account-state';
+import { refreshLicenseActive } from '$lib/sync/license';
 import { onOutboxChange } from '$lib/domain/repo';
 import { supabase, supabaseUrl } from '$lib/auth/supabase';
+import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
+import { rehydrateSession } from '$lib/sync/session-key';
 import {
   connectivity,
   lastPullAt,
   lastPushAt,
   lastSyncError,
+  licenseActive,
   syncStatus,
 } from '$lib/stores/syncStore';
 
@@ -102,13 +107,37 @@ export function createSyncOrchestrator(): SyncOrchestrator {
         return;
       }
 
+      // Cloud sync is gated by an active license. If we don't know the state
+      // yet, fetch it once. If inactive, skip the cycle entirely — no pull,
+      // no push, no connectivity check, no error. The pill renders this as
+      // 'no-license' rather than 'error'.
+      if (get(licenseActive) === null) {
+        try {
+          await refreshLicenseActive();
+        } catch {
+          // License RPC failed (network/auth). Leave state unknown and let
+          // the cycle proceed; if push then fails for a different reason it
+          // will surface as a normal error.
+        }
+      }
+      if (get(licenseActive) === false) {
+        syncStatus.set('idle');
+        lastSyncError.set(null);
+        return;
+      }
+
       syncStatus.set('syncing');
       // Pull first so local LWW-merges remote state (and reconciles the
       // outbox), then push whatever is genuinely newer locally.
       await pullAndApply();
       lastPullAt.set(new Date());
-      await pushOutbox();
-      lastPushAt.set(new Date());
+      // Setup wizard gates push so a freshly signed-up user can opt into
+      // E2EE before any plaintext leaves the device. Pull stays on so the
+      // wizard can react to whatever already exists on the account.
+      if (!isSetupWizardPending()) {
+        await pushOutbox();
+        lastPushAt.set(new Date());
+      }
       connectivity.set('online');
       lastSyncError.set(null);
       syncStatus.set('idle');
@@ -172,6 +201,10 @@ let appOrchestrator: SyncOrchestrator | null = null;
  */
 export function startSyncOrchestrator(): () => void {
   appOrchestrator?.dispose();
+  // Restore a persisted E2EE session key (if the user opted in via the unlock
+  // modal) before any sync attempt — otherwise the first cycle would skip with
+  // `locked` and the unlock banner would flash on every refresh.
+  rehydrateSession();
   const orchestrator = createSyncOrchestrator();
   appOrchestrator = orchestrator;
 
@@ -208,6 +241,9 @@ export function startSyncOrchestrator(): () => void {
   const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
     teardownChannel();
     const userId = session?.user?.id;
+    // Invalidate the license-active cache on any auth transition so the next
+    // sync cycle re-fetches for the new user (or skips entirely if signed out).
+    licenseActive.set(null);
     if (!userId) return;
     channel = supabase
       .channel('sync-changes')

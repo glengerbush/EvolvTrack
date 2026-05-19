@@ -3,8 +3,8 @@
   import { resolve } from '$app/paths';
   import { dev } from '$app/environment';
   import { onMount } from 'svelte';
-  import { bulkUpdateInjections, getProfile, getProfileSyncMode } from '$lib/domain/repo';
-  import type { E2EEMigrationState, InjectionEntry, Medication, SyncMode } from '$lib/domain/types';
+  import { bulkUpdateInjections, bulkUpdatePrescriptions, getProfile, getProfileSyncMode } from '$lib/domain/repo';
+  import type { E2EEMigrationState, InjectionEntry, Medication, Prescription, SyncMode } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
   import ThemeTuner from '$lib/components/settings/ThemeTuner.svelte';
@@ -15,10 +15,16 @@
     startE2EEDisableMigration,
     type E2EEMigrationRunResult,
   } from '$lib/sync/e2ee-migration';
+  import { generateRecoveryCodes } from '$lib/crypto/e2ee';
+  import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
+  import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
   import type { ColorModePreference, ThemeName } from '$lib/theme/dashboardTheme';
   import { weightUnit } from '$lib/stores/unitStore';
   import { isDemoMode } from '$lib/stores/demoStore';
+  import { authState } from '$lib/stores/authStore';
+  import { clearAllData } from '$lib/domain/repo';
+  import { deleteAccountAndClearLocalData } from '$lib/auth/supabase';
   import { downloadBackup } from '$lib/importExport/backup';
   import { downloadOdsSpreadsheet } from '$lib/importExport/spreadsheet';
   import {
@@ -39,6 +45,13 @@
     { value: 'system', label: 'System' },
   ];
 
+  /** Optional whitelist of cards to render. When null (the default), every
+   *  card is shown. Used by the admin settings surface, which only wants
+   *  Appearance and Change password. */
+  type Section = 'appearance' | 'units' | 'import' | 'e2ee' | 'password' | 'identity' | 'license' | 'danger';
+  let { only = null }: { only?: Section[] | null } = $props();
+  const showSection = (name: Section) => !only || only.includes(name);
+
   let syncMode = $state<SyncMode>('plain');
   let e2eeMigration = $state<E2EEMigrationState | undefined>();
   let e2eeRequested = $state(false);
@@ -52,11 +65,14 @@
   let currentPassword = $state('');
   let newPassword = $state('');
   let codes = $state<string[]>([]);
+  let disableModalOpen = $state(false);
+  let disableError = $state<string | null>(null);
   let status = $state('');
   let exportBusy = $state(false);
   let importBusy = $state(false);
   let importMode = $state<ImportMode>('merge');
   let pendingMedFixup = $state<InjectionEntry[]>([]);
+  let pendingVialFixup = $state<Prescription[]>([]);
 
   type ImportStatusKind = 'idle' | 'pending' | 'success' | 'warning' | 'error';
   let importStatus = $state<{ kind: ImportStatusKind; message: string }>({ kind: 'idle', message: '' });
@@ -68,7 +84,11 @@
   const e2eeEnableMigrating = $derived(syncMode === 'migrating_to_e2ee');
   const e2eeDisableMigrating = $derived(syncMode === 'migrating_to_plain');
   const e2eeToggleChecked = $derived(syncMode !== 'plain' || e2eeRequested);
-  const e2eeToggleLocked = $derived(syncMode !== 'plain' || e2eeBusy);
+  // Locked only while a migration is mid-flight. In steady-state 'e2ee' the
+  // checkbox is unlock-able — unchecking opens the confirm-disable modal.
+  const e2eeToggleLocked = $derived(
+    syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain' || e2eeBusy,
+  );
   const syncModeLabel = $derived(
     syncMode === 'e2ee'
       ? 'Encrypted'
@@ -90,17 +110,68 @@
     e2eeRequested = syncMode !== 'plain';
   }
 
+  function showRecoveryCodes(next: string[]) {
+    codes = next;
+  }
+
+  function dismissRecoveryCodes() {
+    // Codes are deliberately not persisted. Wiping the in-memory list when
+    // the modal closes means the only way to see them again is to generate
+    // a fresh set, which invalidates anything written down before.
+    codes = [];
+  }
+
+  function generateAndShowRecoveryCodes() {
+    if (codes.length && !confirm(
+      'Generate a new set of recovery codes? The previous codes will be replaced.',
+    )) return;
+    showRecoveryCodes(generateRecoveryCodes());
+  }
+
   function handleE2eeCheckbox(checked: boolean) {
-    if (syncMode !== 'plain') return; // can't uncheck once enabled or migrating
-    e2eeRequested = checked;
-    if (!checked) { passphrase = ''; passphraseConfirm = ''; }
+    if (syncMode === 'plain') {
+      e2eeRequested = checked;
+      if (!checked) { passphrase = ''; passphraseConfirm = ''; }
+      return;
+    }
+    if (syncMode === 'e2ee' && !checked) {
+      // Don't flip e2eeRequested yet — the modal collects the passphrase and
+      // runs the disable migration on confirm. If the user cancels, the
+      // controlled checkbox snaps back to checked on the next render.
+      disableError = null;
+      disableModalOpen = true;
+    }
+  }
+
+  function cancelDisableE2EE() {
+    if (e2eeBusy) return;
+    disableModalOpen = false;
+    disableError = null;
+  }
+
+  async function confirmDisableE2EE(enteredPassphrase: string) {
+    e2eeBusy = true;
+    disableError = null;
+    status = 'Starting encryption disable...';
+    try {
+      const result = await startE2EEDisableMigration(enteredPassphrase);
+      applyMigrationResult(result);
+      // Close the modal whether the disable completed or paused — the relevant
+      // UI moves into the migration-status branch and the user can resume there.
+      disableModalOpen = false;
+    } catch (error) {
+      disableError = (error as Error).message;
+      status = disableError;
+    } finally {
+      e2eeBusy = false;
+    }
   }
 
   function applyMigrationResult(result: E2EEMigrationRunResult) {
     syncMode = result.syncMode;
     e2eeMigration = result.migration;
     e2eeRequested = result.syncMode !== 'plain';
-    if (result.recoveryCodes) codes = result.recoveryCodes;
+    if (result.recoveryCodes) showRecoveryCodes(result.recoveryCodes);
     if (result.syncMode === 'plain') codes = [];
     passphrase = '';
     passphraseConfirm = '';
@@ -122,24 +193,10 @@
 
   async function enableE2EE() {
     if (passphrase !== passphraseConfirm) { status = 'Passphrases do not match.'; return; }
-    if (!confirm('Before changing encryption, download a fresh backup from Import / Export. Continue with E2EE setup?')) return;
     e2eeBusy = true;
     status = 'Starting encryption upgrade...';
     try {
       applyMigrationResult(await startE2EEMigration(passphrase));
-    } catch (error) {
-      status = (error as Error).message;
-    } finally {
-      e2eeBusy = false;
-    }
-  }
-
-  async function disableE2EE() {
-    if (!confirm('Before turning off E2EE, download a fresh backup from Import / Export. This will upload decrypted sync data to Supabase. Continue?')) return;
-    e2eeBusy = true;
-    status = 'Starting encryption disable...';
-    try {
-      applyMigrationResult(await startE2EEDisableMigration(passphrase));
     } catch (error) {
       status = (error as Error).message;
     } finally {
@@ -228,6 +285,7 @@
         message: `${importResultSummary(result)}${warningText}`,
       };
       pendingMedFixup = result.data.injections.filter((injection) => !injection.medication);
+      pendingVialFixup = result.data.prescriptions.filter((prescription) => !prescription.type);
     } catch (error) {
       importStatus = { kind: 'error', message: (error as Error).message };
     } finally {
@@ -242,9 +300,17 @@
 
   async function applyMedicationFixup(medication: Medication) {
     const injections = pendingMedFixup;
+    const vials = pendingVialFixup;
     pendingMedFixup = [];
-    await bulkUpdateInjections(injections.map((i) => i.id), { medication });
-    const label = `${injections.length} dose${injections.length === 1 ? '' : 's'}`;
+    pendingVialFixup = [];
+    await Promise.all([
+      bulkUpdateInjections(injections.map((i) => i.id), { medication }),
+      bulkUpdatePrescriptions(vials.map((v) => v.id), { type: medication }),
+    ]);
+    const parts: string[] = [];
+    if (injections.length) parts.push(`${injections.length} dose${injections.length === 1 ? '' : 's'}`);
+    if (vials.length) parts.push(`${vials.length} vial${vials.length === 1 ? '' : 's'}`);
+    const label = parts.join(' and ');
     importStatus = {
       kind: importStatus.kind === 'idle' ? 'success' : importStatus.kind,
       message: `${importStatus.message} Set ${label} to ${medication}.`.trim(),
@@ -253,12 +319,74 @@
 
   function dismissMedicationFixup() {
     pendingMedFixup = [];
+    pendingVialFixup = [];
   }
 
   async function exitDemo() {
-    await isDemoMode.disable();
+    // Navigate first so the Dashboard tears down before the demo badge
+    // disappears and seeded rows blink out.
     await goto(resolve('/'));
+    await isDemoMode.disable();
   }
+
+  let dangerBusy = $state(false);
+  const isSignedIn = $derived($authState.kind === 'signed-in');
+
+  async function clearLocalData() {
+    if (!confirm('This permanently deletes all data on this device. Continue?')) return;
+    dangerBusy = true;
+    try {
+      await clearAllData();
+      status = 'Local data cleared.';
+      await goto(resolve('/'));
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      dangerBusy = false;
+    }
+  }
+
+  async function deleteAccount() {
+    const user = $authState.kind === 'signed-in' ? $authState.user : null;
+    if (!user) {
+      status = 'You must be signed in to delete your account.';
+      return;
+    }
+    // Type-to-confirm: ask the user to type the local part of their email
+    // (username for username-only accounts). Avoids accidental destruction
+    // from a mis-click on a single OK button.
+    const email = user.email ?? '';
+    const handle = email.split('@')[0] ?? '';
+    if (!handle) {
+      status = 'Could not determine your account identifier. Contact support.';
+      return;
+    }
+    const typed = window.prompt(
+      `Permanently delete your account and all synced data.\n\n` +
+      `This is irreversible. Your license (if any) becomes unclaimed and the ` +
+      `code is unrecoverable.\n\n` +
+      `Type "${handle}" to confirm.`,
+      '',
+    );
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== handle.toLowerCase()) {
+      status = 'Confirmation text did not match. Account not deleted.';
+      return;
+    }
+
+    dangerBusy = true;
+    status = 'Deleting account…';
+    try {
+      await deleteAccountAndClearLocalData();
+      // The cleanup wipes local state; navigate to the landing page.
+      window.location.href = '/';
+    } catch (error) {
+      status = `Could not delete account: ${(error as Error).message}`;
+    } finally {
+      dangerBusy = false;
+    }
+  }
+
 </script>
 
 <section
@@ -276,8 +404,9 @@
     </div>
   {/if}
 
+  {#if showSection('appearance')}
   <div class="card-wrap">
-    <h2>Appearance & Units</h2>
+    <h2>{showSection('units') ? 'Appearance & Units' : 'Appearance'}</h2>
     <div class="panel">
       <p class="theme-label">Color theme</p>
       <div class="theme-selector" role="group" aria-label="Color theme">
@@ -311,120 +440,32 @@
         {/if}
       </p>
 
-      <p class="theme-label" style="margin-top:0.8rem">Weight unit</p>
-      <div class="theme-selector" role="group" aria-label="Weight unit">
-        <button
-          type="button"
-          class="theme-btn"
-          class:selected={$weightUnit === 'lbs'}
-          onclick={() => weightUnit.set('lbs')}
-        >lbs</button>
-        <button
-          type="button"
-          class="theme-btn"
-          class:selected={$weightUnit === 'kg'}
-          onclick={() => weightUnit.set('kg')}
-        >kg</button>
-      </div>
+      {#if showSection('units')}
+        <p class="theme-label" style="margin-top:0.8rem">Weight unit</p>
+        <div class="theme-selector" role="group" aria-label="Weight unit">
+          <button
+            type="button"
+            class="theme-btn"
+            class:selected={$weightUnit === 'lbs'}
+            onclick={() => weightUnit.set('lbs')}
+          >lbs</button>
+          <button
+            type="button"
+            class="theme-btn"
+            class:selected={$weightUnit === 'kg'}
+            onclick={() => weightUnit.set('kg')}
+          >kg</button>
+        </div>
+      {/if}
 
       {#if dev}
         <ThemeTuner />
       {/if}
     </div>
   </div>
-
-  {#if !$isDemoMode}
-    <LicenseSettings />
   {/if}
 
-  <div class="card-wrap">
-    <h2>End-to-end encryption (E2EE)</h2>
-    <div class="panel">
-      {#if $isDemoMode}
-        <p class="demo-block-msg">E2EE cannot be enabled in Demo mode. <a href={resolve('/auth')}>Create an account</a> to enable encryption.</p>
-      {:else}
-        <div class="sync-mode-row">
-          <span class="sync-mode-pill" data-mode={syncMode}>{syncModeLabel}</span>
-          {#if e2eeMigration?.updatedAt}
-            <span class="sync-mode-meta">updated {new Date(e2eeMigration.updatedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>
-          {/if}
-        </div>
-        <label class="e2ee-toggle">
-          <input
-            type="checkbox"
-            checked={e2eeToggleChecked}
-            disabled={e2eeToggleLocked}
-            onchange={(e) => handleE2eeCheckbox(e.currentTarget.checked)}
-          />
-          Enable end-to-end encryption
-        </label>
-        <div class="backup-reminder">
-          <p class="toggle-hint">Download a backup before changing encryption settings.</p>
-          <button class="btn btn-primary" disabled={exportBusy} onclick={exportBackupFile}>Download JSON backup</button>
-        </div>
-
-        {#if e2eeRequested && syncMode === 'plain'}
-          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Create passphrase" /></label>
-          <label>
-            Confirm passphrase
-            <input bind:value={passphraseConfirm} type="password" placeholder="Confirm passphrase" class:mismatch={!passphraseMatch} />
-            {#if !passphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
-          </label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !passphraseMatch} onclick={enableE2EE}>
-            {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery codes'}
-          </button>
-        {:else if e2eeEnableMigrating}
-          <div class="migration-status">
-            <p class="toggle-hint">
-              Encrypted upload is paused until this migration finishes.
-            </p>
-            {#if e2eeMigration?.encryptedEventCount != null}
-              <p class="toggle-hint">{e2eeMigration.encryptedEventCount} local records prepared for encrypted sync.</p>
-            {/if}
-            {#if e2eeMigration?.lastError}
-              <p class="field-error">{e2eeMigration.lastError}</p>
-            {/if}
-          </div>
-          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Passphrase" /></label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeE2EE}>
-            {e2eeBusy ? 'Resuming...' : 'Resume encryption upgrade'}
-          </button>
-        {:else if e2eeDisableMigrating}
-          <div class="migration-status">
-            <p class="toggle-hint">
-              Plaintext upload is paused until this migration finishes. Encrypted sync data will be deleted after plaintext upload succeeds.
-            </p>
-            {#if e2eeMigration?.plaintextEventCount != null}
-              <p class="toggle-hint">{e2eeMigration.plaintextEventCount} plaintext events prepared.</p>
-            {/if}
-            {#if e2eeMigration?.lastError}
-              <p class="field-error">{e2eeMigration.lastError}</p>
-            {/if}
-          </div>
-          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeDisableE2EE}>
-            {e2eeBusy ? 'Resuming...' : 'Resume turning off E2EE'}
-          </button>
-        {:else if e2eeEnabled}
-          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
-          <label>New passphrase<input bind:value={newPassphrase} type="password" placeholder="New passphrase" /></label>
-          <label>
-            Confirm new passphrase
-            <input bind:value={newPassphraseConfirm} type="password" placeholder="Confirm new passphrase" class:mismatch={!newPassphraseMatch} />
-            {#if !newPassphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
-          </label>
-          <button class="btn btn-primary" disabled={!passphrase || !newPassphrase || !newPassphraseMatch} onclick={changePassphrase}>Rotate passphrase</button>
-          <div class="disable-e2ee">
-            <p class="toggle-hint">Turning off E2EE uploads decrypted sync data to Supabase, then removes encrypted sync events.</p>
-            <button class="btn btn-ghost" disabled={e2eeBusy || !passphrase} onclick={disableE2EE}>
-              {e2eeBusy ? 'Turning off...' : 'Turn off E2EE'}
-            </button>
-          </div>
-        {/if}
-      {/if}
-    </div>
-  </div>
-
+  {#if showSection('import')}
   <div class="card-wrap">
     <h2>Import / Export</h2>
     <div class="panel">
@@ -548,10 +589,105 @@
       </div>
     </div>
   </div>
+  {/if}
 
-  {#if !$isDemoMode}
+  {#if showSection('e2ee')}
+  <div class="card-wrap">
+    <h2>End-to-end encryption (E2EE)</h2>
+    <div class="panel">
+      {#if $isDemoMode}
+        <p class="demo-block-msg">E2EE cannot be enabled in Demo mode. <a href={resolve('/auth')}>Create an account</a> to enable encryption.</p>
+      {:else}
+        <div class="sync-mode-row">
+          <span class="sync-mode-pill" data-mode={syncMode}>{syncModeLabel}</span>
+          {#if e2eeMigration?.updatedAt}
+            <span class="sync-mode-meta">updated {new Date(e2eeMigration.updatedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>
+          {/if}
+        </div>
+        <label class="e2ee-toggle">
+          <input
+            type="checkbox"
+            checked={e2eeToggleChecked}
+            disabled={e2eeToggleLocked}
+            onchange={(e) => handleE2eeCheckbox(e.currentTarget.checked)}
+          />
+          Enable end-to-end encryption
+        </label>
+        <div class="backup-reminder">
+          <p class="toggle-hint">
+            <strong>Tip:</strong> download a backup from <em>Import / Export</em> above before
+            changing encryption settings — there's no undo for a stuck migration.
+          </p>
+        </div>
+
+        {#if e2eeRequested && syncMode === 'plain'}
+          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Create passphrase" /></label>
+          <label>
+            Confirm passphrase
+            <input bind:value={passphraseConfirm} type="password" placeholder="Confirm passphrase" class:mismatch={!passphraseMatch} />
+            {#if !passphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
+          </label>
+          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !passphraseMatch} onclick={enableE2EE}>
+            {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery codes'}
+          </button>
+        {:else if e2eeEnableMigrating}
+          <div class="migration-status">
+            <p class="toggle-hint">
+              Encrypted upload is paused until this migration finishes.
+            </p>
+            {#if e2eeMigration?.encryptedEventCount != null}
+              <p class="toggle-hint">{e2eeMigration.encryptedEventCount} local records prepared for encrypted sync.</p>
+            {/if}
+            {#if e2eeMigration?.lastError}
+              <p class="field-error">{e2eeMigration.lastError}</p>
+            {/if}
+          </div>
+          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Passphrase" /></label>
+          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeE2EE}>
+            {e2eeBusy ? 'Resuming...' : 'Resume encryption upgrade'}
+          </button>
+        {:else if e2eeDisableMigrating}
+          <div class="migration-status">
+            <p class="toggle-hint">
+              Plaintext upload is paused until this migration finishes. Encrypted sync data will be deleted after plaintext upload succeeds.
+            </p>
+            {#if e2eeMigration?.plaintextEventCount != null}
+              <p class="toggle-hint">{e2eeMigration.plaintextEventCount} plaintext events prepared.</p>
+            {/if}
+            {#if e2eeMigration?.lastError}
+              <p class="field-error">{e2eeMigration.lastError}</p>
+            {/if}
+          </div>
+          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
+          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeDisableE2EE}>
+            {e2eeBusy ? 'Resuming...' : 'Resume turning off E2EE'}
+          </button>
+        {:else if e2eeEnabled}
+          <div class="recovery-row">
+            <button class="btn btn-ghost" type="button" onclick={generateAndShowRecoveryCodes}>
+              Generate recovery codes
+            </button>
+            <p class="toggle-hint">
+              Used when you forget your passphrase. Generate a fresh set anytime — the previous set stops working when you do.
+            </p>
+          </div>
+          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
+          <label>New passphrase<input bind:value={newPassphrase} type="password" placeholder="New passphrase" /></label>
+          <label>
+            Confirm new passphrase
+            <input bind:value={newPassphraseConfirm} type="password" placeholder="Confirm new passphrase" class:mismatch={!newPassphraseMatch} />
+            {#if !newPassphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
+          </label>
+          <button class="btn btn-primary" disabled={!passphrase || !newPassphrase || !newPassphraseMatch} onclick={changePassphrase}>Rotate passphrase</button>
+        {/if}
+      {/if}
+    </div>
+  </div>
+  {/if}
+
+  {#if showSection('password') && !$isDemoMode}
     <div class="card-wrap">
-      <h2>Change password</h2>
+      <h2>Change login password</h2>
       <div class="panel">
         <label>Current password<input bind:value={currentPassword} type="password" placeholder="Current password" /></label>
         <label>New password<input bind:value={newPassword} type="password" placeholder="New password" /></label>
@@ -560,7 +696,7 @@
     </div>
   {/if}
 
-  {#if !$isDemoMode}
+  {#if showSection('identity') && !$isDemoMode}
     <div class="card-wrap">
       <h2>Change username / email</h2>
       <div class="panel">
@@ -569,25 +705,64 @@
         <button class="btn btn-primary" onclick={updateIdentity}>Update account identity</button>
       </div>
     </div>
-
   {/if}
 
-  {#if codes.length}
-    <h3>Recovery Codes</h3>
-    <ul>
-      {#each codes as code (code)}
-        <li><code>{code}</code></li>
-      {/each}
-    </ul>
+  {#if showSection('license') && !$isDemoMode}
+    <LicenseSettings />
   {/if}
+
+  {#if showSection('danger') && !$isDemoMode}
+    <div class="card-wrap">
+      <h2>{isSignedIn ? 'Delete account' : 'Clear local data'}</h2>
+      <div class="panel danger-panel">
+        {#if isSignedIn}
+          <p class="toggle-hint">
+            Deletes your EvolvTrack account and all synced data. This cannot be undone.
+          </p>
+          <button
+            class="btn btn-danger"
+            type="button"
+            disabled={dangerBusy}
+            onclick={deleteAccount}
+          >{dangerBusy ? 'Deleting…' : 'Delete account'}</button>
+        {:else}
+          <p class="toggle-hint">
+            Wipes every weight, dose, and prescription stored on this device.
+            This cannot be undone — download a backup first if you might want this data back.
+          </p>
+          <button
+            class="btn btn-danger"
+            type="button"
+            disabled={dangerBusy}
+            onclick={clearLocalData}
+          >{dangerBusy ? 'Clearing…' : 'Clear local data'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <small>{status}</small>
 </section>
 
-{#if pendingMedFixup.length}
+{#if pendingMedFixup.length || pendingVialFixup.length}
   <ImportMedicationModal
-    count={pendingMedFixup.length}
+    doseCount={pendingMedFixup.length}
+    vialCount={pendingVialFixup.length}
     onConfirm={applyMedicationFixup}
     onCancel={dismissMedicationFixup}
+  />
+{/if}
+
+{#if codes.length}
+  <RecoveryCodesModal {codes} onClose={dismissRecoveryCodes} />
+{/if}
+
+{#if disableModalOpen}
+  <DisableE2EEModal
+    busy={e2eeBusy}
+    error={disableError}
+    onConfirm={confirmDisableE2EE}
+    onCancel={cancelDisableE2EE}
   />
 {/if}
 
@@ -717,6 +892,16 @@
     padding-left: 1rem;
   }
 
+  .recovery-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    align-items: flex-start;
+    margin-bottom: 0.4rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 24%, transparent 76%);
+    padding-bottom: 0.5rem;
+  }
+
   small {
     color: #555;
   }
@@ -744,6 +929,18 @@
   .file-picker input:disabled + span {
     cursor: not-allowed;
     opacity: 0.55;
+  }
+
+  .settings-panel .btn-danger {
+    background: color-mix(in oklab, var(--danger, #b91c1c) 88%, white 12%);
+    color: white;
+    border: 2px solid color-mix(in oklab, var(--danger, #b91c1c) 70%, black 30%);
+    opacity: 1;
+    width: fit-content;
+  }
+
+  .danger-panel {
+    border-color: color-mix(in oklab, var(--danger, #b91c1c) 70%, var(--cardBorder) 30%);
   }
 
   .theme-label {
@@ -980,13 +1177,13 @@
     gap: 0.35rem;
   }
 
-  .backup-reminder,
-  .disable-e2ee {
+  .backup-reminder {
     display: grid;
     gap: 0.45rem;
     justify-items: start;
-    border-top: 1px solid color-mix(in oklab, var(--cardBorder) 24%, transparent 76%);
-    padding-top: 0.5rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 24%, transparent 76%);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.4rem;
   }
 
   .e2ee-toggle {

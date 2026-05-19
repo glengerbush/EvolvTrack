@@ -31,6 +31,14 @@ export const connectivity = writable<Connectivity>('connecting');
 /** Last error message from a sync cycle (cleared on success). */
 export const lastSyncError = writable<string | null>(null);
 
+/**
+ * Whether the current signed-in user has an active license.
+ *  - `null`  — unknown (signed out, or not fetched yet)
+ *  - `true`  — license is active; cloud sync is allowed
+ *  - `false` — no/expired/revoked license; orchestrator skips sync entirely
+ */
+export const licenseActive = writable<boolean | null>(null);
+
 /** Timestamps of the last successful pull and push, kept separately because
  *  either can be stuck while the other works (e.g. RLS denies inserts but
  *  selects succeed). */

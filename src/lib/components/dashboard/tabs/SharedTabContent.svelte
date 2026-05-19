@@ -1,13 +1,24 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
+  import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
+  import HelpBadge from '$lib/components/icons/HelpBadge.svelte';
   import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
   import { startWeight, currentWeight, goalWeight } from '$lib/stores/progressStore';
+  import { rawPrescriptions } from '$lib/stores/medicationStore';
   import { healthEntries } from '$lib/stores/healthStore';
   import { symptomColors } from '$lib/stores/symptomStore';
   import { weightUnit, toStoredLbs, type WeightUnit } from '$lib/stores/unitStore';
-  import { buildChartModel, CHART, GRAPH_SERIES, PLOT, type GraphSeriesKey } from '$lib/utils/chartModel';
+  import {
+    buildChartModel,
+    CHART,
+    GRAPH_SERIES,
+    PLOT,
+    type ChartXRange,
+    type GraphSeriesKey,
+  } from '$lib/utils/chartModel';
   import { localDateKey } from '$lib/utils/dateKeys';
   import { lbsToDisplayNum } from '$lib/utils/format';
   import type { DrugShape } from '$lib/utils/pharmacokinetics';
@@ -27,9 +38,39 @@
     }
   }
 
-  const initialCostPerPound = 13.5;
-
   const hiddenGraphSeries = new SvelteSet<GraphSeriesKey>();
+
+  type XRangePreset = '1w' | '4w' | '12w' | 'all';
+  const X_RANGE_PRESETS: { key: XRangePreset; label: string; range: ChartXRange }[] = [
+    { key: '1w', label: '1W', range: { visibleDays: 7 } },
+    { key: '4w', label: '4W', range: { visibleDays: 28 } },
+    { key: '12w', label: '12W', range: { visibleDays: 84 } },
+    { key: 'all', label: 'All', range: 'all' },
+  ];
+  let xRangeChoice = $state<XRangePreset>('4w');
+  const xRange = $derived(
+    X_RANGE_PRESETS.find((p) => p.key === xRangeChoice)?.range ?? 'all',
+  );
+
+  // Viewport width of the scrollable plot area in CSS pixels. Tracked so the
+  // chart can compute pixels-per-day from the selected x-range preset.
+  let viewportPlotWidth = $state(0);
+
+  function attachViewportObserver(el: HTMLDivElement) {
+    dataScrollEl = el;
+    viewportPlotWidth = el.clientWidth;
+    const observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (Math.abs(w - viewportPlotWidth) > 0.5) viewportPlotWidth = w;
+    });
+    observer.observe(el);
+    return {
+      destroy() {
+        observer.disconnect();
+        if (dataScrollEl === el) dataScrollEl = null;
+      },
+    };
+  }
 
   let {
     active = true,
@@ -54,8 +95,8 @@
   let progressBaseStartWeightLbs = $state<number | null>($startWeight);
   let progressBaseGoalWeightLbs = $state<number | null>($goalWeight);
   let progressDraftUnit = $state<WeightUnit>($weightUnit);
-  let costPerPound = $state(initialCostPerPound);
   let progressCardRegion: HTMLElement | null = null;
+  let legendRegion: HTMLElement | null = null;
   let dataScrollEl: HTMLDivElement | null = null;
   let hasAutoScrolled = false;
   let lastNotifiedUnsavedChanges = false;
@@ -68,6 +109,28 @@
       if (dataScrollEl) dataScrollEl.scrollLeft = dataScrollEl.scrollWidth;
     });
   });
+
+  /**
+   * Switch the visible-window preset while keeping the right-most visible date
+   * pinned at the right edge. We capture the anchor date from the OLD model's
+   * geometry, swap the preset, then use the NEW model's geometry to position
+   * scrollLeft so the same date lands at the right edge again.
+   */
+  async function selectXRange(next: XRangePreset) {
+    if (next === xRangeChoice) return;
+    const el = dataScrollEl;
+    let anchorDate = null;
+    if (el && chartModel.hasAnyData) {
+      anchorDate = chartModel.dateForCssX(el.scrollLeft + el.clientWidth);
+    }
+    xRangeChoice = next;
+    await tick();
+    if (!el || !anchorDate) return;
+    const targetX = chartModel.cssXForDate(anchorDate);
+    if (Number.isFinite(targetX)) {
+      el.scrollLeft = Math.max(0, targetX - el.clientWidth);
+    }
+  }
 
   $effect(() => {
     if (active) return;
@@ -100,6 +163,8 @@
       $currentWeight != null ? lbsToDisplayNum(String($currentWeight), $weightUnit) : 180,
       todayKey,
       hiddenGraphSeries,
+      xRange,
+      viewportPlotWidth > 0 ? viewportPlotWidth : undefined,
     ),
   );
   type LegendItem = {
@@ -139,6 +204,67 @@
   const effectiveRightTicks = $derived(showRightAxis ? chartModel.rightTicks : chartModel.leftTicks);
   const effectiveLeftLabel = $derived(showLeftAxis ? chartModel.leftAxisLabel : chartModel.rightAxisLabel);
   const effectiveRightLabel = $derived(showRightAxis ? chartModel.rightAxisLabel : chartModel.leftAxisLabel);
+
+  // ---- Crosshair tracking ------------------------------------------------
+  // hoverY is in viewBox / CSS-pixel space (the data-svg's CSS height equals
+  // its viewBox height, so the two are 1:1). hoverDate is snapped to the
+  // nearest day column under the cursor.
+  let hoverY = $state<number | null>(null);
+  let hoverDate = $state<import('$lib/domain/types').IsoDate | null>(null);
+  let hoverDose = $state<{
+    label: string;
+    color: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const crosshairActive = $derived(hoverY !== null && hoverDate !== null);
+  // Format crosshair values for the axis chips. Left axis is weight (1 decimal
+  // looks right for both lb and kg); right axis is mg in system or wellness,
+  // both of which are best read as integers.
+  const hoverValueLeft = $derived(
+    hoverY != null && showLeftAxis ? chartModel.valueLeftForY(hoverY) : null,
+  );
+  const hoverValueRight = $derived(
+    hoverY != null && showRightAxis ? chartModel.valueRightForY(hoverY) : null,
+  );
+  const showMedicationInTooltip = $derived(chartModel.systemSeries.length > 1);
+
+  function onPlotMouseMove(event: MouseEvent) {
+    if (!dataScrollEl || !chartModel.hasAnyData) return;
+    const rect = dataScrollEl.getBoundingClientRect();
+    const cssX = event.clientX - rect.left + dataScrollEl.scrollLeft;
+    const cssY = event.clientY - rect.top;
+    if (cssY < PLOT.top || cssY > PLOT.bottom) {
+      hoverY = null;
+      hoverDate = null;
+      return;
+    }
+    hoverY = cssY;
+    hoverDate = chartModel.dateForCssX(cssX);
+  }
+
+  function clearCrosshair() {
+    hoverY = null;
+    hoverDate = null;
+    hoverDose = null;
+  }
+
+  function formatHoverWeight(v: number): string {
+    return `${v.toFixed(1)} ${$weightUnit}`;
+  }
+  function formatHoverRight(v: number): string {
+    return chartModel.systemSeries.length > 0
+      ? `${v.toFixed(1)} mg`
+      : v.toFixed(1);
+  }
+
+  function doseTooltipText(marker: { amountMg: number; medication: string }): string {
+    const mg = `${marker.amountMg} mg`;
+    return showMedicationInTooltip && marker.medication
+      ? `${mg} · ${marker.medication}`
+      : mg;
+  }
   const currentWeightDisplay = $derived(
     $currentWeight != null ? lbsToDisplayNum(String($currentWeight), $weightUnit) : null,
   );
@@ -159,7 +285,32 @@
     if (start == null || current == null || start <= 0) return null;
     return ((start - current) / start) * 100;
   });
-  const costPerUnit = $derived($weightUnit === 'kg' ? costPerPound * 2.20462 : costPerPound);
+  const totalSpend = $derived.by<number | null>(() => {
+    let sum = 0;
+    let hasAny = false;
+    for (const p of $rawPrescriptions) {
+      if (typeof p.costUsd === 'number' && Number.isFinite(p.costUsd)) {
+        sum += p.costUsd;
+        hasAny = true;
+      }
+    }
+    return hasAny ? sum : null;
+  });
+  const lbsLost = $derived(
+    $startWeight != null && $currentWeight != null
+      ? Math.max($startWeight - $currentWeight, 0)
+      : null,
+  );
+  const costPerLb = $derived(
+    totalSpend != null && lbsLost != null && lbsLost > 0
+      ? totalSpend / lbsLost
+      : null,
+  );
+  const costPerUnit = $derived(
+    costPerLb != null
+      ? ($weightUnit === 'kg' ? costPerLb * 2.20462 : costPerLb)
+      : null,
+  );
   const unitLabel = $derived($weightUnit === 'lbs' ? 'lb' : 'kg');
   const draftStartWeightLbs = $derived(progressDraftValueToLbs(draftStartWeight, progressDraftUnit));
   const draftGoalWeightLbs = $derived(progressDraftValueToLbs(draftGoalWeight, progressDraftUnit));
@@ -182,6 +333,23 @@
     lossLbs: number | null;
     status: 'good' | 'warn' | 'no-data';
   };
+
+  const efficacyMinLoss = $derived(lbsToDisplayNum('0.5', $weightUnit).toFixed(1));
+  const efficacyMaxLoss = $derived(lbsToDisplayNum('1.5', $weightUnit).toFixed(1));
+
+  const efficacyWarnTooltip = $derived(
+    `Weekly loss is outside the healthy range of ${efficacyMinLoss}–${efficacyMaxLoss} ${$weightUnit}/week.`,
+  );
+
+  const efficacyHelpTooltip = $derived(
+    [
+      "Weekly loss = previous week's last weight − this week's last weight.",
+      '',
+      `✓  On track (${efficacyMinLoss}–${efficacyMaxLoss} ${$weightUnit}/week)`,
+      `⚠  Outside healthy range`,
+      '—  No weight data for this week',
+    ].join('\n'),
+  );
 
   function isoAddDays(iso: string, n: number): string {
     const [y, m, d] = iso.split('-').map(Number);
@@ -318,10 +486,6 @@
   }
 
   function handleProgressCommitKeydown(event: KeyboardEvent) {
-    if (!isEditingProgress || !(event.target instanceof Node) || !progressCardRegion?.contains(event.target)) {
-      return;
-    }
-
     if (
       event.key !== 'Enter' ||
       event.isComposing ||
@@ -333,8 +497,19 @@
       return;
     }
 
-    event.preventDefault();
-    saveProgressEdits();
+    if (!(event.target instanceof Node)) return;
+
+    if (isEditingProgress && progressCardRegion?.contains(event.target)) {
+      event.preventDefault();
+      saveProgressEdits();
+      return;
+    }
+
+    // Legend toggles save live, so Enter just closes edit mode.
+    if (isEditingLegend && legendRegion?.contains(event.target)) {
+      event.preventDefault();
+      isEditingLegend = false;
+    }
   }
 
   function requestInputRow() {
@@ -387,8 +562,21 @@
           active={isEditingLegend}
           onclick={() => (isEditingLegend = !isEditingLegend)}
         />
+        <div class="x-range-selector" role="group" aria-label="Graph time range">
+          {#each X_RANGE_PRESETS as preset (preset.key)}
+            <button
+              type="button"
+              class="x-range-btn"
+              class:active={xRangeChoice === preset.key}
+              aria-pressed={xRangeChoice === preset.key}
+              onclick={() => selectXRange(preset.key)}
+            >
+              {preset.label}
+            </button>
+          {/each}
+        </div>
       </div>
-      <div class="graph-legend" aria-label="Graph legend">
+      <div class="graph-legend" aria-label="Graph legend" bind:this={legendRegion}>
         {#each legendItems as item (item.key)}
           {#if (isEditingLegend || !item.hidden) && (item.key !== 'weightPrediction' || !hiddenGraphSeries.has('weight'))}
             <label class={['legend-item', { editing: isEditingLegend }]}>
@@ -443,11 +631,46 @@
               {effectiveLeftLabel}
             </text>
           </g>
+
+          {#if crosshairActive && hoverY !== null && hoverValueLeft !== null}
+            <line
+              class="crosshair horizontal"
+              x1={0}
+              x2={CHART.margin.left}
+              y1={hoverY}
+              y2={hoverY}
+            />
+            {@const label = formatHoverWeight(hoverValueLeft)}
+            <g class="crosshair-chip left">
+              <rect
+                x={1}
+                y={hoverY - 9}
+                width={CHART.margin.left - 4}
+                height={18}
+                rx="3"
+                ry="3"
+              />
+              <text
+                x={CHART.margin.left - 5}
+                y={hoverY}
+                dy="0.35em"
+                text-anchor="end"
+              >
+                {label}
+              </text>
+            </g>
+          {/if}
         </svg>
         {/if}
 
         <!-- Scrollable data area -->
-        <div class="data-scroll" bind:this={dataScrollEl}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="data-scroll"
+          use:attachViewportObserver
+          onmousemove={onPlotMouseMove}
+          onmouseleave={clearCrosshair}
+        >
           <svg
             class="data-svg"
             viewBox={`${CHART.margin.left} 0 ${chartModel.plotWidth} ${CHART.height}`}
@@ -513,17 +736,35 @@
                   {#each series.dosePoints as dot (dot.date)}
                     <path
                       class="dose-point"
+                      role="img"
+                      aria-label={doseTooltipText(dot)}
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
+                      onmouseenter={() => (hoverDose = {
+                        label: doseTooltipText(dot),
+                        color: series.color,
+                        x: dot.x,
+                        y: dot.y,
+                      })}
+                      onmouseleave={() => (hoverDose = null)}
                     />
                   {/each}
                   {#each series.plannedDosePoints as dot (dot.date)}
                     <path
                       class="dose-point planned"
+                      role="img"
+                      aria-label={`${doseTooltipText(dot)} (planned)`}
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
+                      onmouseenter={() => (hoverDose = {
+                        label: `${doseTooltipText(dot)} (planned)`,
+                        color: series.color,
+                        x: dot.x,
+                        y: dot.y,
+                      })}
+                      onmouseleave={() => (hoverDose = null)}
                     />
                   {/each}
                 {/if}
@@ -554,7 +795,7 @@
                         r="7.5"
                         fill={item.color}
                       />
-                      <text class="symptom-letter" x={stack.x} y={item.y + 0.5}>{item.letter}</text>
+                      <text class="symptom-letter" x={stack.x} y={item.y} dy="0.35em">{item.letter}</text>
                     {/each}
                   </g>
                 {/each}
@@ -567,9 +808,17 @@
 
             <g class="axis-labels">
               {#each chartModel.dateTicks as tick (tick.date)}
-                <line class="date-tick" x1={tick.x} x2={tick.x} y1={PLOT.bottom} y2={PLOT.bottom + 6} />
+                <line
+                  class="date-tick"
+                  class:active={hoverDate === tick.date}
+                  x1={tick.x}
+                  x2={tick.x}
+                  y1={PLOT.bottom}
+                  y2={PLOT.bottom + 6}
+                />
                 <text
                   class="date-label"
+                  class:active={hoverDate === tick.date}
                   x={tick.x}
                   y={PLOT.bottom + 8}
                   transform={`rotate(-90 ${tick.x} ${PLOT.bottom + 8})`}
@@ -579,9 +828,66 @@
                   {tick.label}
                 </text>
               {/each}
-
-
             </g>
+
+            <!-- Crosshair: vertical line snapped to nearest day, horizontal at
+                 cursor y. The vertical line gets an extra date label below the
+                 axis when it lands between decimated ticks. -->
+            {#if crosshairActive && hoverDate && hoverY !== null}
+              {@const xhX = chartModel.cssXForDate(hoverDate) + CHART.margin.left}
+              <line
+                class="crosshair vertical"
+                x1={xhX}
+                x2={xhX}
+                y1={PLOT.top}
+                y2={PLOT.bottom}
+              />
+              <line
+                class="crosshair horizontal"
+                x1={PLOT.left}
+                x2={chartModel.plotRight}
+                y1={hoverY}
+                y2={hoverY}
+              />
+              {#if !chartModel.dateTicks.some((t) => t.date === hoverDate)}
+                <text
+                  class="date-label active"
+                  x={xhX}
+                  y={PLOT.bottom + 8}
+                  transform={`rotate(-90 ${xhX} ${PLOT.bottom + 8})`}
+                  text-anchor="end"
+                  dominant-baseline="central"
+                >
+                  {hoverDate.slice(5).replace('-', '/').replace(/^0/, '')}
+                </text>
+              {/if}
+            {/if}
+
+            <!-- Dose tooltip: small chip rendered inside the data-svg so it
+                 scrolls with content. -->
+            {#if hoverDose}
+              {@const tw = Math.max(40, hoverDose.label.length * 6.2 + 14)}
+              {@const th = 18}
+              {@const tx = Math.min(
+                Math.max(hoverDose.x - tw / 2, PLOT.left + 2),
+                chartModel.plotRight - tw - 2,
+              )}
+              {@const ty = Math.max(hoverDose.y - th - 12, PLOT.top + 2)}
+              <g class="dose-tooltip" pointer-events="none">
+                <rect
+                  x={tx}
+                  y={ty}
+                  width={tw}
+                  height={th}
+                  rx="4"
+                  ry="4"
+                  style:--system-color={hoverDose.color}
+                />
+                <text x={tx + tw / 2} y={ty + th / 2} dy="0.35em" text-anchor="middle">
+                  {hoverDose.label}
+                </text>
+              </g>
+            {/if}
 
             {#if !chartModel.hasAnyData}
               <text class="empty-chart" x={CHART.width / 2} y={(PLOT.top + PLOT.bottom) / 2} text-anchor="middle">
@@ -615,6 +921,30 @@
                 {effectiveRightLabel}
               </text>
             </g>
+
+            {#if crosshairActive && hoverY !== null && hoverValueRight !== null}
+              <line
+                class="crosshair horizontal"
+                x1={0}
+                x2={CHART.margin.right}
+                y1={hoverY}
+                y2={hoverY}
+              />
+              {@const label = formatHoverRight(hoverValueRight)}
+              <g class="crosshair-chip right">
+                <rect
+                  x={3}
+                  y={hoverY - 9}
+                  width={CHART.margin.right - 6}
+                  height={18}
+                  rx="3"
+                  ry="3"
+                />
+                <text x={7} y={hoverY} dy="0.35em" text-anchor="start">
+                  {label}
+                </text>
+              </g>
+            {/if}
           </svg>
         {/if}
       </div>
@@ -626,7 +956,14 @@
         <div class="efficacy-scroll">
           <table class="mini-table">
             <thead>
-              <tr><th>Week</th><th>Dose Amount</th><th>Weekly Loss</th><th></th></tr>
+              <tr>
+                <th>Week</th>
+                <th>Dose Amount</th>
+                <th>Weekly Loss</th>
+                <th class="status-th">
+                  <HelpBadge tooltip={efficacyHelpTooltip} />
+                </th>
+              </tr>
             </thead>
             <tbody>
               {#each efficacyRows as row (row.week)}
@@ -645,7 +982,7 @@
                     {#if row.status === 'good'}
                       <span class="status success">✓</span>
                     {:else if row.status === 'warn'}
-                      <span class="status warn">⚠</span>
+                      <WarnBadge tooltip={efficacyWarnTooltip} />
                     {:else}
                       <span>—</span>
                     {/if}
@@ -734,7 +1071,16 @@
                 {/if}
               </td>
             </tr>
-            <tr><th>Cost per {unitLabel}</th><td>${costPerUnit.toFixed(2)}</td></tr>
+            <tr>
+              <th>Cost per {unitLabel}</th>
+              <td>
+                {#if costPerUnit != null}
+                  ${costPerUnit.toFixed(2)}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
           </tbody>
         </table>
       </article>
@@ -833,6 +1179,40 @@
     align-items: center;
     gap: 0.4rem;
     margin-bottom: 0.35rem;
+  }
+
+  .x-range-selector {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1.5px solid var(--cardBorder);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--surface) 70%, transparent);
+    color: var(--text);
+  }
+
+  .x-range-btn {
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1;
+    color: color-mix(in oklab, var(--text) 65%, transparent);
+  }
+
+  .x-range-btn:hover {
+    background: color-mix(in oklab, var(--text) 10%, transparent);
+    color: var(--text);
+  }
+
+  .x-range-btn.active {
+    background: var(--headerBg);
+    color: var(--headerText);
   }
 
   .icon-action {
@@ -1124,7 +1504,6 @@
     font-size: 0.58rem;
     font-weight: 800;
     text-anchor: middle;
-    dominant-baseline: central;
     pointer-events: none;
   }
 
@@ -1141,6 +1520,56 @@
 
   .date-label {
     font-weight: 650;
+  }
+
+  .date-tick.active {
+    stroke: var(--text);
+    stroke-width: 2;
+  }
+
+  .date-label.active {
+    fill: var(--text);
+    font-weight: 800;
+  }
+
+  /* Crosshair lines: dotted, subtle, ignore pointer so they don't block hover
+     events on the underlying data points. */
+  .crosshair {
+    stroke: color-mix(in oklab, var(--text) 70%, transparent 30%);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    pointer-events: none;
+  }
+
+  /* Axis value chips that appear at each end of the horizontal crosshair. */
+  .crosshair-chip rect {
+    fill: var(--headerBg);
+    opacity: 0.95;
+  }
+  .crosshair-chip text {
+    fill: var(--headerText);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  /* Dose-marker tooltip rendered inside the data-svg. */
+  .dose-tooltip rect {
+    fill: var(--surface);
+    stroke: var(--system-color, var(--accent));
+    stroke-width: 1.5;
+  }
+  .dose-tooltip text {
+    fill: var(--text);
+    font-size: 0.74rem;
+    font-weight: 700;
+  }
+
+  /* Dose dots: cursor + grow-on-hover so the affordance is clear. */
+  .dose-point {
+    cursor: pointer;
+  }
+  .dose-point:hover {
+    stroke-width: 2.2;
   }
 
   .empty-chart {
@@ -1185,6 +1614,11 @@
     text-align: center;
   }
 
+  .mini-table .status-th {
+    cursor: help;
+    line-height: 0;
+  }
+
   .mini-table tbody tr:nth-child(even),
   .kv-table tbody tr:nth-child(even) {
     background: var(--rowAlt);
@@ -1194,10 +1628,12 @@
     width: 1.1rem;
     height: 1.1rem;
     border-radius: 999px;
-    display: inline-grid;
-    place-content: center;
-    font-size: 0.8rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
     font-weight: 700;
+    line-height: 1;
     color: var(--headerText);
   }
 
@@ -1209,10 +1645,6 @@
 
   .status.success {
     background: var(--success);
-  }
-
-  .status.warn {
-    background: var(--warning);
   }
 
   .kv-table th {

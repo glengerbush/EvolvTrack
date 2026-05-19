@@ -3,17 +3,26 @@
   import type { Medication } from '$lib/domain/types';
 
   let {
-    count,
+    doseCount = 0,
+    vialCount = 0,
     onConfirm,
     onCancel,
   }: {
-    count: number;
+    doseCount?: number;
+    vialCount?: number;
     onConfirm: (medication: Medication) => void;
     onCancel: () => void;
   } = $props();
 
   const options = Object.keys(DRUG_PK) as Medication[];
   let selected = $state<Medication>(options[0]);
+
+  const pieces = $derived.by(() => {
+    const parts: string[] = [];
+    if (doseCount) parts.push(`${doseCount} dose${doseCount === 1 ? '' : 's'}`);
+    if (vialCount) parts.push(`${vialCount} vial${vialCount === 1 ? '' : 's'}`);
+    return parts.join(' and ');
+  });
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
@@ -43,9 +52,9 @@
   >
     <h3 id="import-med-title">Which medication is this?</h3>
     <p>
-      Your import has {count} dose{count === 1 ? '' : 's'} with no medication specified.
+      Your import has {pieces} with no medication specified.
       EvolvTrack needs to know the drug to calculate the "mg in system" graph. We'll
-      assume every dose without a medication used the same one.
+      assume every dose and vial without a medication used the same one.
     </p>
     <label class="modal-field">
       Medication
@@ -58,7 +67,7 @@
     <div class="modal-actions">
       <button type="button" class="ghost" onclick={onCancel}>Skip for now</button>
       <button type="button" class="primary" onclick={() => onConfirm(selected)}>
-        Apply to all {count} dose{count === 1 ? '' : 's'}
+        Apply to all {pieces}
       </button>
     </div>
   </div>

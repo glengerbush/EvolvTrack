@@ -85,6 +85,13 @@ export interface WeightEntry {
   notes?: string;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+  /**
+   * Per-field last-writer-wins clocks. Optional for backward compatibility
+   * with records written before per-field LWW landed; absent stamps fall back
+   * to row `updatedAt` in `mergeRecord`. New writes via `addWeight` /
+   * `updateWeight` always populate this for every persistent field.
+   */
+  fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 
 export interface InjectionEntry {
@@ -102,6 +109,8 @@ export interface InjectionEntry {
   skipped?: boolean;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+  /** Per-field LWW clocks; see WeightEntry.fieldUpdatedAt for the format. */
+  fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 
 export interface Prescription {
@@ -122,6 +131,8 @@ export interface Prescription {
   sortOrder?: number;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+  /** Per-field LWW clocks; see WeightEntry.fieldUpdatedAt for the format. */
+  fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 
 export interface ProfileSettings {
@@ -142,6 +153,12 @@ export interface ProfileSettings {
   healthHiddenCols?: HealthColKey[];
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+  /**
+   * Per-field LWW clocks for syncable fields only. Device-local fields
+   * (`passphraseEnabled`, `syncMode`, `e2eeMigration`) are excluded — they
+   * never appear in this map and the merge ignores them.
+   */
+  fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 
 export interface MigrationBackfillEntry {

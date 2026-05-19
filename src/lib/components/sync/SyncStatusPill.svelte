@@ -3,6 +3,7 @@
   import { syncIndicator } from '$lib/stores/syncIndicator';
   import { formatRelativeTime } from '$lib/stores/syncStore';
   import { syncNow } from '$lib/sync/sync-orchestrator';
+  import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
 
   let open = $state(false);
   let pillEl: HTMLButtonElement | undefined = $state();
@@ -63,6 +64,7 @@
   const canSync = $derived(
     indicator.kind !== 'signed-out' &&
       indicator.kind !== 'signed-out-expired' &&
+      indicator.kind !== 'no-license' &&
       indicator.kind !== 'syncing' &&
       indicator.kind !== 'migrating',
   );
@@ -98,7 +100,17 @@
         <dd>{userEmail ?? 'Not signed in'}</dd>
 
         <dt>Encryption</dt>
-        <dd>{encryptionLabel}</dd>
+        <dd>
+          {encryptionLabel}
+          {#if indicator.encryption === 'plaintext'}
+            <span class="enc-warn">
+              <WarnBadge
+                size="1.05rem"
+                tooltip="End-to-end encryption is off. Enable it in the Settings tab."
+              />
+            </span>
+          {/if}
+        </dd>
 
         {#if indicator.encryption === 'e2ee'}
           <dt>Session</dt>
@@ -106,7 +118,11 @@
         {/if}
 
         <dt>Connectivity</dt>
-        <dd class="cap">{indicator.connectivity}</dd>
+        {#if indicator.kind === 'no-license'}
+          <dd>Cloud sync disabled</dd>
+        {:else}
+          <dd class="cap">{indicator.connectivity}</dd>
+        {/if}
 
         <dt>Pending</dt>
         <dd>
@@ -225,6 +241,13 @@
   .grid dd { margin: 0; word-break: break-word; }
   .grid dd.cap { text-transform: capitalize; }
   .grid dd.error { color: var(--danger, #b3413f); }
+
+  .enc-warn {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.35rem;
+    cursor: help;
+  }
 
   .actions { display: flex; justify-content: flex-end; }
   .sync-btn {

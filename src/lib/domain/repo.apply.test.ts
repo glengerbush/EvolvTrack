@@ -3,10 +3,14 @@ import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
 import {
+  addWeight,
   applyRemoteChange,
   onHealthDataChange,
+  updateInjection,
+  updateWeight,
   type HealthDataChange,
 } from '$lib/domain/repo';
+import { stampAllFields } from '$lib/domain/merge';
 import type { InjectionEntry, ProfileSettings, WeightEntry } from '$lib/domain/types';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
@@ -369,5 +373,461 @@ describe('applyRemoteChange — outbox reconciliation', () => {
 
     expect(applied).toBe(false);
     expect(await db.outbox.get('weight:w1')).toBeDefined();
+  });
+});
+
+describe('applyRemoteChange — weight per-field LWW', () => {
+  function stampedWeight(
+    id: string,
+    fields: { weightLbs?: number; wellness?: number; symptoms?: string[] },
+    fieldUpdatedAt: Record<string, string>,
+    rowUpdatedAt: string,
+  ): WeightEntry {
+    return {
+      id,
+      date: iso('2026-05-10'),
+      ...fields,
+      createdAt: OLD,
+      updatedAt: rowUpdatedAt,
+      fieldUpdatedAt,
+    };
+  }
+
+  it('preserves a local field edit when the remote edited a different field', async () => {
+    // Initial shared state at OLD, both fields stamped OLD.
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w1',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          wellness: 5,
+          symptoms: ['nausea'],
+          createdAt: OLD,
+          updatedAt: OLD,
+        },
+        OLD,
+      ),
+    );
+    // Local device bumped `symptoms` at MID.
+    await updateWeight('w1', { symptoms: ['nausea', 'fatigue'] });
+
+    // Remote (other device) bumped `wellness` at NEW.
+    const remote = stampedWeight(
+      'w1',
+      { weightLbs: 180, wellness: 7, symptoms: ['nausea'] },
+      { weightLbs: OLD, wellness: NEW, symptoms: OLD },
+      NEW,
+    );
+    const applied = await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w1',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: NEW,
+    });
+
+    expect(applied).toBe(true);
+    const after = (await db.weights.get('w1'))!;
+    // Both edits survive — the central guarantee.
+    expect(after.symptoms).toEqual(['nausea', 'fatigue']);
+    expect(after.wellness).toBe(7);
+    // Row clock advances to at least the remote's latest stamp; the local
+    // updateWeight call uses real `now()` so the actual max is wall-clock.
+    expect(new Date(after.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(NEW).getTime());
+    // Per-field stamps reflect who won each field.
+    expect(after.fieldUpdatedAt!.wellness).toBe(NEW);
+  });
+
+  it('re-enqueues the merged snapshot when local wins any field', async () => {
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w2',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          wellness: 5,
+          symptoms: ['nausea'],
+          createdAt: OLD,
+          updatedAt: OLD,
+        },
+        OLD,
+      ),
+    );
+    // Local edits symptoms at NEW. addWeight/updateWeight enqueue to outbox,
+    // and on a real device that push would be sitting pending while offline.
+    await updateWeight('w2', { symptoms: ['fatigue'] });
+
+    // Remote arrives with an older wellness edit at MID. Local wins symptoms
+    // (NEW > OLD), remote wins wellness (MID > OLD).
+    const remote = stampedWeight(
+      'w2',
+      { weightLbs: 180, wellness: 9, symptoms: ['nausea'] },
+      { weightLbs: OLD, wellness: MID, symptoms: OLD },
+      MID,
+    );
+    await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w2',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: MID,
+    });
+
+    // The outbox payload must reflect the merged state, not the pre-merge
+    // local snapshot — otherwise pushing it would clobber the remote's
+    // wellness=9 back to the local pre-merge wellness=5 on the cloud.
+    const outbox = await db.outbox.get('weight:w2');
+    expect(outbox).toBeDefined();
+    const payload = outbox!.payload as WeightEntry;
+    expect(payload.symptoms).toEqual(['fatigue']);
+    expect(payload.wellness).toBe(9);
+  });
+
+  it('drops the outbox when the remote is strictly newer on every field', async () => {
+    // A standard "remote fully supersedes local" case — the outbox must be
+    // cleared so the next push doesn't clobber the cloud's newer state.
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w3',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          wellness: 5,
+          createdAt: OLD,
+          updatedAt: MID,
+        },
+        MID,
+      ),
+    );
+    // Enqueue a pending local outbox at MID.
+    await db.outbox.put({
+      id: 'weight:w3',
+      aggregate: 'weight',
+      entityId: 'w3',
+      op: 'upsert',
+      updatedAt: MID,
+      payload: { id: 'w3' },
+      enqueuedAt: MID,
+      rev: 'stub',
+    });
+
+    const remote = stampedWeight(
+      'w3',
+      { weightLbs: 175, wellness: 7 },
+      { weightLbs: NEW, wellness: NEW },
+      NEW,
+    );
+    await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w3',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: NEW,
+    });
+
+    expect(await db.outbox.get('weight:w3')).toBeUndefined();
+  });
+
+  it('merges sensibly against a legacy remote record with no fieldUpdatedAt', async () => {
+    // Forward-compat the other direction: an older client pushes a record
+    // without per-field stamps. Every remote field's clock is the remote row
+    // updatedAt; local per-field clocks decide who wins.
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w4',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          wellness: 5,
+          createdAt: OLD,
+          updatedAt: OLD,
+        },
+        OLD,
+      ),
+    );
+    await updateWeight('w4', { wellness: 9 }); // local wellness stamped NEW-ish
+
+    const legacy: WeightEntry = {
+      id: 'w4',
+      date: iso('2026-05-10'),
+      weightLbs: 175,
+      wellness: 7,
+      createdAt: OLD,
+      updatedAt: MID, // every field is treated as stamped MID
+    };
+    await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w4',
+      op: 'upsert',
+      record: legacy,
+      remoteUpdatedAt: MID,
+    });
+
+    const after = (await db.weights.get('w4'))!;
+    expect(after.weightLbs).toBe(175); // remote MID > local OLD
+    expect(after.wellness).toBe(9);     // local stamp from updateWeight > MID
+  });
+
+  it('end-to-end: addWeight then updateWeight produces complete per-field stamps', async () => {
+    const created = await addWeight({ weightLbs: 180, wellness: 5 });
+    expect(created.fieldUpdatedAt).toMatchObject({
+      weightLbs: created.updatedAt,
+      wellness: created.updatedAt,
+    });
+
+    await updateWeight(created.id, { wellness: 7 });
+    const after = (await db.weights.get(created.id))!;
+    // Only wellness's stamp moved; weightLbs stays at the original creation
+    // time so a remote that edits weightLbs later wins it cleanly.
+    expect(after.fieldUpdatedAt!.weightLbs).toBe(created.fieldUpdatedAt!.weightLbs);
+    expect(after.fieldUpdatedAt!.wellness).not.toBe(created.fieldUpdatedAt!.wellness);
+    expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
+      .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
+  });
+});
+
+describe('field-clear tombstones', () => {
+  it('updateWeight with an `undefined` value removes the field locally and stamps it', async () => {
+    const created = await addWeight({ weightLbs: 180, wellness: 5 });
+    await updateWeight(created.id, { wellness: undefined });
+
+    const after = (await db.weights.get(created.id))!;
+    // Field is gone from the row (not lingering as `undefined`).
+    expect('wellness' in after).toBe(false);
+    // But the field-clock entry survives — that's what tells receivers the
+    // absence is intentional and newer than their value.
+    expect(after.fieldUpdatedAt!.wellness).toBeDefined();
+    expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
+      .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
+
+    // The outbox payload (what will be pushed) matches: key absent, stamp present.
+    const outbox = await db.outbox.get(`weight:${created.id}`);
+    const payload = outbox!.payload as WeightEntry;
+    expect('wellness' in payload).toBe(false);
+    expect(payload.fieldUpdatedAt!.wellness).toBe(after.fieldUpdatedAt!.wellness);
+  });
+
+  it('a remote tombstone (stamp present, value absent) drops the local field', async () => {
+    // Local at OLD with wellness=5; remote arrives stamping wellness at NEW
+    // but with no value — the canonical cleared-field shape on the wire.
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w1',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          wellness: 5,
+          createdAt: OLD,
+          updatedAt: OLD,
+        },
+        OLD,
+      ),
+    );
+    const tombstone: WeightEntry = {
+      id: 'w1',
+      date: iso('2026-05-10'),
+      weightLbs: 180,
+      createdAt: OLD,
+      updatedAt: NEW,
+      fieldUpdatedAt: { date: OLD, weightLbs: OLD, wellness: NEW },
+      // wellness key deliberately absent
+    };
+    const applied = await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w1',
+      op: 'upsert',
+      record: tombstone,
+      remoteUpdatedAt: NEW,
+    });
+
+    expect(applied).toBe(true);
+    const after = (await db.weights.get('w1'))!;
+    expect(after.wellness).toBeUndefined();
+    // Stamp carries forward so a third device pulling can't re-set the field
+    // with an older value.
+    expect(after.fieldUpdatedAt!.wellness).toBe(NEW);
+  });
+
+  it('a local edit newer than a remote tombstone keeps the local value', async () => {
+    // Local clears wellness at... actually no — local sets wellness fresh
+    // while a remote tombstone for the same field has an older stamp. The
+    // local value must survive.
+    await db.weights.put(
+      stampAllFields(
+        {
+          id: 'w2',
+          date: iso('2026-05-10'),
+          wellness: 9,
+          createdAt: OLD,
+          updatedAt: NEW,
+          fieldUpdatedAt: { date: OLD, wellness: NEW },
+        } as WeightEntry,
+        OLD, // baseline stamp for non-wellness fields
+      ),
+    );
+    // Force the just-set local wellness stamp to NEW (the helper above
+    // stamps to OLD; manually override for clarity).
+    const seeded = await db.weights.get('w2');
+    await db.weights.put({
+      ...seeded!,
+      fieldUpdatedAt: { ...seeded!.fieldUpdatedAt!, wellness: NEW },
+      updatedAt: NEW,
+    });
+
+    const tombstone: WeightEntry = {
+      id: 'w2',
+      date: iso('2026-05-10'),
+      createdAt: OLD,
+      updatedAt: MID,
+      fieldUpdatedAt: { date: OLD, wellness: MID }, // older tombstone
+    };
+    await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w2',
+      op: 'upsert',
+      record: tombstone,
+      remoteUpdatedAt: MID,
+    });
+
+    const after = (await db.weights.get('w2'))!;
+    expect(after.wellness).toBe(9);
+    expect(after.fieldUpdatedAt!.wellness).toBe(NEW);
+  });
+});
+
+describe('applyRemoteChange — injection per-field LWW', () => {
+  it('preserves a local field edit when the remote edited a different field', async () => {
+    // Both devices start from the same baseline at OLD.
+    const baseline = stampAllFields(
+      {
+        id: 'i1',
+        date: iso('2026-05-10'),
+        amountMg: 5,
+        site: 'left thigh',
+        medication: SEMA,
+        symptoms: ['nausea'],
+        createdAt: OLD,
+        updatedAt: OLD,
+      } as InjectionEntry,
+      OLD,
+    );
+    await db.injections.put(baseline);
+    // Local edits `site` via the repo write path (real stamps land via
+    // bumpFieldStamps, mirroring an offline edit on this device).
+    await updateInjection('i1', { site: 'right arm' });
+
+    // Remote arrives having edited `amountMg` at NEW; everything else still
+    // stamped OLD.
+    const remote: InjectionEntry = {
+      ...baseline,
+      amountMg: 7,
+      updatedAt: NEW,
+      fieldUpdatedAt: { ...baseline.fieldUpdatedAt!, amountMg: NEW },
+    };
+    await applyRemoteChange({
+      aggregate: 'injection',
+      entityId: 'i1',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: NEW,
+    });
+
+    const after = (await db.injections.get('i1'))!;
+    expect(after.site).toBe('right arm'); // local survives
+    expect(after.amountMg).toBe(7);        // remote applied
+  });
+});
+
+describe('applyRemoteChange — profile per-field LWW', () => {
+  // saveProfile uses real wall-clock now(), which leaks into per-field stamps
+  // and makes test-clock comparisons (OLD/MID/NEW) meaningless. Set up local
+  // state directly with the constants we want to assert against.
+  async function putProfileDirect(
+    fields: { startWeight?: number; goalWeight?: number },
+    stamps: Record<string, string>,
+    row: { passphraseEnabled?: boolean; syncMode?: 'plain' | 'e2ee' },
+    rowUpdatedAt: string,
+  ): Promise<void> {
+    await db.profile.put({
+      id: 'profile',
+      passphraseEnabled: row.passphraseEnabled ?? false,
+      syncMode: row.syncMode,
+      ...fields,
+      createdAt: OLD,
+      updatedAt: rowUpdatedAt,
+      fieldUpdatedAt: stamps,
+    });
+  }
+
+  it('takes a synced field from remote but never touches device-local state', async () => {
+    await putProfileDirect(
+      { startWeight: 200 },
+      { startWeight: OLD },
+      { passphraseEnabled: true, syncMode: 'e2ee' },
+      OLD,
+    );
+
+    const remote = {
+      id: 'profile' as const,
+      passphraseEnabled: false,
+      syncMode: 'plain' as const, // would normally never appear on the wire
+      startWeight: 180,
+      goalWeight: 150,
+      createdAt: OLD,
+      updatedAt: NEW,
+    };
+    await applyRemoteChange({
+      aggregate: 'profile',
+      entityId: 'profile',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: NEW,
+    });
+
+    const after = (await db.profile.get('profile'))!;
+    expect(after.startWeight).toBe(180);     // synced: remote newer
+    expect(after.goalWeight).toBe(150);      // synced: remote newer
+    expect(after.passphraseEnabled).toBe(true); // device-local: preserved
+    expect(after.syncMode).toBe('e2ee');         // device-local: preserved
+    // No field-clock entry should have been minted for the reserved fields.
+    expect(after.fieldUpdatedAt).toBeDefined();
+    expect(Object.keys(after.fieldUpdatedAt!)).not.toContain('passphraseEnabled');
+    expect(Object.keys(after.fieldUpdatedAt!)).not.toContain('syncMode');
+  });
+
+  it('keeps a local syncable field edit when a different field arrives from remote', async () => {
+    // The real win: two profile settings can be edited concurrently on two
+    // devices without one clobbering the other.
+    await putProfileDirect(
+      { startWeight: 200, goalWeight: 140 },
+      { startWeight: OLD, goalWeight: NEW }, // local bumped goalWeight at NEW
+      { passphraseEnabled: false },
+      NEW,
+    );
+
+    const remote = {
+      id: 'profile' as const,
+      passphraseEnabled: false,
+      startWeight: 180,
+      goalWeight: 150, // remote's stale view of goalWeight — must not win
+      createdAt: OLD,
+      updatedAt: MID,
+      fieldUpdatedAt: {
+        startWeight: MID,           // newer than local's startWeight stamp
+        goalWeight: OLD,            // older than local's goalWeight stamp
+      },
+    };
+    await applyRemoteChange({
+      aggregate: 'profile',
+      entityId: 'profile',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: MID,
+    });
+
+    const after = (await db.profile.get('profile'))!;
+    expect(after.startWeight).toBe(180);  // remote wins startWeight
+    expect(after.goalWeight).toBe(140);   // local wins goalWeight
   });
 });

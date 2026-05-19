@@ -3,7 +3,7 @@ import { supabase } from '$lib/auth/supabase';
 import { lastSynced } from '$lib/stores/syncStore';
 import { applyRemoteChange, getProfile, getProfileSyncMode } from '$lib/domain/repo';
 import { requireAuthenticatedUser } from '$lib/sync/account-state';
-import { getSessionPassphrase } from '$lib/sync/session-key';
+import { getSessionKey } from '$lib/sync/session-key';
 import { getPullCursor, setPullCursor } from '$lib/sync/pull-cursor';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { ENCRYPTION_FORMAT_VERSION, decryptRecord, encryptRecord } from '$lib/crypto/e2ee';
@@ -70,9 +70,9 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
   const user = await requireAuthenticatedUser();
 
   if (syncMode === 'e2ee') {
-    const passphrase = getSessionPassphrase();
-    if (!passphrase) return { pushed: 0, skipped: 'locked' };
-    await pushEncryptedOutbox(rows, user.id, passphrase);
+    const sessionKey = getSessionKey();
+    if (!sessionKey) return { pushed: 0, skipped: 'locked' };
+    await pushEncryptedOutbox(rows, user.id, sessionKey);
   } else {
     await pushPlainOutbox(rows, user.id);
   }
@@ -102,18 +102,20 @@ async function pushPlainOutbox(rows: OutboxEntry[], userId: string): Promise<voi
     created_at: row.updatedAt,
   }));
 
-  const { error } = await supabase.from('sync_changes_plain').upsert(payload, { onConflict: 'id' });
+  const { error } = await supabase
+    .from('sync_changes_plain')
+    .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
 }
 
 async function pushEncryptedOutbox(
   rows: OutboxEntry[],
   userId: string,
-  passphrase: string,
+  sessionKey: string,
 ): Promise<void> {
   const payload = [];
   for (const row of rows) {
-    const encrypted = await encryptRecord(passphrase, syncEnvelope(row));
+    const encrypted = await encryptRecord(sessionKey, syncEnvelope(row));
     payload.push({
       id: row.id,
       user_id: userId,
@@ -128,7 +130,9 @@ async function pushEncryptedOutbox(
     });
   }
 
-  const { error } = await supabase.from('sync_changes_encrypted').upsert(payload, { onConflict: 'id' });
+  const { error } = await supabase
+    .from('sync_changes_encrypted')
+    .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
 }
 
@@ -202,9 +206,9 @@ export async function pullAndApply(): Promise<PullResult> {
 
   let events: PulledEvent[];
   if (syncMode === 'e2ee') {
-    const passphrase = getSessionPassphrase();
-    if (!passphrase) return { fetched: 0, applied: 0, skipped: 'locked' };
-    events = await pullEncrypted(user.id, cursor, passphrase);
+    const sessionKey = getSessionKey();
+    if (!sessionKey) return { fetched: 0, applied: 0, skipped: 'locked' };
+    events = await pullEncrypted(user.id, cursor, sessionKey);
   } else {
     events = await pullPlain(user.id, cursor);
   }
@@ -250,7 +254,7 @@ async function pullPlain(userId: string, cursor: string | null): Promise<PulledE
 async function pullEncrypted(
   userId: string,
   cursor: string | null,
-  passphrase: string,
+  sessionKey: string,
 ): Promise<PulledEvent[]> {
   let query = supabase
     .from('sync_changes_encrypted')
@@ -264,7 +268,17 @@ async function pullEncrypted(
 
   const events: PulledEvent[] = [];
   for (const row of data ?? []) {
-    const envelope = await decryptRecord<SyncEnvelopeShape>(passphrase, row.ciphertext, row.iv);
+    let envelope: SyncEnvelopeShape;
+    try {
+      envelope = await decryptRecord<SyncEnvelopeShape>(sessionKey, row.ciphertext, row.iv);
+    } catch (cause) {
+      // Re-throw with the row id so the orchestrator's sync-cycle log makes it
+      // obvious which row tripped the crypto error (otherwise the message is
+      // just "operation failed for an operation-specific reason" with no clue
+      // which record is unreadable).
+      const message = (cause as Error).message ?? String(cause);
+      throw new Error(`Failed to decrypt encrypted sync row ${row.id}: ${message}`);
+    }
     events.push({
       aggregate: (envelope.aggregate ?? row.aggregate) as SyncAggregate,
       entityId: entityIdFromRowId(row.id),
@@ -310,7 +324,9 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
     created_at: row.createdAt
   }));
 
-  const { error } = await supabase.from('sync_changes_encrypted').upsert(payload, { onConflict: 'id' });
+  const { error } = await supabase
+    .from('sync_changes_encrypted')
+    .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
   lastSynced.record();
   return { pushed: payload.length };
@@ -331,7 +347,9 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
     created_at: change.createdAt,
   }));
 
-  const { error } = await supabase.from('sync_changes_plain').upsert(payload, { onConflict: 'id' });
+  const { error } = await supabase
+    .from('sync_changes_plain')
+    .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
   lastSynced.record();
   return { pushed: payload.length };

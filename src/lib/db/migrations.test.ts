@@ -9,8 +9,8 @@ describe('DB_SCHEMA_VERSION', () => {
     expect(DB_SCHEMA_VERSION).toBeGreaterThanOrEqual(1);
   });
 
-  it('is currently version 1 (bump this assertion when migrations are added)', () => {
-    expect(DB_SCHEMA_VERSION).toBe(1);
+  it('is currently version 2 (bump this assertion when migrations are added)', () => {
+    expect(DB_SCHEMA_VERSION).toBe(2);
   });
 });
 

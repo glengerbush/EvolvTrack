@@ -352,21 +352,22 @@
     padding: 1rem 0 2rem;
     display: grid;
     gap: 0.9rem;
-    color: var(--text, #111);
+    color: var(--text);
   }
 
-  h1 { margin: 0; font-size: 1.5rem; font-weight: 700; }
+  h1 { margin: 0; font-size: 1.5rem; font-weight: 700; color: var(--text); }
 
   .card {
-    border: 2px solid var(--cardBorder, #ccc);
+    border: 2px solid color-mix(in oklab, var(--text) 18%, transparent);
     border-radius: 12px;
     padding: 0.85rem 1rem;
-    background: var(--surface, white);
+    background: var(--surface);
+    color: var(--text);
     display: grid;
     gap: 0.7rem;
   }
 
-  h2 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+  h2 { margin: 0; font-size: 1.1rem; font-weight: 600; color: var(--text); }
 
   .form-row {
     display: flex;
@@ -379,37 +380,44 @@
     display: grid;
     gap: 0.2rem;
     font-size: 0.85rem;
+    color: var(--text);
   }
 
   .form-row .grow { flex: 1; min-width: 180px; }
 
   input, select {
     padding: 0.5rem 0.6rem;
-    border: 2px solid color-mix(in oklab, var(--cardBorder, #ccc) 60%, white 40%);
+    border: 2px solid color-mix(in oklab, var(--text) 24%, transparent);
     border-radius: 8px;
     font: inherit;
-    background: white;
+    background: var(--surface);
+    color: var(--text);
   }
+  input::placeholder { color: var(--muted); }
 
   button {
     padding: 0.5rem 0.95rem;
     border-radius: 9px;
     font-weight: 600;
     cursor: pointer;
-    border: 2px solid var(--cardBorder, #ccc);
+    border: 2px solid color-mix(in oklab, var(--text) 22%, transparent);
   }
 
   .btn-primary {
-    background: var(--headerBg, #245);
-    color: var(--headerText, white);
+    background: var(--brand);
+    color: #fff;
+    border-color: color-mix(in oklab, var(--brand) 75%, black 25%);
   }
 
   .btn-ghost {
     background: transparent;
-    color: var(--text, #111);
+    color: var(--text);
   }
 
-  .btn-ghost.danger { color: #b22; border-color: #b22; }
+  .btn-ghost.danger {
+    color: var(--danger, #b22);
+    border-color: color-mix(in oklab, var(--danger, #b22) 60%, transparent);
+  }
 
   button:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -425,6 +433,8 @@
     gap: 0.25rem;
   }
 
+  /* Generated-code chips are intentionally dark on light for max contrast
+   * regardless of theme — they're meant to be copied. */
   .generated code {
     font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
     background: #111;
@@ -438,10 +448,10 @@
   .warn {
     margin: 0;
     padding: 0.5rem 0.75rem;
-    background: color-mix(in oklab, var(--warning, #c80) 18%, white 82%);
+    background: color-mix(in oklab, var(--warning, #c80) 22%, var(--surface) 78%);
     border: 2px solid var(--warning, #c80);
     border-radius: 8px;
-    color: #3a2000;
+    color: var(--text);
   }
 
   .table-wrap {
@@ -452,20 +462,25 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 0.9rem;
+    color: var(--text);
   }
 
   th, td {
     text-align: left;
     padding: 0.4rem 0.55rem;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
     vertical-align: middle;
   }
 
-  th { font-weight: 700; background: #f6f6f6; }
+  th {
+    font-weight: 700;
+    background: color-mix(in oklab, var(--text) 7%, transparent);
+  }
 
   td code {
     font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
-    background: #f0f0f0;
+    background: color-mix(in oklab, var(--text) 10%, transparent);
+    color: var(--text);
     padding: 0.05rem 0.35rem;
     border-radius: 4px;
   }
@@ -475,8 +490,10 @@
 
   td.note-cell { max-width: 220px; white-space: pre-wrap; word-break: break-word; }
 
-  .empty { text-align: center; color: #777; padding: 1rem; }
+  .empty { text-align: center; color: var(--muted); padding: 1rem; }
 
+  /* Status badges keep their semantic hues but blend toward the surface so
+   * they read on both light and dark backgrounds. */
   .badge {
     display: inline-flex;
     align-items: center;
@@ -484,13 +501,14 @@
     border-radius: 999px;
     font-size: 0.78rem;
     font-weight: 700;
-    background: #eee;
+    background: color-mix(in oklab, var(--text) 10%, transparent);
+    color: var(--text);
   }
 
-  .badge[data-status='active']    { background: #c8eccd; }
-  .badge[data-status='unclaimed'] { background: #e6e6e6; }
-  .badge[data-status='expired']   { background: #fde0a8; }
-  .badge[data-status='revoked']   { background: #f6c9c9; }
+  .badge[data-status='active']    { background: color-mix(in oklab, #2e9c5b 35%, var(--surface) 65%); }
+  .badge[data-status='unclaimed'] { background: color-mix(in oklab, var(--text) 12%, transparent); }
+  .badge[data-status='expired']   { background: color-mix(in oklab, #e08a3c 40%, var(--surface) 60%); }
+  .badge[data-status='revoked']   { background: color-mix(in oklab, #d4524f 38%, var(--surface) 62%); }
 
   .admin-list {
     list-style: none;
@@ -506,9 +524,10 @@
     justify-content: space-between;
     gap: 0.6rem;
     padding: 0.35rem 0.6rem;
-    border: 1px solid #e5e5e5;
+    border: 1px solid color-mix(in oklab, var(--text) 14%, transparent);
     border-radius: 8px;
-    background: #fafafa;
+    background: color-mix(in oklab, var(--text) 4%, var(--surface));
+    color: var(--text);
   }
 
   .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
@@ -520,7 +539,7 @@
 
   .status[data-kind='success'] { color: var(--success, #2a7); }
   .status[data-kind='error']   { color: var(--danger, #b22); }
-  .status[data-kind='info']    { color: #555; }
+  .status[data-kind='info']    { color: var(--muted); }
 
   .error { color: var(--danger, #b22); font-weight: 600; }
 </style>

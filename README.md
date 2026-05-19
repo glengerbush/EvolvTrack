@@ -7,20 +7,33 @@ Make mobile friendly
 
 
 ## Setup
+Prerequisite: Docker must be installed and runnable without `sudo`.
 
-1. Install deps:
+1. Install deps (includes the Supabase CLI):
    ```bash
    npm install
    ```
-2. Create `.env` containing:
+2. Start the local stack (Postgres, Auth, Realtime, Studio, …). First run downloads ~9 containers and may take a few minutes; it auto-applies everything in `supabase/migrations/`:
    ```bash
-   VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-   VITE_SUPABASE_ANON_KEY=YOUR_ANON_KEY
+   npm run db:start
    ```
-3. Run dev server:
+3. The command from step 2 prints the API url and Publishable authentication key. Create `.env`. Pointing at a hosted Supabase project:
+   ```bash
+   VITE_SUPABASE_URL=http://127.0.0.1:54321
+   VITE_SUPABASE_ANON_KEY=sb_publishable_xxxxxxxxxx
+   ```
+4. Run the dev server:
    ```bash
    npm run dev
    ```
+   Local server should be viewable at http://localhost:5173/
+
+5. Note:
+   - `npm run db:stop` — shuts the stack down (keeps DB volume)
+   - `npm run db:migrate` — apply any pending new migrations to the running local DB (non-destructive; same effect as `supabase db push` in prod)
+   - `npm run db:reset` — drop and re-apply all migrations from scratch (destructive — wipes local data)
+   - Studio UI: http://127.0.0.1:54323
+
 
 ## Stack & runtime model
 

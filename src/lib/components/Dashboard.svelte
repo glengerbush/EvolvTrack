@@ -1,10 +1,15 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
   import { activeColorMode, activeTabThemes, activeTheme } from "$lib/stores/themeStore";
   import { drugPalettes } from "$lib/theme/dashboardTheme";
   import { isDemoMode } from "$lib/stores/demoStore";
+  import { authState } from "$lib/stores/authStore";
+  import { setupWizardPending } from "$lib/stores/setupWizardStore";
   import { APP_VERSION } from "$lib/version";
   import { logoutAndClearLocalData } from "$lib/auth/supabase";
   import { updateAvailable, applyUpdate } from "$lib/utils/pwa";
+  import SetupWizard from "$lib/components/SetupWizard.svelte";
   import SyncStatusPill from "$lib/components/sync/SyncStatusPill.svelte";
   import HealthTab from "$lib/components/dashboard/tabs/HealthTab.svelte";
   import MedicationTab from "$lib/components/dashboard/tabs/MedicationTab.svelte";
@@ -150,6 +155,28 @@
       window.location.href = "/auth";
     }
   }
+
+  // Topbar button mode:
+  //   - signed-in: "Log out" (wipes local data on the way out)
+  //   - demo:     "Exit demo" (wipes demo seed data, returns to landing)
+  //   - offline (not demo, not signed-in): "Sign up" CTA that preserves data
+  const topbarAuthMode = $derived<'logout' | 'signup' | 'exit-demo'>(
+    $authState.kind === 'signed-in' ? 'logout' : $isDemoMode ? 'exit-demo' : 'signup',
+  );
+
+  function handleSignUp() {
+    if (hasAnyUnsavedChanges && !confirm(UNSAVED_NAVIGATION_MESSAGE)) return;
+    window.location.href = resolve('/register');
+  }
+
+  async function handleExitDemo() {
+    if (hasAnyUnsavedChanges && !confirm(UNSAVED_NAVIGATION_MESSAGE)) return;
+    // Navigate away first so the dashboard unmounts before the demo badge
+    // disappears and demo rows blink out — otherwise the user sees the
+    // topbar flip to "Sign up" while data is still being cleared.
+    await goto(resolve('/'));
+    await isDemoMode.disable();
+  }
 </script>
 
 <svelte:head>
@@ -164,7 +191,7 @@
 >
   <header class="app-topbar">
     <div class="brand-lockup" aria-label="EvolvTrack">
-      <img class="brand-icon" src="/logo.svg" alt="" />
+      <span class="brand-icon" role="img" aria-label="EvolvTrack logo"></span>
       <span class="brand-name">EvolvTrack</span>
       <span class="version-badge">v{APP_VERSION}</span>
       {#if $isDemoMode}
@@ -176,9 +203,19 @@
         <button class="update-button" onclick={applyUpdate}>Update available</button>
       {/if}
       <SyncStatusPill />
-      <button class="logout-button" onclick={handleLogout}>Log out</button>
+      {#if topbarAuthMode === 'logout'}
+        <button class="logout-button" onclick={handleLogout}>Log out</button>
+      {:else if topbarAuthMode === 'signup'}
+        <button class="signup-button" onclick={handleSignUp}>Sign up</button>
+      {:else if topbarAuthMode === 'exit-demo'}
+        <button class="logout-button" onclick={handleExitDemo}>Exit demo</button>
+      {/if}
     </div>
   </header>
+
+  {#if $setupWizardPending && $authState.kind === 'signed-in'}
+    <SetupWizard />
+  {/if}
 
   <header class="tabbar">
     <nav class="top-tabs" aria-label="Dashboard tabs">
@@ -274,6 +311,18 @@
     border-radius: 8px;
     border: 2px solid var(--cardBorder);
     flex: 0 0 auto;
+    display: inline-block;
+    position: relative;
+    background-color: var(--cardBorder);
+  }
+
+  .brand-icon::before {
+    content: "";
+    position: absolute;
+    inset: 5% 5% 0% 0;
+    background-color: #ffffff;
+    -webkit-mask: url('/logo.svg') no-repeat center / 120% 120%;
+    mask: url('/logo.svg') no-repeat center / 120% 120%;
   }
 
   .brand-name {
@@ -336,7 +385,8 @@
     padding: 0.2rem 0.55rem;
   }
 
-  .logout-button {
+  .logout-button,
+  .signup-button {
     border: 3px solid var(--cardBorder);
     border-radius: 12px;
     background: color-mix(in oklab, var(--headerBg) 60%, white 40%);
@@ -346,6 +396,11 @@
     padding: 0 0.85rem;
     height: 3rem;
     font-size: 1rem;
+  }
+
+  .signup-button {
+    background: var(--headerBg);
+    color: var(--headerText);
   }
 
   .top-tabs {
@@ -422,7 +477,8 @@
       font-size: 0.72rem;
     }
 
-    .logout-button {
+    .logout-button,
+    .signup-button {
       height: 2.45rem;
       font-size: 0.9rem;
     }
@@ -434,7 +490,8 @@
       flex-direction: column;
     }
 
-    .logout-button {
+    .logout-button,
+    .signup-button {
       width: 100%;
     }
   }

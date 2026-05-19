@@ -3,12 +3,15 @@ import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import {
   addInjection,
+  addPrescription,
   addWeight,
   bulkUpdateInjections,
+  bulkUpdatePrescriptions,
   clearAllData,
   deleteInjection,
   deleteWeight,
   getAllInjections,
+  getAllPrescriptions,
   onHealthDataChange,
   type HealthDataChange,
   updateInjection,
@@ -135,6 +138,68 @@ describe('repo health-change events', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  // Mirror of bulkUpdateInjections, used by the import flow to backfill a
+  // medication type onto vial rows that arrived without one. Prescriptions are
+  // observed via liveQuery so no health-change event is emitted, but every row
+  // must still be patched in a single transaction.
+  it('bulkUpdatePrescriptions persists every patched row without emitting events', async () => {
+    const created = await Promise.all([
+      addPrescription({ concentrationMgMl: 5 }),
+      addPrescription({ concentrationMgMl: 10 }),
+      addPrescription({ concentrationMgMl: 15 }),
+    ]);
+    const ids = created.map((p) => p.id);
+
+    const { events, unsubscribe } = captureChanges();
+    try {
+      await bulkUpdatePrescriptions(ids, { type: SEMA });
+      expect(events).toHaveLength(0);
+
+      const persisted = await getAllPrescriptions();
+      const byId = new Map(persisted.map((p) => [p.id, p]));
+      for (const id of ids) {
+        expect(byId.get(id)?.type).toBe(SEMA);
+      }
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('bulkUpdateInjections stamps the patched field per row without touching siblings', async () => {
+    // Confirms per-field LWW for the bulk path: each row gets `medication`
+    // bumped to a fresh stamp, but every row's other fields keep their own
+    // pre-edit stamps. Without this, a concurrent edit to e.g. `amountMg` on
+    // another device could be silently clobbered by the bulk push.
+    const created = await Promise.all([
+      addInjection({ date: TODAY, amountMg: 1, medication: '', site: '', symptoms: [] }),
+      addInjection({ date: TODAY, amountMg: 2, medication: '', site: '', symptoms: [] }),
+    ]);
+    const ids = created.map((i) => i.id);
+    const originalAmountStamps = created.map((i) => i.fieldUpdatedAt!.amountMg);
+
+    await bulkUpdateInjections(ids, { medication: SEMA });
+
+    const persisted = await getAllInjections();
+    const byId = new Map(persisted.map((i) => [i.id, i]));
+    for (let i = 0; i < ids.length; i++) {
+      const row = byId.get(ids[i])!;
+      // Patched field's stamp moved forward...
+      expect(new Date(row.fieldUpdatedAt!.medication).getTime())
+        .toBeGreaterThanOrEqual(new Date(originalAmountStamps[i]).getTime());
+      // ...but the unpatched per-row stamp is preserved.
+      expect(row.fieldUpdatedAt!.amountMg).toBe(originalAmountStamps[i]);
+    }
+  });
+
+  it('bulkUpdatePrescriptions with an empty id list writes nothing', async () => {
+    const created = await addPrescription({ type: SEMA, concentrationMgMl: 5 });
+
+    await bulkUpdatePrescriptions([], { type: 'Tirzepatide (Mounjaro / Zepbound)' });
+
+    const persisted = await getAllPrescriptions();
+    expect(persisted.find((p) => p.id === created.id)?.type).toBe(SEMA);
   });
 
   it('bulkUpdateInjections with an empty id list emits nothing and writes nothing', async () => {

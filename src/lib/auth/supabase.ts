@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { db } from '$lib/db/schema';
-import { clearSessionPassphrase } from '$lib/sync/session-key';
+import { clearSession } from '$lib/sync/session-key';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -64,9 +64,31 @@ export async function signUpWithPassword(identifier: string, password: string) {
   });
 }
 
+/**
+ * Permanently deletes the signed-in user's account on the server (auth.users
+ * + every FK-cascaded row) and then wipes local state, identical to a
+ * logout. Throws if the RPC fails so the caller can surface the error before
+ * any local cleanup runs.
+ */
+export async function deleteAccountAndClearLocalData() {
+  const { error } = await supabase.rpc('delete_self');
+  if (error) throw new Error(error.message);
+  await logoutAndClearLocalData();
+}
+
 export async function logoutAndClearLocalData() {
-  await supabase.auth.signOut({ scope: 'global' });
-  clearSessionPassphrase();
+  // Tell the server to invalidate all sessions for this user. Best-effort:
+  // network failures, expired tokens, or server outages must NOT abort local
+  // cleanup, otherwise the persisted session key and other auth state stay on
+  // disk after the user clicked "Log out". The local credentials are gone
+  // regardless of whether the server got the memo.
+  try {
+    await supabase.auth.signOut({ scope: 'global' });
+  } catch {
+    // Best-effort server signout.
+  }
+
+  clearSession();
 
   const dbDeleteTimeoutMs = 1500;
   await Promise.race([

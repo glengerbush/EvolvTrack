@@ -13,6 +13,7 @@ import {
   ENCRYPTION_FORMAT_VERSION,
   clearPassphraseMaterial,
   decryptRecord,
+  deriveSessionKey,
   encryptRecord,
   generateRecoveryCodes,
   initializePassphrase,
@@ -42,56 +43,61 @@ describe('initializePassphrase', () => {
   });
 });
 
-describe('encryptRecord', () => {
+describe('deriveSessionKey', () => {
   it('throws when no salt is present (passphrase not initialized)', async () => {
-    await expect(encryptRecord('pw', { a: 1 })).rejects.toThrow(/missing key salt/i);
+    await expect(deriveSessionKey('pw')).rejects.toThrow(/missing key salt/i);
     expect(callMock).not.toHaveBeenCalled();
   });
 
-  it('serializes the record to JSON and forwards it with the salt to the worker', async () => {
-    localStorage.setItem('et.salt', 'SALT_BBB');
+  it('forwards the passphrase and stored salt to the worker and returns the key bytes', async () => {
+    localStorage.setItem('et.salt', 'SALT_XYZ');
+    callMock.mockResolvedValueOnce({ keyB64: 'KEY_XYZ' });
+
+    const result = await deriveSessionKey('pw');
+
+    expect(result).toBe('KEY_XYZ');
+    expect(callMock).toHaveBeenCalledWith('derive-key', {
+      passphrase: 'pw',
+      saltB64: 'SALT_XYZ',
+    });
+  });
+});
+
+describe('encryptRecord', () => {
+  it('serializes the record to JSON and forwards it to the worker with the key', async () => {
     callMock.mockResolvedValueOnce({ ciphertext: 'CT', iv: 'IV' });
 
-    const result = await encryptRecord('pw', { a: 1, b: 'two' });
+    const result = await encryptRecord('KEY_BBB', { a: 1, b: 'two' });
 
     expect(result).toEqual({ ciphertext: 'CT', iv: 'IV' });
     expect(callMock).toHaveBeenCalledWith('encrypt', {
-      passphrase: 'pw',
-      saltB64: 'SALT_BBB',
+      keyB64: 'KEY_BBB',
       plaintext: JSON.stringify({ a: 1, b: 'two' }),
     });
   });
 });
 
 describe('decryptRecord', () => {
-  it('throws when no salt is present', async () => {
-    await expect(decryptRecord('pw', 'ct', 'iv')).rejects.toThrow(/missing key salt/i);
-    expect(callMock).not.toHaveBeenCalled();
-  });
-
-  it('forwards ciphertext/iv to the worker and JSON.parses the result', async () => {
-    localStorage.setItem('et.salt', 'SALT_CCC');
+  it('forwards ciphertext/iv to the worker with the key and JSON.parses the result', async () => {
     callMock.mockResolvedValueOnce({ plaintext: JSON.stringify({ hello: 'world' }) });
 
-    const result = await decryptRecord<{ hello: string }>('pw', 'CT', 'IV');
+    const result = await decryptRecord<{ hello: string }>('KEY_CCC', 'CT', 'IV');
     expect(result).toEqual({ hello: 'world' });
     expect(callMock).toHaveBeenCalledWith('decrypt', {
-      passphrase: 'pw',
-      saltB64: 'SALT_CCC',
+      keyB64: 'KEY_CCC',
       ciphertext: 'CT',
       iv: 'IV',
     });
   });
 
   it('propagates worker errors verbatim', async () => {
-    localStorage.setItem('et.salt', 'SALT_D');
     callMock.mockRejectedValueOnce(new Error('bad-key'));
-    await expect(decryptRecord('pw', 'CT', 'IV')).rejects.toThrow('bad-key');
+    await expect(decryptRecord('KEY_D', 'CT', 'IV')).rejects.toThrow('bad-key');
   });
 });
 
 describe('generateRecoveryCodes', () => {
-  it('produces 8 uppercase 8-char codes and persists them as JSON', () => {
+  it('produces 8 uppercase 8-char codes without writing to storage', () => {
     const codes = generateRecoveryCodes();
     expect(codes).toHaveLength(8);
     for (const code of codes) {
@@ -100,7 +106,8 @@ describe('generateRecoveryCodes', () => {
       // First 8 chars of a v4 UUID: hex chars and a possible dash.
       expect(code).toMatch(/^[0-9A-F-]{8}$/);
     }
-    expect(JSON.parse(localStorage.getItem('et.recovery.codes')!)).toEqual(codes);
+    // Codes are ephemeral; the modal owns their visibility lifecycle.
+    expect(localStorage.getItem('et.recovery.codes')).toBeNull();
   });
 
   it('returns a different set on each call (entropy from crypto.randomUUID)', () => {
@@ -111,9 +118,9 @@ describe('generateRecoveryCodes', () => {
 });
 
 describe('clearPassphraseMaterial', () => {
-  it('removes both the salt and the stored recovery codes', () => {
+  it('removes the salt and wipes any legacy recovery codes', () => {
     localStorage.setItem('et.salt', 'x');
-    localStorage.setItem('et.recovery.codes', '["a"]');
+    localStorage.setItem('et.recovery.codes', '["a"]'); // legacy from older builds
     localStorage.setItem('unrelated', 'keepme');
 
     clearPassphraseMaterial();

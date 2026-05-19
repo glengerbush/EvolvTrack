@@ -5,6 +5,7 @@ import {
   lastPushAt,
   lastSyncError,
   lastSynced,
+  licenseActive,
   outboxCount,
   syncStatus,
   type Connectivity,
@@ -33,6 +34,7 @@ export type SyncKind =
   | 'auth-loading'
   | 'connecting'
   | 'offline'
+  | 'no-license'
   | 'locked'
   | 'migration-paused'
   | 'migrating'
@@ -90,14 +92,18 @@ function pickKind(args: {
   outbox: number;
   migrationPaused: boolean;
   isMigrating: boolean;
+  licenseActive: boolean | null;
 }): SyncKind {
-  const { auth, conn, status, syncMode, locked, outbox, migrationPaused, isMigrating } = args;
+  const { auth, conn, status, syncMode, locked, outbox, migrationPaused, isMigrating, licenseActive } = args;
   if (auth.kind === 'loading') return 'auth-loading';
   // Offline beats signed-out: you can't sign in while offline, so showing
   // "Sign in to sync" would be useless guidance.
   if (conn === 'offline') return 'offline';
   if (auth.kind === 'signed-out-expired') return 'signed-out-expired';
   if (auth.kind === 'signed-out') return 'signed-out';
+  // No active license: cloud sync is intentionally skipped. Surface this as a
+  // distinct neutral state rather than letting it fall through to 'error'.
+  if (licenseActive === false) return 'no-license';
   if (conn === 'connecting') return 'connecting';
   if (migrationPaused) return 'migration-paused';
   if (isMigrating) return 'migrating';
@@ -120,6 +126,8 @@ function describe(kind: SyncKind, outbox: number, syncMode: SyncMode): { label: 
       return { label: 'Connecting', description: 'Reaching the sync server…', tone: 'progress' };
     case 'offline':
       return { label: 'Offline', description: 'No connection. Your edits are saved locally and will sync when you reconnect.', tone: 'warn' };
+    case 'no-license':
+      return { label: 'No license', description: 'Cloud sync needs a license. Claim one in Settings → License. Your data is saved locally.', tone: 'neutral' };
     case 'locked':
       return { label: 'Locked', description: 'Enter your passphrase to resume encrypted sync.', tone: 'warn' };
     case 'migration-paused':
@@ -159,6 +167,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
     authState,
     profileStore,
     sessionLocked,
+    licenseActive,
   ],
   ([
     $syncStatus,
@@ -171,6 +180,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
     $auth,
     $profile,
     $locked,
+    $licenseActive,
   ]) => {
     const syncMode = getProfileSyncMode($profile);
     const migrationState = $profile?.e2eeMigration;
@@ -186,6 +196,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
       outbox: $outboxCount,
       migrationPaused,
       isMigrating,
+      licenseActive: $licenseActive,
     });
 
     const { label, description, tone } = describe(kind, $outboxCount, syncMode);

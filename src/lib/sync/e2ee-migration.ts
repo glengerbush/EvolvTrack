@@ -13,13 +13,14 @@ import {
   ENCRYPTION_FORMAT_VERSION,
   clearPassphraseMaterial,
   decryptRecord,
+  deriveSessionKey,
   encryptRecord,
   generateRecoveryCodes,
   initializePassphrase,
 } from '$lib/crypto/e2ee';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { getDeviceId, upsertRemoteSyncAccount } from '$lib/sync/account-state';
-import { clearSessionPassphrase, setSessionPassphrase } from '$lib/sync/session-key';
+import { clearSession, setSessionKey } from '$lib/sync/session-key';
 import { clearPullCursor } from '$lib/sync/pull-cursor';
 import {
   deleteRemoteEncryptedChanges,
@@ -128,13 +129,13 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
   return items;
 }
 
-async function backfillEncryptedRecords(passphrase: string, migrationId: string): Promise<number> {
+async function backfillEncryptedRecords(sessionKey: string, migrationId: string): Promise<number> {
   const items = await collectBackfillItems();
   const encryptedRecords: EncryptedRecord[] = [];
   const backfillEntries: MigrationBackfillEntry[] = [];
 
   for (const item of items) {
-    const encrypted = await encryptRecord(passphrase, {
+    const encrypted = await encryptRecord(sessionKey, {
       aggregate: item.aggregate,
       op: 'upsert',
       record: item.payload,
@@ -188,12 +189,12 @@ async function collectPlainChangesFromLocalRecords(migrationId: string): Promise
   }));
 }
 
-async function decryptLocalBackfill(passphrase: string, migrationId: string) {
+async function decryptLocalBackfill(sessionKey: string, migrationId: string) {
   const rows = await db.migrationBackfill.orderBy('createdAt').toArray();
   const plainChanges: PlainSyncChange[] = [];
 
   for (const row of rows) {
-    const decrypted = await decryptRecord<EncryptedSyncPayload>(passphrase, row.payloadCiphertext, row.payloadIv);
+    const decrypted = await decryptRecord<EncryptedSyncPayload>(sessionKey, row.payloadCiphertext, row.payloadIv);
     plainChanges.push({
       id: makePlainChangeId(migrationId, row.id),
       aggregate: decrypted.aggregate ?? row.aggregate,
@@ -211,12 +212,12 @@ async function decryptLocalBackfill(passphrase: string, migrationId: string) {
   };
 }
 
-async function decryptRemoteBackfill(passphrase: string, migrationId: string) {
+async function decryptRemoteBackfill(sessionKey: string, migrationId: string) {
   const rows = await fetchRemoteEncryptedChanges();
   const plainChanges: PlainSyncChange[] = [];
 
   for (const row of rows) {
-    const decrypted = await decryptRecord<EncryptedSyncPayload>(passphrase, row.ciphertext, row.iv);
+    const decrypted = await decryptRecord<EncryptedSyncPayload>(sessionKey, row.ciphertext, row.iv);
     plainChanges.push({
       id: makePlainChangeId(migrationId, row.id),
       aggregate: decrypted.aggregate ?? row.aggregate,
@@ -267,12 +268,15 @@ async function continueE2EEMigration(
   }
 
   const migration = profile.e2eeMigration;
-  // Cache the passphrase so steady-state encrypted sync can run without
-  // re-prompting once the migration completes.
-  setSessionPassphrase(passphrase);
+  // Derive the key from the passphrase once. Cache it in memory so steady-state
+  // encrypted sync can run without re-prompting once the migration completes —
+  // the migration itself doesn't get a "Remember on this device" choice, so we
+  // don't persist here. The user can still opt in via the unlock modal later.
+  const sessionKey = await deriveSessionKey(passphrase);
+  setSessionKey(sessionKey);
 
   try {
-    const encryptedEventCount = await backfillEncryptedRecords(passphrase, migration.id);
+    const encryptedEventCount = await backfillEncryptedRecords(sessionKey, migration.id);
     const updatedMigration: E2EEMigrationState = {
       ...migration,
       encryptedEventCount,
@@ -335,6 +339,17 @@ export async function startE2EEMigration(passphrase: string): Promise<E2EEMigrat
     return continueE2EEMigration(passphrase);
   }
 
+  // Wipe any residual encrypted state before starting a fresh migration. An
+  // interrupted prior session can leave rows in db.migrationBackfill or on
+  // sync_changes_encrypted that were encrypted with an *old* key; those rows
+  // would otherwise get re-pushed and then fail to decrypt with the new key,
+  // crashing every subsequent sync cycle with an opaque OperationError.
+  await db.transaction('rw', db.encrypted, db.migrationBackfill, async () => {
+    await db.encrypted.clear();
+    await db.migrationBackfill.clear();
+  });
+  await deleteRemoteEncryptedChanges().catch(() => undefined);
+
   const migration = createMigration('enable');
   await initializePassphrase(passphrase);
   const recoveryCodes = generateRecoveryCodes();
@@ -375,7 +390,7 @@ async function finishE2EEDisableMigration(
     await db.migrationBackfill.clear();
   });
   clearPassphraseMaterial();
-  clearSessionPassphrase();
+  clearSession();
   // Steady-state sync now pulls `sync_changes_plain` instead of `sync_changes_encrypted`;
   // the old cursor doesn't apply to the new table's `inserted_at` sequence.
   clearPullCursor();
@@ -396,13 +411,14 @@ async function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMig
 
   const migration = profile.e2eeMigration;
   // Needed to decrypt the remote events being converted back to plaintext.
-  setSessionPassphrase(passphrase);
+  const sessionKey = await deriveSessionKey(passphrase);
+  setSessionKey(sessionKey);
 
   try {
-    const remoteDecrypted = await decryptRemoteBackfill(passphrase, migration.id);
+    const remoteDecrypted = await decryptRemoteBackfill(sessionKey, migration.id);
     const localDecrypted = remoteDecrypted.plainChanges.length
       ? { plainChanges: [] as PlainSyncChange[], encryptedChangeIds: [] as string[] }
-      : await decryptLocalBackfill(passphrase, migration.id);
+      : await decryptLocalBackfill(sessionKey, migration.id);
     const encryptedChangeIds = remoteDecrypted.encryptedChangeIds.length
       ? remoteDecrypted.encryptedChangeIds
       : localDecrypted.encryptedChangeIds;

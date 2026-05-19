@@ -6,6 +6,9 @@
     signInWithPassword,
     signUpWithPassword
   } from '$lib/auth/supabase';
+  import { isDemoMode } from '$lib/stores/demoStore';
+  import { setupWizardPending } from '$lib/stores/setupWizardStore';
+  import { get } from 'svelte/store';
 
   let { initialTab = 'login' }: { initialTab?: 'login' | 'signup' } = $props();
 
@@ -83,13 +86,33 @@
       return;
     }
 
-    const { error } = await signUpWithPassword(identifier, password);
+    const { data, error } = await signUpWithPassword(identifier, password);
     const providedEmail = identifier.trim().includes('@');
-    status = error
-      ? error.message
-      : providedEmail
-        ? 'Account created. You can sign in with your email and password.'
-        : 'Account created. You can sign in with your username and password.';
+
+    if (error) {
+      status = error.message;
+      return;
+    }
+
+    // Demo data is sample content, not the user's own — drop it before the
+    // account starts syncing so we never push demo rows up.
+    if (get(isDemoMode)) {
+      await isDemoMode.disable();
+    }
+
+    // Supabase returns a session here when email confirmation isn't required
+    // (the common path for username-only signups). Treat that as logged-in
+    // and route to the dashboard; the setup wizard takes it from there.
+    if (data?.session) {
+      setupWizardPending.mark();
+      status = 'Account created.';
+      await goto(resolve('/app'));
+      return;
+    }
+
+    status = providedEmail
+      ? 'Account created. Check your email to confirm and sign in.'
+      : 'Account created. You can sign in with your username and password.';
   }
 
   function handleLoginSubmit(event: SubmitEvent) {
@@ -164,7 +187,7 @@
       </form>
     {/if}
 
-    <a class="btn btn-ghost offline-cta" href={resolve('/app')}>continue without an account</a>
+    <a class="btn btn-ghost offline-cta" href={resolve('/app')}>Continue without an account</a>
     <small>{status}</small>
   </div>
   <div class="right card">
@@ -215,7 +238,14 @@
   .tab:focus-visible { outline: 2px solid color-mix(in oklab, var(--text) 45%, transparent); outline-offset: -2px; }
   .auth-form { display:grid; gap:.8rem; }
   .hint { cursor: help; margin-left: .4rem; color: var(--muted); font-size: .9em; }
-  .offline-cta { justify-self: start; display: inline-flex; }
+  .offline-cta {
+    display: block;
+    width: 100%;
+    margin-top: .4rem;
+    padding: 0.72rem 1.2rem;
+    text-align: center;
+    text-decoration: none;
+  }
   input {
     display: block;
     width: 100%;

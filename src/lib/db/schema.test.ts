@@ -49,6 +49,6 @@ describe('schema.ts singleton', () => {
   });
 
   it('re-exports DB_SCHEMA_VERSION from migrations.ts', () => {
-    expect(DB_SCHEMA_VERSION).toBe(1);
+    expect(DB_SCHEMA_VERSION).toBe(2);
   });
 });

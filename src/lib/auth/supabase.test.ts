@@ -142,4 +142,19 @@ describe('logoutAndClearLocalData', () => {
     await expect(promise).resolves.toBeUndefined();
     vi.useRealTimers();
   });
+
+  it('still wipes local storage when the server signOut fails', async () => {
+    // Regression: if signOut threw (offline, server down, expired token), the
+    // original implementation aborted local cleanup and the persisted session
+    // key — plus everything else — stayed on disk after the user "logged out".
+    localStorage.setItem('et.session.key', 'PERSISTED_KEY');
+    localStorage.setItem('et.salt', 'SALT');
+    h.signOutMock.mockRejectedValueOnce(new Error('network down'));
+
+    await logoutAndClearLocalData();
+
+    expect(localStorage.getItem('et.session.key')).toBeNull();
+    expect(localStorage.getItem('et.salt')).toBeNull();
+    expect(h.dbDeleteMock).toHaveBeenCalledTimes(1);
+  });
 });

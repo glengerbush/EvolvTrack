@@ -57,7 +57,7 @@ describe('cryptoWorker.call', () => {
     await p1;
 
     // Second call — should not create a new Worker.
-    const p2 = cryptoWorker.call('encrypt', { passphrase: 'pw', saltB64: 'S', plaintext: 'x' });
+    const p2 = cryptoWorker.call('encrypt', { keyB64: 'K', plaintext: 'x' });
     expect(FakeWorker.instances).toHaveLength(1);
     expect(worker.posted).toHaveLength(2);
     worker.respond({ id: worker.posted[1].id, ok: true, data: { ciphertext: 'c', iv: 'i' } });
@@ -85,8 +85,7 @@ describe('cryptoWorker.call', () => {
     const { cryptoWorker } = await import('./worker-client');
 
     const promise = cryptoWorker.call('decrypt', {
-      passphrase: 'pw',
-      saltB64: 'S',
+      keyB64: 'K',
       ciphertext: 'c',
       iv: 'i',
     });

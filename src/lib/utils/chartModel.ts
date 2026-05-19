@@ -70,6 +70,14 @@ type SystemDailySeries = {
   values: { date: IsoDate; value: number }[];
 };
 
+export type ChartDoseMarker = {
+  date: IsoDate;
+  x: number;
+  y: number;
+  amountMg: number;
+  medication: string;
+};
+
 export type ChartSystemSeries = {
   key: SystemGraphSeriesKey;
   label: string;
@@ -78,8 +86,8 @@ export type ChartSystemSeries = {
   shape: DrugShape;
   actualPath: string;
   predictionPath: string;
-  dosePoints: { date: IsoDate; x: number; y: number }[];
-  plannedDosePoints: { date: IsoDate; x: number; y: number }[];
+  dosePoints: ChartDoseMarker[];
+  plannedDosePoints: ChartDoseMarker[];
 };
 
 export type ChartModel = {
@@ -104,6 +112,20 @@ export type ChartModel = {
   todayX: number | null;
   leftAxisLabel: string;
   rightAxisLabel: string;
+  /**
+   * Map a CSS-pixel x within the scrollable data-svg (i.e. element.scrollLeft
+   * units) to the date drawn at that column. Clamps to the data range.
+   */
+  dateForCssX: (cssX: number) => IsoDate;
+  /**
+   * Map a date to its CSS-pixel x within the scrollable data-svg. Returns NaN
+   * if the date is outside the chart's range.
+   */
+  cssXForDate: (date: IsoDate) => number;
+  /** Invert yLeft: pixel y → weight value (returns null if outside the plot area). */
+  valueLeftForY: (y: number) => number | null;
+  /** Invert yRight: pixel y → mg/wellness value (returns null if outside plot area). */
+  valueRightForY: (y: number) => number | null;
 };
 
 export const CHART = {
@@ -132,10 +154,14 @@ export const GRAPH_SERIES: { key: GraphSeriesKey; label: string; className: stri
 const X_AXIS_PADDING = 18;
 const DAY_PIXEL_WIDTH = 30;
 const WELLNESS_BLOCK_GAP = 3;
+/** Minimum horizontal space (px) per date label so rotated "M/D" text doesn't collide. */
+const MIN_DATE_TICK_SPACING = 14;
 
 type HiddenGraphSeries = {
   has(key: GraphSeriesKey): boolean;
 };
+
+export type ChartXRange = 'all' | { visibleDays: number };
 
 export function buildChartModel(
   rows: ChartHealthRow[],
@@ -144,6 +170,8 @@ export function buildChartModel(
   fallbackWeight: number,
   today: IsoDate,
   hiddenSeries: HiddenGraphSeries,
+  xRange: ChartXRange = 'all',
+  viewportPlotWidth?: number,
 ): ChartModel {
   // A skipped dose invalidates its entire row — weight, wellness, symptoms, and
   // the dose itself are all ignored for chart purposes.
@@ -156,6 +184,8 @@ export function buildChartModel(
   const confirmedDoseDates = doses.filter((dose) => !dose.planned).map((dose) => dose.date);
   const dataDates = datedRows.map((row) => row.date);
 
+  // Date range covers all data. xRange only controls how many days fit in the
+  // viewport at once — content outside the viewport is reachable by scrolling.
   let startDate = minDateKey(dataDates) ?? addDays(today, -28);
   let endDate = maxDateKey(dataDates) ?? today;
 
@@ -164,11 +194,39 @@ export function buildChartModel(
     endDate = addDays(endDate, 7);
   }
 
+  // For fixed-window modes, make sure the date span is at least one window
+  // wide so the viewport is always "full". Extend backward so today stays at
+  // the right edge.
+  if (xRange !== 'all') {
+    const span = daysBetween(startDate, endDate) + 1;
+    if (span < xRange.visibleDays) {
+      startDate = addDays(startDate, -(xRange.visibleDays - span));
+    }
+  }
+
   const dateKeys = enumerateDateKeys(startDate, endDate);
-  const widthPx = Math.max(CHART.width, CHART.margin.left + CHART.margin.right + (dateKeys.length - 1) * DAY_PIXEL_WIDTH);
-  const plotRight = widthPx - CHART.margin.right;
-  const plotWidth = widthPx - CHART.margin.left - CHART.margin.right;
+  const totalDays = dateKeys.length;
   const daySpan = Math.max(daysBetween(startDate, endDate), 1);
+
+  // dayPixelWidth: how many CSS pixels each day occupies. Drives total chart
+  // width and date-tick decimation.
+  let dayPixelWidth: number;
+  if (viewportPlotWidth != null && viewportPlotWidth > 0) {
+    const visibleDays = xRange === 'all' ? totalDays : Math.min(xRange.visibleDays, totalDays);
+    dayPixelWidth = viewportPlotWidth / Math.max(visibleDays, 1);
+  } else {
+    // Backward-compat path used by unit tests where viewport width is unknown.
+    dayPixelWidth = DAY_PIXEL_WIDTH;
+  }
+
+  const computedPlotWidth = Math.max(1, dayPixelWidth * totalDays);
+  const minPlotWidth = CHART.width - CHART.margin.left - CHART.margin.right;
+  const plotWidth =
+    viewportPlotWidth != null && viewportPlotWidth > 0
+      ? computedPlotWidth
+      : Math.max(minPlotWidth, computedPlotWidth);
+  const widthPx = plotWidth + CHART.margin.left + CHART.margin.right;
+  const plotRight = widthPx - CHART.margin.right;
   const usablePlotWidth = Math.max(plotWidth - X_AXIS_PADDING * 2, 1);
   const xForDate = (date: IsoDate) => {
     return PLOT.left + X_AXIS_PADDING + (daysBetween(startDate, date) / daySpan) * usablePlotWidth;
@@ -215,10 +273,18 @@ export function buildChartModel(
     const filterForSeries = (dose: DosePoint) =>
       isUnified || dose.medication === series.medication;
     const pointsByDate = new Map(points.map((p) => [p.date, p]));
-    const toMarkers = (source: DosePoint[]) =>
+    const toMarkers = (source: DosePoint[]): ChartDoseMarker[] =>
       source.filter(filterForSeries).flatMap((dose) => {
         const point = pointsByDate.get(dose.date);
-        return point ? [{ date: dose.date, x: point.x, y: point.y }] : [];
+        return point
+          ? [{
+              date: dose.date,
+              x: point.x,
+              y: point.y,
+              amountMg: dose.amountMg,
+              medication: dose.medication,
+            }]
+          : [];
       });
 
     return {
@@ -262,7 +328,7 @@ export function buildChartModel(
       label: formatAxisNumber(value),
       y: yRight(value),
     })),
-    dateTicks: buildDateTicks(dateKeys, xForDate),
+    dateTicks: buildDateTicks(dateKeys, xForDate, dayPixelWidth),
     wellnessStacks: dateKeys.map((date) => {
       const entry = wellnessByDate.get(date);
       const value = entry?.value ?? 0;
@@ -293,6 +359,27 @@ export function buildChartModel(
     todayX: today >= startDate && today <= endDate ? xForDate(today) : null,
     leftAxisLabel: `Weight (${unit})`,
     rightAxisLabel,
+    // CSS-x within the data-svg is the same as viewBox-x minus PLOT.left, since
+    // the data-svg's CSS width equals its viewBox width (plotWidth).
+    dateForCssX: (cssX: number) => {
+      const viewBoxX = cssX + PLOT.left;
+      const daysFromStart =
+        ((viewBoxX - PLOT.left - X_AXIS_PADDING) * daySpan) / usablePlotWidth;
+      const clamped = Math.max(0, Math.min(daySpan, Math.round(daysFromStart)));
+      return addDays(startDate, clamped);
+    },
+    cssXForDate: (date: IsoDate) => {
+      const viewBoxX = xForDate(date);
+      return viewBoxX - PLOT.left;
+    },
+    valueLeftForY: (y: number) => {
+      if (y < PLOT.top || y > PLOT.bottom) return null;
+      return leftMin + ((PLOT.bottom - y) * (leftMax - leftMin)) / PLOT.height;
+    },
+    valueRightForY: (y: number) => {
+      if (y < PLOT.top || y > PLOT.bottom) return null;
+      return ((PLOT.bottom - y) * rightMax) / PLOT.height;
+    },
   };
 }
 
@@ -530,8 +617,13 @@ function getProjectionStartDate(
 function buildDateTicks(
   dateKeys: IsoDate[],
   xForDate: (date: IsoDate) => number,
+  dayPixelWidth: number,
 ) {
-  return dateKeys.map((date) => ({ date, label: formatShortDate(date), x: xForDate(date) }));
+  // Show every Nth day so labels don't collide. Round up so spacing >= the min.
+  const stride = Math.max(1, Math.ceil(MIN_DATE_TICK_SPACING / Math.max(dayPixelWidth, 0.1)));
+  return dateKeys
+    .filter((_, i) => i % stride === 0)
+    .map((date) => ({ date, label: formatShortDate(date), x: xForDate(date) }));
 }
 
 function paddedDomain(values: number[], minPadding: number): [number, number] {

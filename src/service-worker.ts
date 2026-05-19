@@ -9,7 +9,7 @@ const sw = self as unknown as ServiceWorkerGlobalScope;
 
 const CACHE = `evolvtrack-${version}`;
 const APP_SHELL = '/';
-const PRECACHE = [APP_SHELL, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/logo.svg'];
+const PRECACHE = [APP_SHELL, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/logo.svg', '/favicon.svg'];
 
 sw.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)));

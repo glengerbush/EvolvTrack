@@ -1,13 +1,15 @@
-export type WorkerAction = 'encrypt' | 'decrypt' | 'derive';
+export type WorkerAction = 'encrypt' | 'decrypt' | 'derive' | 'derive-key';
 
 export type WorkerPayloadMap = {
   derive: { passphrase: string };
-  encrypt: { passphrase: string; saltB64: string; plaintext: string };
-  decrypt: { passphrase: string; saltB64: string; ciphertext: string; iv: string };
+  'derive-key': { passphrase: string; saltB64: string };
+  encrypt: { keyB64: string; plaintext: string };
+  decrypt: { keyB64: string; ciphertext: string; iv: string };
 };
 
 export type WorkerResultMap = {
   derive: { saltB64: string };
+  'derive-key': { keyB64: string };
   encrypt: { ciphertext: string; iv: string };
   decrypt: { plaintext: string };
 };

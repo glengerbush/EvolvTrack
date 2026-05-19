@@ -1,4 +1,5 @@
 import { supabase } from '$lib/auth/supabase';
+import { licenseActive } from '$lib/stores/syncStore';
 
 export type LicenseTier = 'monthly' | 'yearly' | 'lifetime';
 export type LicenseStatus = 'unclaimed' | 'active' | 'expired' | 'revoked';
@@ -30,17 +31,31 @@ export async function fetchLicenseStatus(): Promise<LicenseStatusRow | null> {
   return rows[0] ?? null;
 }
 
+/**
+ * Fetches license status and mirrors `is_active` into the global
+ * `licenseActive` store so the sync orchestrator and pill can react.
+ * Returns true iff the user has an active license.
+ */
+export async function refreshLicenseActive(): Promise<boolean> {
+  const status = await fetchLicenseStatus();
+  const active = !!status?.is_active;
+  licenseActive.set(active);
+  return active;
+}
+
 export async function claimLicense(code: string): Promise<ClaimResultRow> {
   const { data, error } = await supabase.rpc('claim_license', { p_code: code });
   if (error) throw new Error(licenseErrorMessage(error.message));
   const rows = (data ?? []) as ClaimResultRow[];
   if (!rows[0]) throw new Error('License claim returned no result.');
+  licenseActive.set(true);
   return rows[0];
 }
 
 export async function releaseLicense(): Promise<void> {
   const { error } = await supabase.rpc('release_license');
   if (error) throw new Error(licenseErrorMessage(error.message));
+  licenseActive.set(false);
 }
 
 /** Returns the newly generated raw code. Shown exactly once. */

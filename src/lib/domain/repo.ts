@@ -12,6 +12,15 @@ import type {
   WeightEntry,
 } from '$lib/domain/types';
 import { localDateKey } from '$lib/utils/dateKeys';
+import {
+  MERGEABLE_AGGREGATES,
+  PROFILE_DEVICE_LOCAL,
+  applyPatchWithClears,
+  bumpFieldStamps,
+  mergeRecord,
+  stampAllFields,
+  type Mergeable,
+} from '$lib/domain/merge';
 
 const now = () => new Date().toISOString();
 export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
@@ -131,31 +140,100 @@ async function reconcileOutbox(
   }
 }
 
-async function applyEntityChange<T extends { id: string; updatedAt: IsoDateTime }>(
+type ApplyOutcome<T> = {
+  result: 'upsert' | 'delete' | null;
+  /** The record now in the table (post-merge for mergeable aggregates), or
+   * null for deletes / no-ops. Callers emit this so consumers see the same
+   * shape that's actually stored, not the raw remote payload. */
+  stored: T | null;
+};
+
+async function applyEntityChange<T extends Mergeable>(
   table: Table<T, string>,
   aggregate: SyncAggregate,
   entityId: string,
   op: 'upsert' | 'delete',
   record: unknown,
   remoteUpdatedAt: IsoDateTime,
-): Promise<'upsert' | 'delete' | null> {
-  let result: 'upsert' | 'delete' | null = null;
+): Promise<ApplyOutcome<T>> {
+  const outcome: ApplyOutcome<T> = { result: null, stored: null };
   await db.transaction('rw', table, db.outbox, async () => {
     const local = await table.get(entityId);
+
     if (op === 'delete') {
       // Delete wins ties: a delete stamped at the same instant as the local
       // edit removes the row; only a strictly newer local edit keeps it.
       if (local && parseTime(remoteUpdatedAt) >= parseTime(local.updatedAt)) {
         await table.delete(entityId);
-        result = 'delete';
+        outcome.result = 'delete';
+        await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
       }
-    } else if (!local || parseTime(remoteUpdatedAt) > parseTime(local.updatedAt)) {
-      await table.put(record as T);
-      result = 'upsert';
+      return;
     }
-    if (result) await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
+
+    // Brand-new entity: nothing to merge against, just take the remote.
+    if (!local) {
+      await table.put(record as T);
+      outcome.result = 'upsert';
+      outcome.stored = record as T;
+      await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
+      return;
+    }
+
+    if (MERGEABLE_AGGREGATES.has(aggregate)) {
+      const remote = record as T;
+      const { merged, localHasNews, remoteHasNews } = mergeRecord(local, remote);
+      if (remoteHasNews) {
+        await table.put(merged);
+        outcome.result = 'upsert';
+        outcome.stored = merged;
+      }
+      if (localHasNews) {
+        // The snapshot we just pulled is missing fields this device has —
+        // re-enqueue the merge result so the cloud (and other devices) catch
+        // up on the next push. Without this, a third device pulling the same
+        // remote would never see our local-only fields.
+        await replaceOutboxWithMerge(aggregate, entityId, merged);
+      } else if (outcome.result) {
+        // Pure remote-wins merge: drop the now-stale outbox if any.
+        await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
+      }
+      return;
+    }
+
+    // Whole-row LWW for aggregates not yet migrated to per-field merge.
+    if (parseTime(remoteUpdatedAt) > parseTime(local.updatedAt)) {
+      await table.put(record as T);
+      outcome.result = 'upsert';
+      outcome.stored = record as T;
+      await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
+    }
   });
-  return result;
+  return outcome;
+}
+
+/**
+ * Replace (or create) the outbox entry for an entity whose merge produced
+ * fields the cloud's current snapshot lacks. Bumps `rev` so a concurrent push
+ * can't silently clear this enqueue mid-flight (matches the `rev` check in
+ * `clearPushedOutboxRows`).
+ */
+async function replaceOutboxWithMerge(
+  aggregate: SyncAggregate,
+  entityId: string,
+  payload: { updatedAt: IsoDateTime },
+): Promise<void> {
+  await db.outbox.put({
+    id: `${aggregate}:${entityId}`,
+    aggregate,
+    entityId,
+    op: 'upsert',
+    updatedAt: payload.updatedAt,
+    payload,
+    enqueuedAt: now(),
+    rev: nanoid(),
+  });
+  emitOutboxChange();
 }
 
 async function applyRemoteProfileChange(
@@ -170,21 +248,55 @@ async function applyRemoteProfileChange(
   let applied = false;
   await db.transaction('rw', db.profile, db.outbox, async () => {
     const local = await db.profile.get('profile');
-    if (local && parseTime(remoteUpdatedAt) <= parseTime(local.updatedAt)) return;
-
     const remote = (record ?? {}) as Partial<ProfileSettings>;
-    await db.profile.put({
+
+    // Bootstrap: no local profile yet. Take the remote wholesale and seed the
+    // device-local fields to safe defaults. (`passphraseEnabled: false` mirrors
+    // what `toSyncableProfile` strips out before pushing, so we never trust a
+    // remote-supplied value for it.)
+    if (!local) {
+      await db.profile.put({
+        ...remote,
+        id: 'profile',
+        createdAt: remote.createdAt ?? now(),
+        updatedAt: remote.updatedAt ?? remoteUpdatedAt,
+        passphraseEnabled: false,
+      });
+      await reconcileOutbox('profile', 'profile', remoteUpdatedAt);
+      applied = true;
+      return;
+    }
+
+    // Per-field LWW. Device-local fields are reserved — they stay on `local`
+    // unchanged, and `fieldUpdatedAt` never gains entries for them.
+    const remoteAsProfile: ProfileSettings = {
       ...remote,
       id: 'profile',
-      createdAt: local?.createdAt ?? remote.createdAt ?? now(),
+      createdAt: local.createdAt,
       updatedAt: remote.updatedAt ?? remoteUpdatedAt,
-      // Device-local sync state is never overwritten by a synced profile.
-      passphraseEnabled: local?.passphraseEnabled ?? false,
-      syncMode: local?.syncMode,
-      e2eeMigration: local?.e2eeMigration,
+      passphraseEnabled: local.passphraseEnabled,
+      syncMode: local.syncMode,
+      e2eeMigration: local.e2eeMigration,
+    };
+    const { merged, localHasNews, remoteHasNews } = mergeRecord(local, remoteAsProfile, {
+      reserved: PROFILE_DEVICE_LOCAL,
     });
-    await reconcileOutbox('profile', 'profile', remoteUpdatedAt);
-    applied = true;
+    if (remoteHasNews) {
+      await db.profile.put(merged);
+      applied = true;
+    }
+    if (localHasNews) {
+      // The cloud doesn't have everything we have — re-enqueue the merged
+      // syncable view so the next push backfills it. Use the same
+      // `toSyncableProfile` strip the regular `saveProfile` path uses, so the
+      // wire payload never carries device-local fields.
+      await replaceOutboxWithMerge('profile', 'profile', {
+        ...(toSyncableProfile(merged) as object),
+        updatedAt: merged.updatedAt,
+      });
+    } else if (applied) {
+      await reconcileOutbox('profile', 'profile', remoteUpdatedAt);
+    }
   });
   return applied;
 }
@@ -208,9 +320,18 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
   const { aggregate, entityId, op, record, remoteUpdatedAt } = change;
 
   if (aggregate === 'weight') {
-    const result = await applyEntityChange(db.weights, 'weight', entityId, op, record, remoteUpdatedAt);
-    if (result === 'upsert') {
-      emitHealthChange({ kind: 'weight', action: 'add', entity: record as WeightEntry });
+    const { result, stored } = await applyEntityChange(
+      db.weights,
+      'weight',
+      entityId,
+      op,
+      record,
+      remoteUpdatedAt,
+    );
+    if (result === 'upsert' && stored) {
+      // Emit the actually-stored row (post-merge), not the raw remote — consumers
+      // diverge from Dexie otherwise when a per-field merge has happened.
+      emitHealthChange({ kind: 'weight', action: 'add', entity: stored });
     } else if (result === 'delete') {
       emitHealthChange({ kind: 'weight', action: 'delete', id: entityId });
     }
@@ -218,9 +339,16 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
   }
 
   if (aggregate === 'injection') {
-    const result = await applyEntityChange(db.injections, 'injection', entityId, op, record, remoteUpdatedAt);
-    if (result === 'upsert') {
-      emitHealthChange({ kind: 'injection', action: 'add', entity: record as InjectionEntry });
+    const { result, stored } = await applyEntityChange(
+      db.injections,
+      'injection',
+      entityId,
+      op,
+      record,
+      remoteUpdatedAt,
+    );
+    if (result === 'upsert' && stored) {
+      emitHealthChange({ kind: 'injection', action: 'add', entity: stored });
     } else if (result === 'delete') {
       emitHealthChange({ kind: 'injection', action: 'delete', id: entityId });
     }
@@ -229,7 +357,7 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
 
   if (aggregate === 'prescription') {
     // medicationStore observes db.prescriptions via liveQuery — no event needed.
-    const result = await applyEntityChange(
+    const { result } = await applyEntityChange(
       db.prescriptions,
       'prescription',
       entityId,
@@ -270,17 +398,24 @@ export async function addWeight(data: {
   symptoms?: string[];
   notes?: string;
 }): Promise<WeightEntry> {
-  const item: WeightEntry = {
-    id: nanoid(),
-    date: data.date ?? localDateKey(),
-    weightLbs: data.weightLbs,
-    wellness: data.wellness,
-    systemMg: data.systemMg,
-    symptoms: data.symptoms,
-    notes: data.notes,
-    createdAt: now(),
-    updatedAt: now(),
-  };
+  const ts = now();
+  // Seed `fieldUpdatedAt` for every persistent field at creation time so
+  // future per-field merges have an explicit clock to compare against
+  // (instead of inheriting the row clock, which moves on every edit).
+  const item: WeightEntry = stampAllFields(
+    {
+      id: nanoid(),
+      date: data.date ?? localDateKey(),
+      weightLbs: data.weightLbs,
+      wellness: data.wellness,
+      systemMg: data.systemMg,
+      symptoms: data.symptoms,
+      notes: data.notes,
+      createdAt: ts,
+      updatedAt: ts,
+    },
+    ts,
+  );
   await db.transaction('rw', db.weights, db.outbox, async () => {
     await db.weights.put(item);
     await enqueueOutbox('weight', item.id, 'upsert', item.updatedAt, item);
@@ -293,13 +428,17 @@ export async function updateWeight(
   id: string,
   data: Partial<Omit<WeightEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
-  const patch = { ...data, updatedAt: now() };
+  const ts = now();
   await db.transaction('rw', db.weights, db.outbox, async () => {
-    await db.weights.update(id, patch);
-    const updated = await db.weights.get(id);
-    if (updated) await enqueueOutbox('weight', id, 'upsert', updated.updatedAt, updated);
+    const before = await db.weights.get(id);
+    if (!before) return;
+    const merged = applyPatchWithClears(before, data);
+    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+    const updated: WeightEntry = { ...merged, fieldUpdatedAt, updatedAt };
+    await db.weights.put(updated);
+    await enqueueOutbox('weight', id, 'upsert', updated.updatedAt, updated);
+    emitHealthChange({ kind: 'weight', action: 'patch', id, patch: { ...data, updatedAt } });
   });
-  emitHealthChange({ kind: 'weight', action: 'patch', id, patch });
 }
 
 export async function deleteWeight(id: string): Promise<void> {
@@ -321,7 +460,11 @@ export async function getAllWeights(): Promise<WeightEntry[]> {
 export async function addInjection(
   input: Omit<InjectionEntry, 'id' | 'createdAt' | 'updatedAt'>,
 ): Promise<InjectionEntry> {
-  const item: InjectionEntry = { id: nanoid(), createdAt: now(), updatedAt: now(), ...input };
+  const ts = now();
+  const item: InjectionEntry = stampAllFields(
+    { id: nanoid(), createdAt: ts, updatedAt: ts, ...input },
+    ts,
+  );
   await db.transaction('rw', db.injections, db.outbox, async () => {
     await db.injections.put(item);
     await enqueueOutbox('injection', item.id, 'upsert', item.updatedAt, item);
@@ -334,13 +477,19 @@ export async function updateInjection(
   id: string,
   data: Partial<Omit<InjectionEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
-  const patch = { ...data, updatedAt: now() };
+  const ts = now();
+  let patchForEvent: Partial<InjectionEntry> | null = null;
   await db.transaction('rw', db.injections, db.outbox, async () => {
-    await db.injections.update(id, patch);
-    const updated = await db.injections.get(id);
-    if (updated) await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
+    const before = await db.injections.get(id);
+    if (!before) return;
+    const merged = applyPatchWithClears(before, data);
+    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+    const updated: InjectionEntry = { ...merged, fieldUpdatedAt, updatedAt };
+    await db.injections.put(updated);
+    await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
+    patchForEvent = { ...data, updatedAt };
   });
-  emitHealthChange({ kind: 'injection', action: 'patch', id, patch });
+  if (patchForEvent) emitHealthChange({ kind: 'injection', action: 'patch', id, patch: patchForEvent });
 }
 
 // Applies the same patch to many injections in one transaction and emits a
@@ -353,15 +502,28 @@ export async function bulkUpdateInjections(
   data: Partial<Omit<InjectionEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
   if (ids.length === 0) return;
-  const patch = { ...data, updatedAt: now() };
+  const ts = now();
+  // Note: each row gets its own `updatedAt` derived from its own pre-edit row
+  // clock via `bumpFieldStamps`. The emitted bulkPatch carries the bulk `ts`
+  // as a representative timestamp — listeners use it for "newer than ours?"
+  // cache decisions, not as a per-row truth.
   await db.transaction('rw', db.injections, db.outbox, async () => {
     for (const id of ids) {
-      await db.injections.update(id, patch);
-      const updated = await db.injections.get(id);
-      if (updated) await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
+      const before = await db.injections.get(id);
+      if (!before) continue;
+      const merged = applyPatchWithClears(before, data);
+      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+      const updated: InjectionEntry = { ...merged, fieldUpdatedAt, updatedAt };
+      await db.injections.put(updated);
+      await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
     }
   });
-  emitHealthChange({ kind: 'injection', action: 'bulkPatch', ids, patch });
+  emitHealthChange({
+    kind: 'injection',
+    action: 'bulkPatch',
+    ids,
+    patch: { ...data, updatedAt: ts },
+  });
 }
 
 export async function deleteInjection(id: string): Promise<void> {
@@ -383,7 +545,7 @@ export async function getAllInjections(): Promise<InjectionEntry[]> {
 export async function addPrescription(
   input: Omit<Prescription, 'id' | 'createdAt' | 'updatedAt'>,
 ): Promise<Prescription> {
-  const createdAt = now();
+  const ts = now();
   let item!: Prescription;
   await db.transaction('rw', db.prescriptions, db.outbox, async () => {
     const prescriptions = await db.prescriptions.toArray();
@@ -392,7 +554,10 @@ export async function addPrescription(
       .filter((sortOrder): sortOrder is number => typeof sortOrder === 'number' && Number.isFinite(sortOrder))
       .reduce((max, sortOrder) => Math.max(max, sortOrder), -1);
     const sortOrder = input.sortOrder ?? (maxSortOrder >= 0 ? maxSortOrder + 1 : prescriptions.length);
-    item = { id: nanoid(), createdAt, updatedAt: createdAt, ...input, sortOrder };
+    item = stampAllFields(
+      { id: nanoid(), createdAt: ts, updatedAt: ts, ...input, sortOrder },
+      ts,
+    );
     await db.prescriptions.put(item);
     await enqueueOutbox('prescription', item.id, 'upsert', item.updatedAt, item);
   });
@@ -403,10 +568,38 @@ export async function updatePrescription(
   id: string,
   data: Partial<Omit<Prescription, 'id' | 'createdAt'>>,
 ): Promise<void> {
+  const ts = now();
   await db.transaction('rw', db.prescriptions, db.outbox, async () => {
-    await db.prescriptions.update(id, { ...data, updatedAt: now() });
-    const updated = await db.prescriptions.get(id);
-    if (updated) await enqueueOutbox('prescription', id, 'upsert', updated.updatedAt, updated);
+    const before = await db.prescriptions.get(id);
+    if (!before) return;
+    const merged = applyPatchWithClears(before, data);
+    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+    const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
+    await db.prescriptions.put(updated);
+    await enqueueOutbox('prescription', id, 'upsert', updated.updatedAt, updated);
+  });
+}
+
+// Applies the same patch to many prescriptions in one transaction. Mirrors
+// bulkUpdateInjections so import flows can backfill a medication type across
+// multiple vial rows atomically. Prescriptions are observed via liveQuery so
+// no change event is emitted here.
+export async function bulkUpdatePrescriptions(
+  ids: string[],
+  data: Partial<Omit<Prescription, 'id' | 'createdAt'>>,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const ts = now();
+  await db.transaction('rw', db.prescriptions, db.outbox, async () => {
+    for (const id of ids) {
+      const before = await db.prescriptions.get(id);
+      if (!before) continue;
+      const merged = applyPatchWithClears(before, data);
+      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+      const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
+      await db.prescriptions.put(updated);
+      await enqueueOutbox('prescription', id, 'upsert', updated.updatedAt, updated);
+    }
   });
 }
 
@@ -432,22 +625,27 @@ export async function getProfile(): Promise<ProfileSettings | undefined> {
 export async function saveProfile(
   partial: Partial<Omit<ProfileSettings, 'id' | 'createdAt'>>,
 ): Promise<void> {
+  const ts = now();
   await db.transaction('rw', db.profile, db.outbox, async () => {
     const existing = await db.profile.get('profile');
     let saved: ProfileSettings;
     if (existing) {
-      const patch = { ...partial, updatedAt: now() };
-      await db.profile.update('profile', patch);
-      saved = { ...existing, ...patch };
+      const merged = applyPatchWithClears(existing, partial);
+      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(partial), ts, {
+        reserved: PROFILE_DEVICE_LOCAL,
+      });
+      saved = { ...merged, fieldUpdatedAt, updatedAt };
+      await db.profile.put(saved);
     } else {
-      saved = {
+      const seed: ProfileSettings = {
         id: 'profile',
         passphraseEnabled: false,
         syncMode: DEFAULT_SYNC_MODE,
-        createdAt: now(),
-        updatedAt: now(),
+        createdAt: ts,
+        updatedAt: ts,
         ...partial,
       };
+      saved = stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL });
       await db.profile.put(saved);
     }
     await enqueueOutbox('profile', 'profile', 'upsert', saved.updatedAt, toSyncableProfile(saved));

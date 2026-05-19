@@ -64,6 +64,9 @@
   let dosageSettingsOpen = $state(false);
   let vialSettingsOpen = $state(false);
 
+  let dosageCardRegion: HTMLElement | undefined = $state();
+  let vialCardRegion: HTMLElement | undefined = $state();
+
   const hiddenDosageCols = new SvelteSet<DosageColKey>();
   const savedHiddenDosageCols = new SvelteSet<DosageColKey>();
   const visibleDosageCols = $derived(dosageCols.filter((c) => !hiddenDosageCols.has(c.key)));
@@ -395,14 +398,30 @@
     discardMedicationEdits();
   });
 
-  const totalSpend = 1194.25;
+  const totalSpend = $derived.by<number | null>(() => {
+    let sum = 0;
+    let hasAny = false;
+    for (const p of $rawPrescriptions) {
+      if (typeof p.costUsd === 'number' && Number.isFinite(p.costUsd)) {
+        sum += p.costUsd;
+        hasAny = true;
+      }
+    }
+    return hasAny ? sum : null;
+  });
   const lbsLost = $derived(
     $startWeight != null && $currentWeight != null
       ? Math.max($startWeight - $currentWeight, 0)
-      : 0,
+      : null,
   );
-  const displayLost = $derived(displayWeight(String(lbsLost), $weightUnit));
-  const costPerUnit = $derived(lbsLost > 0 ? totalSpend / lbsLost : 0);
+  const displayLost = $derived(
+    lbsLost != null ? displayWeight(String(lbsLost), $weightUnit) : null,
+  );
+  const costPerUnit = $derived(
+    totalSpend != null && lbsLost != null && lbsLost > 0
+      ? totalSpend / lbsLost
+      : null,
+  );
 
   // ── Reminders ──────────────────────────────────────────────────────────────
   // Assume weekly cadence: 4 doses ≈ 1 month of supply.
@@ -974,11 +993,40 @@
       void focusById(`vial-col-handle-${activeVialCols[vialColKbIndex].key}`);
     }
   }
+
+  function isPlainEnter(event: KeyboardEvent) {
+    return (
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey
+    );
+  }
+
+  function handleMedicationCommitKeydown(event: KeyboardEvent) {
+    if (!isPlainEnter(event)) return;
+    if (!(event.target instanceof Node)) return;
+
+    if (medicationInputsEditable && dosageCardRegion?.contains(event.target)) {
+      event.preventDefault();
+      void persistMedicationInputEdits();
+      return;
+    }
+
+    if (vialTrackingEditable && vialCardRegion?.contains(event.target)) {
+      event.preventDefault();
+      void persistVialTrackingEdits();
+    }
+  }
 </script>
+
+<svelte:document onkeydown={handleMedicationCommitKeydown} />
 
 <main class="content">
   <section class="medication-layout">
-    <article class="card inputs-card medication-inputs-card">
+    <article class="card inputs-card medication-inputs-card" bind:this={dosageCardRegion}>
       <div class="chip-row">
         <h2 class="section-chip">Dosage</h2>
         <button
@@ -1206,9 +1254,36 @@
           <h2 class="section-chip">Cost</h2>
           <table class="kv-table">
             <tbody>
-              <tr><th>Total Spend</th><td>{formatCurrency(totalSpend)}</td></tr>
-              <tr><th>{$weightUnit} Lost</th><td>{displayLost}</td></tr>
-              <tr><th>$/{$weightUnit} Lost</th><td>{formatCurrency(costPerUnit)}</td></tr>
+              <tr>
+                <th>Total Spend</th>
+                <td>
+                  {#if totalSpend != null}
+                    {formatCurrency(totalSpend)}
+                  {:else}
+                    <span class="empty-value">--</span>
+                  {/if}
+                </td>
+              </tr>
+              <tr>
+                <th>{$weightUnit} Lost</th>
+                <td>
+                  {#if displayLost != null}
+                    {displayLost}
+                  {:else}
+                    <span class="empty-value">--</span>
+                  {/if}
+                </td>
+              </tr>
+              <tr>
+                <th>$/{$weightUnit} Lost</th>
+                <td>
+                  {#if costPerUnit != null}
+                    {formatCurrency(costPerUnit)}
+                  {:else}
+                    <span class="empty-value">--</span>
+                  {/if}
+                </td>
+              </tr>
             </tbody>
           </table>
         </article>
@@ -1264,7 +1339,7 @@
         </article>
       </div>
 
-      <article class="card vial-tracking-card">
+      <article class="card vial-tracking-card" bind:this={vialCardRegion}>
         <div class="chip-row">
           <h2 class="section-chip">Vial Tracking</h2>
           <button
@@ -1957,6 +2032,10 @@
     padding: 0.2rem 0.34rem;
     background: color-mix(in oklab, var(--surface) 92%, transparent);
     color: var(--text);
+  }
+
+  .empty-value {
+    color: color-mix(in oklab, currentColor 45%, transparent);
   }
 
   @media (max-width: 1100px) {

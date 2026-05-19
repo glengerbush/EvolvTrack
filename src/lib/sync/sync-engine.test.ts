@@ -15,7 +15,7 @@ const h = vi.hoisted(() => {
   const applyImpl = vi.fn();
   const state = {
     syncMode: 'e2ee' as 'plain' | 'migrating_to_e2ee' | 'e2ee' | 'migrating_to_plain',
-    sessionPassphrase: 'pp' as string | null,
+    sessionKey: 'pp' as string | null,
     pullCursor: null as string | null,
   };
   return {
@@ -99,13 +99,13 @@ vi.mock('$lib/domain/repo', () => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
-  encryptRecord: (passphrase: string, record: unknown) => h.encryptImpl(passphrase, record),
-  decryptRecord: (passphrase: string, ciphertext: string, iv: string) =>
-    h.decryptImpl(passphrase, ciphertext, iv),
+  encryptRecord: (keyB64: string, record: unknown) => h.encryptImpl(keyB64, record),
+  decryptRecord: (keyB64: string, ciphertext: string, iv: string) =>
+    h.decryptImpl(keyB64, ciphertext, iv),
 }));
 
 vi.mock('$lib/sync/session-key', () => ({
-  getSessionPassphrase: () => h.state.sessionPassphrase,
+  getSessionKey: () => h.state.sessionKey,
 }));
 
 vi.mock('$lib/sync/pull-cursor', () => ({
@@ -137,7 +137,7 @@ beforeEach(() => {
   h.fromMock.mockImplementation((table: string) => makeQuery(table));
   h.recordMock.mockClear();
   h.encryptImpl.mockReset();
-  h.encryptImpl.mockImplementation(async (_passphrase: string, record: unknown) => ({
+  h.encryptImpl.mockImplementation(async (_keyB64: string, record: unknown) => ({
     ciphertext: `ct:${JSON.stringify(record)}`,
     iv: 'iv',
   }));
@@ -145,7 +145,7 @@ beforeEach(() => {
   h.applyImpl.mockReset();
   h.applyImpl.mockResolvedValue(true);
   h.state.syncMode = 'e2ee';
-  h.state.sessionPassphrase = 'pp';
+  h.state.sessionKey = 'pp';
   h.state.pullCursor = null;
   h.upsertImpl.mockResolvedValue({ data: null, error: null });
   h.selectImpl.mockResolvedValue({ data: [], error: null });
@@ -217,7 +217,7 @@ describe('pushEncryptedChanges — happy path', () => {
     expect(h.upsertImpl).toHaveBeenCalledTimes(1);
     const [table, rows, opts] = h.upsertImpl.mock.calls[0];
     expect(table).toBe('sync_changes_encrypted');
-    expect(opts).toEqual({ onConflict: 'id' });
+    expect(opts).toEqual({ onConflict: 'user_id,id' });
     expect(rows).toHaveLength(2);
     expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
       id: 'evt-1',
@@ -267,7 +267,7 @@ describe('pushPlainChanges', () => {
     expect(result).toEqual({ pushed: 1 });
     const [table, rows, opts] = h.upsertImpl.mock.calls[0];
     expect(table).toBe('sync_changes_plain');
-    expect(opts).toEqual({ onConflict: 'id' });
+    expect(opts).toEqual({ onConflict: 'user_id,id' });
     expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
       id: 'p-1',
       user_id: 'user-1',
@@ -387,7 +387,7 @@ describe('pushOutbox', () => {
     expect(result).toEqual({ pushed: 2 });
     const [table, rows, opts] = h.upsertImpl.mock.calls[0];
     expect(table).toBe('sync_changes_plain');
-    expect(opts).toEqual({ onConflict: 'id' });
+    expect(opts).toEqual({ onConflict: 'user_id,id' });
 
     const byId = Object.fromEntries(
       (rows as Array<Record<string, unknown>>).map((r) => [r.id, r]),
@@ -425,8 +425,8 @@ describe('pushOutbox', () => {
 
     expect(result).toEqual({ pushed: 1 });
     expect(h.encryptImpl).toHaveBeenCalledTimes(1);
-    const [passphrase, envelope] = h.encryptImpl.mock.calls[0];
-    expect(passphrase).toBe('pp');
+    const [keyB64, envelope] = h.encryptImpl.mock.calls[0];
+    expect(keyB64).toBe('pp');
     expect(envelope).toEqual({ aggregate: 'weight', op: 'upsert', record: { weightLbs: 180 } });
 
     const [table, rows] = h.upsertImpl.mock.calls[0];
@@ -439,9 +439,9 @@ describe('pushOutbox', () => {
     expect(await db.outbox.count()).toBe(0);
   });
 
-  it('pauses with skipped=locked in e2ee mode when the session has no passphrase', async () => {
+  it('pauses with skipped=locked in e2ee mode when the session has no key', async () => {
     h.state.syncMode = 'e2ee';
-    h.state.sessionPassphrase = null;
+    h.state.sessionKey = null;
     await seedOutbox('weight:w1');
 
     const result = await pushOutbox();
@@ -500,7 +500,7 @@ describe('pullAndApply', () => {
 
   it('pauses with skipped=locked in e2ee mode when the session is locked', async () => {
     h.state.syncMode = 'e2ee';
-    h.state.sessionPassphrase = null;
+    h.state.sessionKey = null;
     const result = await pullAndApply();
     expect(result).toEqual({ fetched: 0, applied: 0, skipped: 'locked' });
     expect(h.selectImpl).not.toHaveBeenCalled();

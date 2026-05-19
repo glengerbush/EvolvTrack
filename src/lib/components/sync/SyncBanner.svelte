@@ -2,6 +2,7 @@
   import { resolve } from '$app/paths';
   import { syncIndicator } from '$lib/stores/syncIndicator';
   import { expiredBannerDismissed } from '$lib/stores/authStore';
+  import UnlockSessionModal from '$lib/components/sync/UnlockSessionModal.svelte';
 
   // Only the three states that require user action surface here. Everything
   // else (offline, error, pending) lives in the pill — banners interrupt and
@@ -14,17 +15,21 @@
     return null;
   });
 
-  const settingsHref = resolve('/settings');
+  const settingsHref = resolve('/app') + '#settings';
+  let unlockOpen = $state(false);
 </script>
 
 {#if visible === 'locked'}
   <div class="banner" role="alert" data-tone="warn">
     <div class="text">
       <strong>Sync is paused — session locked.</strong>
-      <span>Enter your passphrase in account settings to resume encrypted sync.</span>
+      <span>Enter your passphrase to resume encrypted sync.</span>
     </div>
-    <a class="cta" href={settingsHref}>Unlock</a>
+    <button type="button" class="cta" onclick={() => (unlockOpen = true)}>Unlock</button>
   </div>
+  {#if unlockOpen}
+    <UnlockSessionModal onClose={() => (unlockOpen = false)} />
+  {/if}
 {:else if visible === 'migration-paused'}
   <div class="banner" role="alert" data-tone="warn">
     <div class="text">
@@ -73,9 +78,11 @@
     border: 1px solid color-mix(in oklab, currentColor 35%, transparent);
     border-radius: 8px;
     background: var(--surface, #fff);
+    font: inherit;
     font-weight: 600;
     text-decoration: none;
     color: inherit;
+    cursor: pointer;
   }
   .cta:hover { background: color-mix(in oklab, currentColor 6%, var(--surface, #fff)); }
   .dismiss {

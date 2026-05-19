@@ -2,7 +2,11 @@ import type Dexie from 'dexie';
 
 type StoreSchema = Record<string, string | null>;
 
-export const DB_SCHEMA_VERSION = 1;
+// v2: synced records gained the optional `fieldUpdatedAt` per-field LWW clock
+// (see `$lib/domain/merge`). Older clients pulling v2 payloads ignore the
+// extra key and fall back to row-clock LWW, so the bump is observability
+// only — no migration required in either direction.
+export const DB_SCHEMA_VERSION = 2;
 
 export const schemaV1: StoreSchema = {
   weights: 'id,date,updatedAt',
