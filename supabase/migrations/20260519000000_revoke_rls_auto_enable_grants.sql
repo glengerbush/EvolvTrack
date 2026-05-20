@@ -18,5 +18,21 @@
 --
 -- service_role's grant is left in place: Supabase's own admin tooling may
 -- rely on it.
+--
+-- The function is only present on hosted Supabase projects, not in the local
+-- `supabase start` stack, so guard the revoke with a pg_proc lookup to keep
+-- the migration idempotent and environment-agnostic.
 
-revoke execute on function public.rls_auto_enable() from public, anon, authenticated;
+do $$
+begin
+  if exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'rls_auto_enable'
+      and pg_get_function_identity_arguments(p.oid) = ''
+  ) then
+    execute 'revoke execute on function public.rls_auto_enable() from public, anon, authenticated';
+  end if;
+end $$;
