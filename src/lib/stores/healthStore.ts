@@ -4,7 +4,7 @@ import { db } from '$lib/db/schema';
 import { onHealthDataChange, type HealthDataChange } from '$lib/domain/repo';
 import type { WeightEntry, InjectionEntry } from '$lib/domain/types';
 import type { HealthInputRow, HealthSystemAmount } from '$lib/stores/healthTypes';
-import { calculateSystemMgByDrug } from '$lib/utils/pharmacokinetics';
+import { calculateSystemMgByDrug, KG_PER_LB, type WeighIn } from '$lib/utils/pharmacokinetics';
 import { enrichSystemAmounts, formatSystemAmounts } from '$lib/utils/healthRowDerived';
 
 export type RawHealthData = { weights: WeightEntry[]; injections: InjectionEntry[] };
@@ -132,10 +132,15 @@ function buildRows(weights: WeightEntry[], injections: InjectionEntry[]): Health
   const injectionSnapshot = normalizeInjections(injections);
   const showMedicationLetters = new Set(injectionSnapshot.map((inj) => inj.medication)).size > 1;
 
+  const weighIns: WeighIn[] = [];
+  for (const w of weights) {
+    if (w.weightLbs != null) weighIns.push({ date: w.date, weightKg: w.weightLbs * KG_PER_LB });
+  }
+
   return [...dates].sort().flatMap((date) => {
     const dateWeights = weightsByDate.get(date) ?? [];
     const dateInjections = injectionsByDate.get(date) ?? [];
-    const systemAmounts = enrichSystemAmounts(calculateSystemMgByDrug(injectionSnapshot, date));
+    const systemAmounts = enrichSystemAmounts(calculateSystemMgByDrug(injectionSnapshot, date, weighIns));
 
     const makeRow = (inj?: InjectionEntry, w?: WeightEntry): HealthInputRow => ({
       weightId: w?.id,

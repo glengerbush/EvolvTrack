@@ -14,11 +14,13 @@ import {
   SPREADSHEET_FORMAT_VERSION,
   SPREADSHEET_KIND,
   downloadOdsSpreadsheet,
+  drugDecayTermExpr,
   getSpreadsheetMetadata,
   isEvolvTrackSpreadsheet,
   workbookSheet,
   type SpreadsheetWorkbook,
 } from './spreadsheet';
+import { systemDecayTerms } from '$lib/utils/pharmacokinetics';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 
@@ -224,4 +226,39 @@ describe('downloadOdsSpreadsheet — round-trip via importer', () => {
     // The Settings sheet feeds the profile.
     expect(result.data.profile?.weightUnit).toBe('lbs');
   });
+});
+
+describe('drugDecayTermExpr — weight-aware spreadsheet formula', () => {
+  // Evaluate a generated spreadsheet expression as arithmetic, substituting a
+  // concrete weight for the cell token. `^` and `EXP` map directly to JS; the
+  // bases of every power are parenthesized, so operator precedence is exact.
+  const evalFormula = (expr: string, weightKg: number): number => {
+    const js = expr
+      .replaceAll('WT', String(weightKg))
+      .replaceAll('EXP', 'Math.exp')
+      .replaceAll('^', '**');
+    return Function(`"use strict";return (${js})`)() as number;
+  };
+
+  const twoCompartmentDrugs = [
+    'Semaglutide (Ozempic / Wegovy)',
+    'Tirzepatide (Mounjaro / Zepbound)',
+    'Dulaglutide (Trulicity)',
+  ];
+
+  it.each(twoCompartmentDrugs)(
+    '%s: the embedded formula reproduces systemDecayTerms at every weight',
+    (drug) => {
+      for (const weightKg of [55, 70, 92.5, 110, 145]) {
+        const terms = systemDecayTerms(drug, weightKg);
+        expect(terms).not.toBeNull();
+        for (let i = 0; i < 3; i += 1) {
+          const coeff = evalFormula(drugDecayTermExpr(drug, i, 'coefficient', 'WT'), weightKg);
+          const rate = evalFormula(drugDecayTermExpr(drug, i, 'rateConstant', 'WT'), weightKg);
+          expect(coeff).toBeCloseTo(terms![i].coefficient, 9);
+          expect(rate).toBeCloseTo(terms![i].rateConstant, 9);
+        }
+      }
+    },
+  );
 });

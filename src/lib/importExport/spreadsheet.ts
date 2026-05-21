@@ -10,8 +10,12 @@ import {
 } from '$lib/importExport/shared';
 import {
   DRUG_PK,
+  KG_PER_LB,
   calculateSystemMgByDrug,
-  type DrugPK,
+  dispositionRates,
+  systemDecayTerms,
+  weightForDate,
+  type WeighIn,
 } from '$lib/utils/pharmacokinetics';
 
 export type SpreadsheetCellValue = string | number | boolean | Date | null;
@@ -349,42 +353,151 @@ function formatList(items: string[] | undefined) {
   return (items ?? []).join(', ');
 }
 
-function medicationPk(medication: string | undefined): DrugPK | null {
-  if (!medication || !(medication in DRUG_PK)) return null;
-  return DRUG_PK[medication as keyof typeof DRUG_PK];
+// Hidden Health Log helper columns carrying the per-row PK decay terms, as
+// [column index, term index, term field] tuples. Each drug's single-dose curve
+// is a sum of up to three exponential terms (see systemDecayTerms in
+// pharmacokinetics.ts); one-compartment drugs leave the third term's
+// coefficient at 0. M/N = term 1, O/P = term 2, Q/R = term 3.
+const PK_HELPER_COLUMNS: readonly [number, number, 'coefficient' | 'rateConstant'][] = [
+  [12, 0, 'coefficient'],
+  [13, 0, 'rateConstant'],
+  [14, 1, 'coefficient'],
+  [15, 1, 'rateConstant'],
+  [16, 2, 'coefficient'],
+  [17, 2, 'rateConstant'],
+];
+
+// Hidden Health Log column (U) holding the body weight (kg) applied to each
+// row's dose — the most recent weigh-in on or before the row's date. The PK
+// decay-term formulas read it to individualize the curve.
+const PK_WEIGHT_COLUMN = 20;
+
+// A numeric literal for embedding in a formula, parenthesized so a negative
+// value never fuses with an adjacent operator.
+function lit(value: number): string {
+  return `(${value})`;
 }
 
-function pkFormula(cellRef: string, field: keyof Pick<DrugPK, 'bioavailability' | 'ka' | 'ke'>) {
-  const aliases = [
-    ['Semaglutide', DRUG_PK['Semaglutide (Ozempic / Wegovy)'][field]],
-    ['Tirzepatide', DRUG_PK['Tirzepatide (Mounjaro / Zepbound)'][field]],
-    ['Dulaglutide', DRUG_PK['Dulaglutide (Trulicity)'][field]],
-    ['Liraglutide', DRUG_PK['Liraglutide (Victoza / Saxenda)'][field]],
-    ['Retatrutide', DRUG_PK.Retatrutide[field]],
-  ] as const;
+const DRUG_ALIASES: readonly [string, string][] = [
+  ['Semaglutide', 'Semaglutide (Ozempic / Wegovy)'],
+  ['Tirzepatide', 'Tirzepatide (Mounjaro / Zepbound)'],
+  ['Dulaglutide', 'Dulaglutide (Trulicity)'],
+  ['Liraglutide', 'Liraglutide (Victoza / Saxenda)'],
+  ['Retatrutide', 'Retatrutide'],
+];
 
-  const nested = aliases
-    .slice()
-    .reverse()
-    .reduce(
-      (fallback, [name, value]) => `IF(ISNUMBER(SEARCH("${name}",${cellRef})),${value},${fallback})`,
-      '""',
-    );
+// Reference (population) body weight for a drug's weight covariate, in kg.
+// One-compartment drugs ignore weight; the value is then unused.
+function referenceWeightFor(fullName: string): number {
+  const pk = DRUG_PK[fullName as keyof typeof DRUG_PK];
+  return pk.model === 'two-compartment' && pk.weightCovariate
+    ? pk.weightCovariate.referenceWeightKg
+    : 70;
+}
 
-  return `IF(${cellRef}="","",${nested})`;
+// The decay-term value (coefficient or rate constant) for one drug, as a
+// spreadsheet expression. Drugs with a body-weight covariate reference
+// `weightCell` (the row's resolved weight in kg); others resolve to a constant.
+// Exported for testing — see spreadsheet.test.ts.
+export function drugDecayTermExpr(
+  fullName: string,
+  termIndex: number,
+  key: 'coefficient' | 'rateConstant',
+  weightCell: string,
+): string {
+  const pk = DRUG_PK[fullName as keyof typeof DRUG_PK];
+  const reference = (systemDecayTerms(fullName) ?? [])[termIndex]?.[key] ?? 0;
+  if (pk.model !== 'two-compartment' || !pk.weightCovariate) return lit(reference);
+  const cov = pk.weightCovariate;
+
+  if (cov.kind === 'exponential-bioavailability') {
+    // Body weight scales bioavailability, hence every coefficient; the rate
+    // constants are weight-independent.
+    if (key === 'rateConstant') return lit(reference);
+    return `${lit(reference)}*EXP(${lit(cov.coefficient)}*(${weightCell}-${lit(cov.referenceWeightKg)}))`;
+  }
+
+  // allometric-disposition: the disposition rates scale by f = (W/refW)^exponent.
+  const { ka, k21 } = pk;
+  const { alpha, beta } = dispositionRates(pk.k10, pk.k12, pk.k21);
+  const fka = pk.bioavailability * ka;
+  const f = `(${weightCell}/${lit(cov.referenceWeightKg)})^${lit(cov.exponent)}`;
+
+  if (termIndex === 0) {
+    return key === 'rateConstant'
+      ? lit(ka)
+      : `${lit(fka)}*(${lit(k21)}*${f}-${lit(ka)})`
+        + `/((${lit(alpha)}*${f}-${lit(ka)})*(${lit(beta)}*${f}-${lit(ka)}))`;
+  }
+  if (termIndex === 1) {
+    return key === 'rateConstant'
+      ? `${lit(alpha)}*${f}`
+      : `${lit(fka)}*${lit(k21 - alpha)}/((${lit(ka)}-${lit(alpha)}*${f})*${lit(beta - alpha)})`;
+  }
+  return key === 'rateConstant'
+    ? `${lit(beta)}*${f}`
+    : `${lit(fka)}*${lit(k21 - beta)}/((${lit(ka)}-${lit(beta)}*${f})*${lit(alpha - beta)})`;
+}
+
+// Nested-IF resolving one decay-term value for whichever medication is named in
+// `medCell`, individualized by the body weight in `weightCell`.
+function decayTermFormula(
+  medCell: string,
+  weightCell: string,
+  termIndex: number,
+  key: 'coefficient' | 'rateConstant',
+) {
+  const nested = [...DRUG_ALIASES].reverse().reduce((fallback, [alias, fullName]) => {
+    const expr = drugDecayTermExpr(fullName, termIndex, key, weightCell);
+    return `IF(ISNUMBER(SEARCH("${alias}",${medCell})),${expr},${fallback})`;
+  }, '""');
+  return `IF(${medCell}="","",${nested})`;
+}
+
+// Nested-IF for the row's body weight (kg): the most recent weigh-in on or
+// before the row's date (column C, in the sheet's display unit), falling back
+// to the medication's reference weight when no weigh-in exists.
+function weightLookupFormula(rowNumber: number, lastRowNumber: number, unitToKg: number): string {
+  const cRange = `$C$2:$C$${lastRowNumber}`;
+  const aRange = `$A$2:$A$${lastRowNumber}`;
+  const refWeight = [...DRUG_ALIASES].reverse().reduce(
+    (fallback, [alias, fullName]) =>
+      `IF(ISNUMBER(SEARCH("${alias}",G${rowNumber})),${referenceWeightFor(fullName)},${fallback})`,
+    '70',
+  );
+  const lookup = `LOOKUP(2,1/((${cRange}<>"")*(${aRange}<=A${rowNumber})),${cRange})*${unitToKg}`;
+  return `IF(G${rowNumber}="","",IFERROR(${lookup},${refWeight}))`;
+}
+
+// Decay-term value cached into a Health Log helper cell, or '' when the drug
+// has no PK model. Mirrors decayTermFormula's live result for `weightKg`.
+function decayTermValue(
+  medication: string | undefined,
+  weightKg: number | undefined,
+  termIndex: number,
+  key: 'coefficient' | 'rateConstant',
+): number | '' {
+  if (!medication) return '';
+  const terms = systemDecayTerms(medication, weightKg);
+  if (!terms) return '';
+  return terms[termIndex]?.[key] ?? 0;
 }
 
 function systemFormula(rowNumber: number, lastRowNumber: number) {
   const range = (column: string) => `$${column}$2:$${column}$${lastRowNumber}`;
-  const elapsedHours = `(${rowNumber === 2 ? 'A2' : `A${rowNumber}`}-${range('A')})*24`;
+  const elapsed = `((A${rowNumber}-${range('A')})*24)`;
+  // amount = dose · Σ coefficient · exp(-rate · elapsedHours), summed over every
+  // earlier dose. Helper columns: M/N = term 1, O/P = term 2, Q/R = term 3.
+  const term = (coeff: string, rate: string) =>
+    `${range(coeff)}*EXP(-${range(rate)}*${elapsed})`;
   return [
     `IF(A${rowNumber}="","",`,
     'ROUND(',
     'SUMPRODUCT(IFERROR(',
     `(${range('A')}<>"")*(${range('A')}<=A${rowNumber})*(${range('H')}>0)*`,
-    `(${range('M')}*${range('H')}*${range('N')}/(${range('N')}-${range('O')}))*`,
-    `(EXP(-${range('O')}*${elapsedHours})-EXP(-${range('N')}*${elapsedHours}))`,
-    ',0)),',
+    `${range('H')}*(`,
+    `${term('M', 'N')}+${term('O', 'P')}+${term('Q', 'R')}`,
+    '),0)),',
     '2))',
   ].join('');
 }
@@ -402,8 +515,8 @@ function normalizeInjectionSnapshot(injections: InjectionEntry[]) {
     .filter((injection) => injection.medication);
 }
 
-function systemLabel(injections: InjectionEntry[], date: IsoDate) {
-  const amounts = calculateSystemMgByDrug(normalizeInjectionSnapshot(injections), date);
+function systemLabel(injections: InjectionEntry[], date: IsoDate, weighIns: WeighIn[]) {
+  const amounts = calculateSystemMgByDrug(normalizeInjectionSnapshot(injections), date, weighIns);
   return round(amounts.reduce((total, amount) => total + amount.amountMg, 0), 2);
 }
 
@@ -455,6 +568,11 @@ function groupByDate<T extends { date: IsoDate; createdAt: string; id: string }>
 
 function buildHealthSheet(data: ExportData): WriteSheet {
   const unit = data.profile?.weightUnit ?? 'lbs';
+  const unitToKg = unit === 'kg' ? 1 : KG_PER_LB;
+  const weighIns: WeighIn[] = [];
+  for (const w of data.weights) {
+    if (w.weightLbs != null) weighIns.push({ date: w.date, weightKg: w.weightLbs * KG_PER_LB });
+  }
   const weightsByDate = groupByDate(data.weights);
   const injectionsByDate = groupByDate(data.injections);
   const dates = [...new Set([...weightsByDate.keys(), ...injectionsByDate.keys()])].sort();
@@ -471,11 +589,15 @@ function buildHealthSheet(data: ExportData): WriteSheet {
     'Shot Location',
     'mg in system',
     'Notes',
-    'Bioavailability',
-    'Absorption rate',
-    'Elimination rate',
+    'PK term 1 coeff',
+    'PK term 1 rate',
+    'PK term 2 coeff',
+    'PK term 2 rate',
+    'PK term 3 coeff',
+    'PK term 3 rate',
     'Weight ID',
     'Injection ID',
+    'W (kg)',
   ]];
   let previousWeight: number | null = null;
 
@@ -492,6 +614,7 @@ function buildHealthSheet(data: ExportData): WriteSheet {
         : '';
       if (typeof displayWeight === 'number') previousWeight = displayWeight;
 
+      const rowWeightKg = weightForDate(weighIns, date);
       rows.push([
         dateCell(date),
         dateLabel(date),
@@ -503,13 +626,17 @@ function buildHealthSheet(data: ExportData): WriteSheet {
         injection?.amountMg ?? '',
         injection?.planned ? 'Planned' : injection ? 'Confirmed' : '',
         injection?.site ?? '',
-        systemLabel(data.injections, date),
+        systemLabel(data.injections, date, weighIns),
         weight?.notes ?? injection?.notes ?? '',
-        medicationPk(injection?.medication)?.bioavailability ?? '',
-        medicationPk(injection?.medication)?.ka ?? '',
-        medicationPk(injection?.medication)?.ke ?? '',
+        decayTermValue(injection?.medication, rowWeightKg, 0, 'coefficient'),
+        decayTermValue(injection?.medication, rowWeightKg, 0, 'rateConstant'),
+        decayTermValue(injection?.medication, rowWeightKg, 1, 'coefficient'),
+        decayTermValue(injection?.medication, rowWeightKg, 1, 'rateConstant'),
+        decayTermValue(injection?.medication, rowWeightKg, 2, 'coefficient'),
+        decayTermValue(injection?.medication, rowWeightKg, 2, 'rateConstant'),
         weight?.id ?? '',
         injection?.id ?? '',
+        injection?.medication ? rowWeightKg ?? referenceWeightFor(injection.medication) : '',
       ]);
     }
   }
@@ -517,7 +644,7 @@ function buildHealthSheet(data: ExportData): WriteSheet {
   const existingDataRows = rows.length - 1;
   const dataRowCount = trackerRowCount(existingDataRows, HEALTH_TRACKER_MIN_ROWS, HEALTH_TRACKER_EXTRA_ROWS);
   while (rows.length <= dataRowCount) {
-    rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
   }
 
   const sheet = buildSheet({
@@ -541,14 +668,15 @@ function buildHealthSheet(data: ExportData): WriteSheet {
       { width: 0, hidden: true },
       { width: 0, hidden: true },
       { width: 0, hidden: true },
+      { width: 0, hidden: true },
+      { width: 0, hidden: true },
+      { width: 0, hidden: true },
+      { width: 0, hidden: true },
     ],
   });
   const lastRowNumber = dataRowCount + 1;
   for (let row = 1; row <= dataRowCount; row += 1) {
     const rowNumber = row + 1;
-    const doseValue = typeof rows[row]?.[7] === 'number' ? rows[row][7] as number : undefined;
-    const medication = typeof rows[row]?.[6] === 'string' ? rows[row][6] as string : '';
-    const pk = medicationPk(medication);
 
     formulaCell(
       sheet.cells,
@@ -591,24 +719,21 @@ function buildHealthSheet(data: ExportData): WriteSheet {
     formulaCell(
       sheet.cells,
       row,
-      12,
-      pkFormula(`G${rowNumber}`, 'bioavailability'),
-      doseValue != null ? pk?.bioavailability ?? '' : '',
+      PK_WEIGHT_COLUMN,
+      weightLookupFormula(rowNumber, lastRowNumber, unitToKg),
+      rows[row]?.[PK_WEIGHT_COLUMN] ?? '',
     );
-    formulaCell(
-      sheet.cells,
-      row,
-      13,
-      pkFormula(`G${rowNumber}`, 'ka'),
-      doseValue != null ? pk?.ka ?? '' : '',
-    );
-    formulaCell(
-      sheet.cells,
-      row,
-      14,
-      pkFormula(`G${rowNumber}`, 'ke'),
-      doseValue != null ? pk?.ke ?? '' : '',
-    );
+
+    const weightCell = `${colName(PK_WEIGHT_COLUMN)}${rowNumber}`;
+    for (const [col, termIndex, key] of PK_HELPER_COLUMNS) {
+      formulaCell(
+        sheet.cells,
+        row,
+        col,
+        decayTermFormula(`G${rowNumber}`, weightCell, termIndex, key),
+        rows[row]?.[col] ?? '',
+      );
+    }
   }
   return sheet;
 }

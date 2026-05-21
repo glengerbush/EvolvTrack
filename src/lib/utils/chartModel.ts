@@ -14,7 +14,9 @@ import {
   calculateSystemMgByDrug,
   drugDisplayColor,
   drugDisplayShape,
+  KG_PER_LB,
   type DrugShape,
+  type WeighIn,
 } from '$lib/utils/pharmacokinetics';
 import { symptomColor, symptomInitial } from '$lib/utils/symptoms';
 import { WELLNESS_SCORE_MAX, clampWellnessScore, parseWellnessScore } from '$lib/domain/wellness';
@@ -178,6 +180,7 @@ export function buildChartModel(
   const datedRows = rows.filter((row) => isDateKey(row.date) && !row.doseSkipped);
   const doses = normalizeDoses(datedRows, today);
   const weights = collectWeights(datedRows, unit, today);
+  const weighIns = collectWeighIns(datedRows);
   const wellnessByDate = collectWellness(datedRows, today);
   const symptomsByDate = collectSymptoms(datedRows);
   const projectedDoseDates = doses.filter((dose) => dose.planned).map((dose) => dose.date);
@@ -232,7 +235,7 @@ export function buildChartModel(
     return PLOT.left + X_AXIS_PADDING + (daysBetween(startDate, date) / daySpan) * usablePlotWidth;
   };
 
-  const systemDailySeries = buildSystemDailySeries(doses, dateKeys);
+  const systemDailySeries = buildSystemDailySeries(doses, dateKeys, weighIns);
 
   const weightPrediction = buildWeightPrediction(weights, dateKeys);
   const weightValues = [...weights.map((point) => point.value), ...weightPrediction.map((point) => point.value)];
@@ -383,7 +386,11 @@ export function buildChartModel(
   };
 }
 
-function buildSystemDailySeries(doses: DosePoint[], dateKeys: IsoDate[]): SystemDailySeries[] {
+function buildSystemDailySeries(
+  doses: DosePoint[],
+  dateKeys: IsoDate[],
+  weighIns: WeighIn[],
+): SystemDailySeries[] {
   const actualMedications = uniqueMedications(doses.filter((dose) => !dose.planned));
   const splitByDrug = actualMedications.length > 1;
   const amountsByDate = new Map<string, Map<string, number>>();
@@ -393,7 +400,7 @@ function buildSystemDailySeries(doses: DosePoint[], dateKeys: IsoDate[]): System
     if (cached) return cached;
 
     const amounts = new Map<string, number>();
-    for (const amount of calculateSystemMgByDrug(doses, date)) {
+    for (const amount of calculateSystemMgByDrug(doses, date, weighIns)) {
       amounts.set(amount.medication, amount.amountMg);
     }
     amountsByDate.set(date, amounts);
@@ -487,6 +494,17 @@ function collectWeights(rows: ChartHealthRow[], unit: WeightUnit, today: IsoDate
   return [...byDate]
     .map(([date, { value, planned }]) => ({ date, value, planned }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// Weigh-ins (kg) used to individualize the PK model. Row weights are stored in
+// pounds; skipped rows are already excluded from `datedRows`.
+function collectWeighIns(rows: ChartHealthRow[]): WeighIn[] {
+  const out: WeighIn[] = [];
+  for (const row of rows) {
+    const lbs = parseFloat(row.weight);
+    if (Number.isFinite(lbs)) out.push({ date: row.date, weightKg: lbs * KG_PER_LB });
+  }
+  return out;
 }
 
 function collectWellness(rows: ChartHealthRow[], today: IsoDate) {

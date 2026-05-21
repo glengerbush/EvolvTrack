@@ -6,7 +6,9 @@ import {
   drugDisplayColor,
   drugInitial,
   formatSystemMg,
+  KG_PER_LB,
   type SystemDrugAmount,
+  type WeighIn,
 } from '$lib/utils/pharmacokinetics';
 
 /**
@@ -16,8 +18,9 @@ import {
  *  `local`  — The change only touched fields that aren't inputs to any
  *             derived computation (notes, symptoms, wellness, shotLocation).
  *             No row's derived fields need updating.
- *  `weight` — A weight cell changed. Loss chain may shift, but PK math is
- *             unaffected; existing systemAmounts/system are reused.
+ *  `weight` — A weight cell changed. Recomputed in full: a weight change
+ *             shifts the loss chain and, via body-weight personalization, the
+ *             PK math too (so it is treated the same as `full`).
  *  `pk`     — Dose / medication / doseSkipped changed. PK shifts but the loss
  *             chain is unaffected; existing loss/day are reused.
  *
@@ -119,24 +122,7 @@ export function recalculateDerived(
     : ascending.findIndex((row) => row.date >= earliestChangedDate);
   const recomputeFromIdx = boundaryIdx === -1 ? ascending.length : boundaryIdx;
 
-  // `weight` scope skips all PK work entirely (it's the expensive part).
-  if (scope === 'weight') {
-    let previousWeight = '';
-    for (let i = 0; i < recomputeFromIdx; i++) {
-      if (parseWeight(ascending[i].weight) !== null) previousWeight = ascending[i].weight;
-    }
-    const processed = ascending.map((row, i) => {
-      if (i < recomputeFromIdx) return cloneRow(row);
-      const nextRow = cloneRow(row);
-      nextRow.day = calculateDay(nextRow.date);
-      nextRow.loss = calculateLoss(nextRow.weight, previousWeight);
-      if (parseWeight(nextRow.weight) !== null) previousWeight = nextRow.weight;
-      return nextRow;
-    });
-    return reorderProcessed(processed, sortedIndices, preserveOrder, rowsToUpdate.length);
-  }
-
-  // `pk` and `full` both need the injection snapshot for PK math.
+  // `pk`, `weight` and `full` all need the injection snapshot for PK math.
   // Older locally saved doses may not have a medication yet. Carry the last
   // known drug forward, then fall back to the current vial for new entries.
   let lastKnownMedication = '';
@@ -152,10 +138,17 @@ export function recalculateDerived(
   const showMedicationLetters = new Set(injectionSnapshot.map((inj) => inj.medication)).size > 1;
   const systemAmountsByDate = new Map<IsoDate, HealthSystemAmount[]>();
 
+  // Weigh-ins (kg) individualize the PK model; row weights are stored in pounds.
+  const weighIns: WeighIn[] = [];
+  for (const row of ascending) {
+    const lbs = parseWeight(row.weight);
+    if (lbs !== null) weighIns.push({ date: row.date, weightKg: lbs * KG_PER_LB });
+  }
+
   const getSystemAmountsForDate = (date: IsoDate): HealthSystemAmount[] => {
     const cached = systemAmountsByDate.get(date);
     if (cached) return cached;
-    const systemAmounts = enrichSystemAmounts(calculateSystemMgByDrug(injectionSnapshot, date));
+    const systemAmounts = enrichSystemAmounts(calculateSystemMgByDrug(injectionSnapshot, date, weighIns));
     systemAmountsByDate.set(date, systemAmounts);
     return systemAmounts;
   };

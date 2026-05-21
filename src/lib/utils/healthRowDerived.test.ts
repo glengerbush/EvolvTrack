@@ -226,15 +226,20 @@ describe('recalculateDerived — boundary optimization', () => {
 });
 
 describe('recalculateDerived — scope: weight', () => {
-  it('recomputes loss but reuses existing system on rows from boundary forward', () => {
-    const preserved: HealthInputRow = row({
+  it('recomputes both the loss chain and PK (a weight change now affects the curve)', () => {
+    // Body-weight personalization means a weight change shifts the PK curve, so
+    // 'weight' scope can no longer reuse stale system values — it is a full
+    // recompute.
+    const dosed: HealthInputRow = row({
       date: '2026-05-10',
       weight: '178',
+      dose: '5',
+      medication: SEMA,
       system: 'STALE-SYS',
       systemAmounts: [],
     });
     const result = recalculateDerived(
-      [row({ date: '2026-05-08', weight: '180' }), preserved],
+      [row({ date: '2026-05-08', weight: '180', dose: '5', medication: SEMA }), dosed],
       {
         defaultMedication: SEMA,
         earliestChangedDate: iso('2026-05-08'),
@@ -242,10 +247,9 @@ describe('recalculateDerived — scope: weight', () => {
         preserveOrder: true,
       },
     );
-    // 'weight' scope keeps system as-is for the post-boundary row.
-    expect(result[1].system).toBe('STALE-SYS');
-    // …but recomputes the loss chain.
-    expect(result[1].loss).toBe('2.0');
+    expect(result[1].loss).toBe('2.0'); // loss chain recomputed
+    expect(result[1].system).not.toBe('STALE-SYS'); // PK recomputed, not reused
+    expect(result[1].systemAmounts.length).toBeGreaterThan(0);
   });
 });
 
@@ -304,9 +308,9 @@ describe('recalculateDerived — edge cases', () => {
     expect(out.loss).toBe('STALE-LOSS');
   });
 
-  it('weight scope does NOT reformat system on pre-boundary rows', () => {
-    // Contrast with `full` / `pk`: in `weight` scope, pre-boundary rows are
-    // cloned without any system reformat, even if showMedicationLetters flips.
+  it('weight scope reformats system on pre-boundary rows (it now behaves like full)', () => {
+    // 'weight' scope is treated as a full recompute, so pre-boundary rows get
+    // their system string reformatted when showMedicationLetters flips.
     const preBoundary = row({
       date: '2026-05-01',
       dose: '5',
@@ -323,7 +327,7 @@ describe('recalculateDerived — edge cases', () => {
         preserveOrder: true,
       },
     );
-    expect(result[0].system).toBe('4');
+    expect(result[0].system).toBe('4 S');
   });
 });
 

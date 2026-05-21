@@ -45,9 +45,9 @@ describe('calculateSystemMgByDrug', () => {
     expect(result[0].amountMg).toBeLessThan(5); // bioavailability < 1
   });
 
-  it('residual decays after Tmax has passed (semaglutide: 3.5 days)', () => {
-    // Tmax for semaglutide is 86h ≈ 3.5 days; values should descend strictly
-    // after that point.
+  it('residual decays after Tmax has passed (semaglutide: ~3 days)', () => {
+    // Tmax for the two-compartment semaglutide model is ~75h ≈ 3 days; values
+    // should descend strictly after that point.
     const dose = [{ date: iso('2026-01-01'), amountMg: 5, medication: SEMA }];
     const day5 = calculateSystemMgByDrug(dose, iso('2026-01-05'))[0].amountMg;
     const day8 = calculateSystemMgByDrug(dose, iso('2026-01-08'))[0].amountMg;

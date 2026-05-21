@@ -1,13 +1,17 @@
 // PK parameters sourced from:
 //   Semaglutide  — PMC11215664, PMID 29915923, PMC6437231 (ka)
 //   Tirzepatide  — PMC10962491, NBK585056 (ka from Table 3)
-//   Dulaglutide  — PMID 26507721, PMC12052016
+//   Dulaglutide  — Geiser et al. 2015, PMID 26507721 (two-compartment popPK, Table 6)
 //   Liraglutide  — PMC4875959,  NBK608007
 //   Retatrutide  — NEJM NEJMoa2301972, PMC12190491
 
 import type { IsoDate, Medication } from '$lib/domain/types';
 
-export type DrugPK = {
+// Most drugs use a one-compartment model: first-order absorption into a single
+// body compartment, first-order elimination. The amount in body is the Bateman
+// equation.
+export type OneCompartmentPK = {
+  model: 'one-compartment';
   halfLifeHours: number;
   tmaxHours: number;
   bioavailability: number;
@@ -15,37 +19,103 @@ export type DrugPK = {
   ke: number; // elimination rate constant (1/h) = ln(2) / halfLifeHours
 };
 
+// How body weight modifies a drug's PK, taken from the same population-PK
+// papers as the base parameters. A drug with no covariate is modeled at the
+// population-typical (reference-weight) values.
+export type WeightCovariate =
+  | {
+      // Clearance and volume scale allometrically with body weight, so the
+      // disposition rate constants k10/k12/k21 each scale by
+      // (weightKg / referenceWeightKg) ^ exponent. The exponent is the
+      // clearance allometric exponent minus the volume allometric exponent.
+      kind: 'allometric-disposition';
+      referenceWeightKg: number;
+      exponent: number;
+    }
+  | {
+      // Bioavailability scales with body weight:
+      //   F = baseF · exp(coefficient · (weightKg − referenceWeightKg))
+      kind: 'exponential-bioavailability';
+      referenceWeightKg: number;
+      coefficient: number;
+    };
+
+// Two-compartment model: first-order absorption into a central compartment
+// that exchanges with a peripheral compartment; elimination from central only.
+// The tracked "amount in system" is the central-compartment amount, which is
+// proportional to plasma concentration.
+export type TwoCompartmentPK = {
+  model: 'two-compartment';
+  bioavailability: number;
+  ka: number; // absorption rate constant (1/h)
+  k10: number; // elimination from central (1/h) = (CL/F) / (Vc/F)
+  k12: number; // central → peripheral (1/h)    = (Q/F)  / (Vc/F)
+  k21: number; // peripheral → central (1/h)    = (Q/F)  / (Vp/F)
+  // Body-weight covariate; when set and a weigh-in is available the curve is
+  // individualized to the user's weight (see decayTerms).
+  weightCovariate?: WeightCovariate;
+};
+
+export type DrugPK = OneCompartmentPK | TwoCompartmentPK;
+
 export type SystemDrugAmount = {
   medication: Medication;
   amountMg: number;
 };
 
-// ka sources: published population PK estimates are used for semaglutide and
-// tirzepatide; for the others no compatible published ka exists so ka is solved
-// numerically from label Tmax via Tmax = ln(ka/ke) / (ka - ke).
+// Semaglutide, tirzepatide and dulaglutide use complete published
+// two-compartment population PK models. Liraglutide and retatrutide use the
+// one-compartment Bateman form; no compatible published ka exists for them, so
+// ka is solved numerically from label Tmax via Tmax = ln(ka/ke) / (ka - ke).
 export const DRUG_PK: Record<Medication, DrugPK> = {
+  // Two-compartment population PK model (Overgaard et al. 2019, PMID 30788808,
+  // Table 4). Published parameters: CL 0.0348 L/h, Vc 3.59 L, Vp 4.10 L,
+  // Q 0.304 L/h — the micro-rate constants below are derived from those.
+  // Central-compartment peak ~3 days after a dose. Body weight scales CL/Q by
+  // ^1.01 and the volumes by ^0.923 (Table 4), so the disposition rates scale
+  // by weight^(1.01−0.923); reference subject 85 kg.
   'Semaglutide (Ozempic / Wegovy)': {
-    halfLifeHours: 168,
-    tmaxHours: 86,         // implied by published ka (Overgaard 2019, PMC6437231)
-    bioavailability: 0.89,
-    ka: 0.0253,            // h⁻¹, population PK estimate (Overgaard 2019, PMC6437231)
-    ke: Math.LN2 / 168,
+    model: 'two-compartment',
+    bioavailability: 0.847, // absolute bioavailability (Overgaard 2019, Table 4)
+    ka: 0.0253,             // h⁻¹ (Overgaard 2019, Table 4)
+    k10: 0.0348 / 3.59,     // CL / Vc
+    k12: 0.304 / 3.59,      // Q  / Vc
+    k21: 0.304 / 4.1,       // Q  / Vp
+    weightCovariate: { kind: 'allometric-disposition', referenceWeightKg: 85, exponent: 1.01 - 0.923 },
   },
+  // Two-compartment population PK model (Schneck et al. 2024, PMID 38356317,
+  // Table 3). Published parameters per 70 kg: CL 0.0329 L/h, Vc 2.47 L,
+  // Vp 3.98 L, Q 0.126 L/h — the micro-rate constants below are derived from
+  // those. Central-compartment peak ~1.3 days after a dose. Body weight scales
+  // CL/Q by ^0.8 and the volumes by ^1.0 (Table 3), so the disposition rates
+  // scale by weight^(0.8−1.0); reference 70 kg. (The model's fat-mass term on
+  // volume is omitted — it needs body-composition data the app does not have.)
   'Tirzepatide (Mounjaro / Zepbound)': {
-    halfLifeHours: 120,
-    tmaxHours: 59,         // implied by published ka (Schneck 2024, PMC10962491 Table 3)
-    bioavailability: 0.80,
-    ka: 0.0373,            // h⁻¹, population PK estimate (Schneck 2024, PMC10962491)
-    ke: Math.LN2 / 120,
+    model: 'two-compartment',
+    bioavailability: 0.8,   // fixed (Schneck 2024, Table 3)
+    ka: 0.0373,             // h⁻¹ (Schneck 2024, Table 3)
+    k10: 0.0329 / 2.47,     // CL / Vc  (per 70 kg)
+    k12: 0.126 / 2.47,      // Q  / Vc  (per 70 kg)
+    k21: 0.126 / 3.98,      // Q  / Vp  (per 70 kg)
+    weightCovariate: { kind: 'allometric-disposition', referenceWeightKg: 70, exponent: 0.8 - 1 },
   },
+  // Two-compartment population PK model (Geiser et al. 2015, PMID 26507721,
+  // Table 6). Published macro-parameters: CL/F 0.0593 L/h, Vc/F 2.25 L,
+  // Vp/F 3.75 L, Q/F 0.0201 L/h — the micro-rate constants below are derived
+  // from those. The model predicts a broad central-compartment peak roughly
+  // 2.5 days after the dose and a ~7.5-day terminal half-life. Body weight is a
+  // covariate on bioavailability (Table 6); reference 92.5 kg.
   'Dulaglutide (Trulicity)': {
-    halfLifeHours: 112.8,
-    tmaxHours: 48,
-    bioavailability: 0.47, // doses ≥ 1.5 mg (DailyMed); 0.75 mg is ~0.65
-    ka: 0.050,             // h⁻¹, solved from Tmax = 48h; published model is 2-compartment
-    ke: Math.LN2 / 112.8,
+    model: 'two-compartment',
+    bioavailability: 0.47, // 1.5 mg dose, absolute-BA study (Geiser 2015)
+    ka: 0.00769,           // h⁻¹, published estimate (Geiser 2015, Table 6)
+    k10: 0.0593 / 2.25,    // (CL/F) / (Vc/F)
+    k12: 0.0201 / 2.25,    // (Q/F)  / (Vc/F)
+    k21: 0.0201 / 3.75,    // (Q/F)  / (Vp/F)
+    weightCovariate: { kind: 'exponential-bioavailability', referenceWeightKg: 92.5, coefficient: -0.00877 },
   },
   'Liraglutide (Victoza / Saxenda)': {
+    model: 'one-compartment',
     halfLifeHours: 13,
     tmaxHours: 10,
     bioavailability: 0.55,
@@ -54,6 +124,7 @@ export const DRUG_PK: Record<Medication, DrugPK> = {
     ke: Math.LN2 / 13,
   },
   'Retatrutide': {
+    model: 'one-compartment',
     halfLifeHours: 144,
     tmaxHours: 36,
     bioavailability: 0.80,
@@ -119,14 +190,112 @@ export function drugDisplayShape(medication: string): DrugShape {
 }
 
 /**
- * Bateman equation: mg of drug remaining in body at time t (hours) after a
- * single subcutaneous dose, using a one-compartment first-order absorption /
- * elimination model.
+ * One exponential term of a drug's single-dose disposition curve. The amount
+ * of drug in the tracked compartment t hours after a dose of `doseMg` is:
+ *   doseMg · Σ coefficient · exp(-rateConstant · t)
  */
-function batemanAmountMg(doseMg: number, pk: DrugPK, tHours: number): number {
+export type DecayTerm = { coefficient: number; rateConstant: number };
+
+/**
+ * Two-compartment hybrid disposition rates: the roots of the disposition
+ * quadratic λ² − (k10 + k12 + k21)·λ + k10·k21 = 0. `alpha` is the fast
+ * distribution phase, `beta` the slow terminal phase. Exported so the
+ * spreadsheet export can rebuild the weight-scaled curve.
+ */
+export function dispositionRates(
+  k10: number,
+  k12: number,
+  k21: number,
+): { alpha: number; beta: number } {
+  const sum = k10 + k12 + k21;
+  const root = Math.sqrt(sum * sum - 4 * k10 * k21);
+  return { alpha: (sum + root) / 2, beta: (sum - root) / 2 };
+}
+
+/**
+ * Decompose a drug's single-dose curve into exponential terms. A
+ * one-compartment model yields two terms (the Bateman equation); the
+ * two-compartment central compartment yields three.
+ *
+ * When the drug carries a body-weight covariate and `weightKg` is supplied the
+ * curve is individualized: an allometric covariate scales the disposition rate
+ * constants, a bioavailability covariate scales F.
+ */
+function decayTerms(pk: DrugPK, weightKg?: number): DecayTerm[] {
+  if (pk.model === 'two-compartment') {
+    const { ka } = pk;
+    let { k10, k12, k21 } = pk;
+    let F = pk.bioavailability;
+    const cov = pk.weightCovariate;
+    if (cov && weightKg != null) {
+      if (cov.kind === 'allometric-disposition') {
+        const factor = (weightKg / cov.referenceWeightKg) ** cov.exponent;
+        k10 *= factor;
+        k12 *= factor;
+        k21 *= factor;
+      } else {
+        F *= Math.exp(cov.coefficient * (weightKg - cov.referenceWeightKg));
+      }
+    }
+    const { alpha, beta } = dispositionRates(k10, k12, k21);
+    const scale = F * ka;
+    return [
+      { coefficient: (scale * (k21 - ka)) / ((alpha - ka) * (beta - ka)), rateConstant: ka },
+      { coefficient: (scale * (k21 - alpha)) / ((ka - alpha) * (beta - alpha)), rateConstant: alpha },
+      { coefficient: (scale * (k21 - beta)) / ((ka - beta) * (alpha - beta)), rateConstant: beta },
+    ];
+  }
+  // One-compartment Bateman, written as a sum of exponentials:
+  //   F·D·ka/(ka−ke)·(e^−ke·t − e^−ka·t)
+  const scale = (pk.bioavailability * pk.ka) / (pk.ka - pk.ke);
+  return [
+    { coefficient: scale, rateConstant: pk.ke },
+    { coefficient: -scale, rateConstant: pk.ka },
+  ];
+}
+
+/**
+ * mg of drug in the tracked compartment at time t (hours) after a single dose.
+ * A same-day (t ≤ 0) dose contributes 0 — see calculateSystemMgByDrug.
+ */
+function amountFromTerms(terms: DecayTerm[], doseMg: number, tHours: number): number {
   if (tHours <= 0) return 0;
-  const { bioavailability: F, ka, ke } = pk;
-  return ((F * doseMg * ka) / (ka - ke)) * (Math.exp(-ke * tHours) - Math.exp(-ka * tHours));
+  let sum = 0;
+  for (const term of terms) {
+    sum += term.coefficient * Math.exp(-term.rateConstant * tHours);
+  }
+  return doseMg * sum;
+}
+
+/**
+ * Exponential terms for a medication's single-dose curve, or null if the drug
+ * has no PK model. Exposed so other modules (e.g. the spreadsheet export) can
+ * reproduce the curve without re-deriving the parameters. Pass `weightKg` to
+ * individualize a drug that has a body-weight covariate.
+ */
+export function systemDecayTerms(medication: string, weightKg?: number): DecayTerm[] | null {
+  const pk = (DRUG_PK as Record<string, DrugPK>)[medication];
+  return pk ? decayTerms(pk, weightKg) : null;
+}
+
+/** A body-weight measurement used to individualize the PK model. */
+export type WeighIn = { date: IsoDate; weightKg: number };
+
+/** Pounds → kilograms. Weights are stored in pounds; PK covariates use kg. */
+export const KG_PER_LB = 0.45359237;
+
+/**
+ * The body weight (kg) to apply to a dose given on `date`: the most recent
+ * weigh-in on or before that date, or undefined when there is none (callers
+ * then fall back to the population reference weight). IsoDate strings sort
+ * lexicographically, so plain string comparison gives date order.
+ */
+export function weightForDate(weighIns: WeighIn[], date: IsoDate): number | undefined {
+  let best: WeighIn | undefined;
+  for (const w of weighIns) {
+    if (w.date <= date && (best === undefined || w.date > best.date)) best = w;
+  }
+  return best?.weightKg;
 }
 
 // Parse YYYY-MM-DD as local midnight so timezone offsets don't shift the date.
@@ -165,23 +334,27 @@ export function formatSystemMg(amount: number): string {
  *
  * A same-day injection therefore contributes 0 to that day's value -- it
  * represents what was already circulating before the new dose.
+ *
+ * `weighIns` individualizes drugs with a body-weight covariate: each dose uses
+ * the most recent weigh-in on or before its own date.
  */
 export function calculateSystemMgByDrug(
   injections: { date: IsoDate; amountMg: number; medication: string }[],
   targetDate: IsoDate,
+  weighIns: WeighIn[] = [],
 ): SystemDrugAmount[] {
   const targetMs = localMidnight(targetDate);
   const totals = new Map<Medication, number>();
 
   for (const inj of injections) {
-    const pk = (DRUG_PK as Record<string, DrugPK>)[inj.medication];
-    if (!pk) continue;
+    const terms = systemDecayTerms(inj.medication, weightForDate(weighIns, inj.date));
+    if (!terms) continue;
 
     const tHours = (targetMs - localMidnight(inj.date)) / (1000 * 60 * 60);
     if (tHours < 0) continue;
 
     const med = inj.medication as Medication;
-    totals.set(med, (totals.get(med) ?? 0) + batemanAmountMg(inj.amountMg, pk, tHours));
+    totals.set(med, (totals.get(med) ?? 0) + amountFromTerms(terms, inj.amountMg, tHours));
   }
 
   return [...totals]
@@ -200,8 +373,9 @@ export function calculateSystemMgByDrug(
 export function calculateSystemMg(
   injections: { date: IsoDate; amountMg: number; medication: string }[],
   targetDate: IsoDate,
+  weighIns: WeighIn[] = [],
 ): number {
-  const total = calculateSystemMgByDrug(injections, targetDate)
+  const total = calculateSystemMgByDrug(injections, targetDate, weighIns)
     .reduce((sum, amount) => sum + amount.amountMg, 0);
   return roundMg(total);
 }
