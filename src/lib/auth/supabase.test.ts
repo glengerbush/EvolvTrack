@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   signInWithOtpMock: vi.fn(),
   signUpMock: vi.fn(),
   signOutMock: vi.fn(),
+  resetPasswordForEmailMock: vi.fn(),
   dbDeleteMock: vi.fn(),
   createClientMock: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock('@supabase/supabase-js', () => {
       signInWithOtp: h.signInWithOtpMock,
       signUp: h.signUpMock,
       signOut: h.signOutMock,
+      resetPasswordForEmail: h.resetPasswordForEmailMock,
     },
   }));
   return { createClient: h.createClientMock };
@@ -28,6 +30,7 @@ vi.mock('$lib/db/schema', () => ({
 
 import {
   logoutAndClearLocalData,
+  requestPasswordReset,
   signInWithMagicLink,
   signInWithPassword,
   signUpWithPassword,
@@ -43,6 +46,8 @@ beforeEach(() => {
   h.signUpMock.mockResolvedValue({ data: null, error: null });
   h.signOutMock.mockReset();
   h.signOutMock.mockResolvedValue({ error: null });
+  h.resetPasswordForEmailMock.mockReset();
+  h.resetPasswordForEmailMock.mockResolvedValue({ data: {}, error: null });
   h.dbDeleteMock.mockReset();
   h.dbDeleteMock.mockResolvedValue(undefined);
   localStorage.clear();
@@ -118,6 +123,38 @@ describe('signUpWithPassword', () => {
       signupIdentifier: 'alice@example.com',
       usedGeneratedEmail: false,
     });
+  });
+});
+
+describe('requestPasswordReset', () => {
+  it('sends a reset email and asks Supabase to redirect to /auth/reset', async () => {
+    const { error } = await requestPasswordReset('Alice@Example.COM');
+    expect(error).toBeNull();
+    expect(h.resetPasswordForEmailMock).toHaveBeenCalledTimes(1);
+    const [email, options] = h.resetPasswordForEmailMock.mock.calls[0];
+    expect(email).toBe('alice@example.com');
+    expect(options.redirectTo).toMatch(/\/auth\/reset$/);
+  });
+
+  it('refuses identifiers that are not email addresses', async () => {
+    const { error } = await requestPasswordReset('alice');
+    expect(error?.message).toMatch(/email/i);
+    expect(h.resetPasswordForEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses synthetic username-domain addresses (no real inbox)', async () => {
+    const { error } = await requestPasswordReset('alice@users.evolvtrack.com');
+    expect(error?.message).toMatch(/email/i);
+    expect(h.resetPasswordForEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('surfaces Supabase errors verbatim', async () => {
+    h.resetPasswordForEmailMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'rate limit hit' },
+    });
+    const { error } = await requestPasswordReset('a@b.com');
+    expect(error?.message).toBe('rate limit hit');
   });
 });
 

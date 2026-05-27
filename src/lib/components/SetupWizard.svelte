@@ -23,7 +23,7 @@
   let passphrase = $state('');
   let passphraseConfirm = $state('');
   let e2eeStatus = $state('');
-  let recoveryCodes = $state<string[]>([]);
+  let recoveryCode = $state<string | null>(null);
 
   // Import step
   let importStatus = $state('');
@@ -106,7 +106,7 @@
     e2eeStatus = 'Enabling encryption…';
     try {
       const result = await startE2EEMigration(passphrase);
-      if (result.recoveryCodes) recoveryCodes = result.recoveryCodes;
+      if (result.recoveryCode) recoveryCode = result.recoveryCode;
       if (result.completed) {
         e2eeStatus = `Encryption enabled. ${result.encryptedEventCount} local record${result.encryptedEventCount === 1 ? '' : 's'} encrypted.`;
       } else {
@@ -116,9 +116,9 @@
       }
       passphrase = '';
       passphraseConfirm = '';
-      // Stay on the e2ee step so the user sees recovery codes (if any).
+      // Stay on the e2ee step so the user sees the recovery code (if any).
       // They confirm with "Continue" below, which advances to import.
-      if (!recoveryCodes.length) step = 'import';
+      if (!recoveryCode) step = 'import';
     } catch (error) {
       e2eeStatus = (error as Error).message;
     } finally {
@@ -202,16 +202,16 @@
     step = 'done';
   }
 
-  let copyLabel = $state('Copy all');
-  async function copyRecoveryCodes() {
-    if (!recoveryCodes.length) return;
+  let copyLabel = $state('Copy');
+  async function copyRecoveryCode() {
+    if (!recoveryCode) return;
     try {
-      await navigator.clipboard.writeText(recoveryCodes.join('\n'));
+      await navigator.clipboard.writeText(recoveryCode);
       copyLabel = 'Copied!';
-      setTimeout(() => (copyLabel = 'Copy all'), 1800);
+      setTimeout(() => (copyLabel = 'Copy'), 1800);
     } catch {
       copyLabel = 'Copy failed';
-      setTimeout(() => (copyLabel = 'Copy all'), 1800);
+      setTimeout(() => (copyLabel = 'Copy'), 1800);
     }
   }
 </script>
@@ -280,28 +280,24 @@
       <div class="wizard-body">
         <h3>End-to-end encryption</h3>
 
-        {#if recoveryCodes.length}
+        {#if recoveryCode}
           <p>{e2eeStatus}</p>
           <div class="recovery">
-            <h4>Recovery codes</h4>
+            <h4>Recovery code</h4>
             <p class="hint">
-              Save these now — they're the only way to decrypt your data if
-              you forget your passphrase. They won't be shown again.
+              Save this now — it's the only way to decrypt your data if you
+              forget your passphrase. It won't be shown again.
             </p>
-            <ul class="codes">
-              {#each recoveryCodes as code (code)}
-                <li><code>{code}</code></li>
-              {/each}
-            </ul>
-            <button class="btn btn-ghost copy-btn" type="button" onclick={copyRecoveryCodes}>
+            <p class="code"><code>{recoveryCode}</code></p>
+            <button class="btn btn-ghost copy-btn" type="button" onclick={copyRecoveryCode}>
               {copyLabel}
             </button>
           </div>
         {:else}
           <p>
             Encrypts everything that leaves this device with a passphrase only you
-            know. We can't recover the passphrase if you lose it — you'll get
-            recovery codes after enabling.
+            know. We can't recover the passphrase if you lose it — you'll get a
+            recovery code after enabling.
           </p>
 
           <p class="hint">
@@ -329,9 +325,9 @@
         {/if}
       </div>
       <footer class="wizard-footer">
-        {#if recoveryCodes.length}
+        {#if recoveryCode}
           <button class="btn btn-primary" type="button" onclick={acknowledgeRecoveryCodes}>
-            I've saved my codes — continue
+            I've saved my code — continue
           </button>
         {:else}
           <button class="btn btn-ghost" type="button" onclick={skipE2EE} disabled={busy}>
@@ -587,14 +583,19 @@
     background: color-mix(in oklab, var(--text) 6%, transparent);
   }
 
-  .codes {
+  .recovery .code {
     margin: 0;
-    padding-left: 1.1rem;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.35rem;
-    font-family: ui-monospace, monospace;
-    font-size: 0.9rem;
+    padding: 0.55rem 0.7rem;
+    background: color-mix(in oklab, var(--text) 5%, transparent);
+    border-radius: 6px;
+    text-align: center;
+    word-break: break-all;
+  }
+
+  .recovery .code code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.95rem;
+    letter-spacing: 0.06em;
   }
 
   .copy-btn {

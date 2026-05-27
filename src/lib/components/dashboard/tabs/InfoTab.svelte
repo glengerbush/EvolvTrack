@@ -29,23 +29,40 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>What is EvolvTrack?</summary>
       <div class="faq-answer">
         <p>
-          EvolvTrack is a personal tracker for injectable medications. It logs
-          your injections, estimates how much medication is still circulating
-          in your body, and charts those values over time alongside optional
-          wellness notes. It also includes calculators for working out doses
-          and syringe volumes.
+          EvolvTrack is a personal tracker for losing weight while on injectable
+          GLP-1 and GIP medications. With it you can:
+        </p>
+        <ul>
+          <li>Log your injections and track them over time</li>
+          <li>Get an estimate of how much medication is currently in your body</li>
+          <li>Log your weight and symptoms to see how your medication level impacts how you feel</li>
+          <li>Compare your weight loss to your dose week over week</li>
+          <li>Keep tabs on your medication stock</li>
+        </ul>
+        <p>
+          We know there are a lot of apps that do similar things, but EvolvTrack
+          is private. We understand that this data is sensitive and personal, so
+          we built it from the ground up with one principle in mind: you should
+          always have control over your data. And since it is a PWA, you can
+          install it on any platform (<a href="#faq-install">how to install</a>).
         </p>
       </div>
     </details>
 
     <details class="faq-item">
-      <summary><span class="faq-chevron" aria-hidden="true">▸</span>Does my data stay private?</summary>
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>What is E2EE or end-to-end encryption?</summary>
       <div class="faq-answer">
         <p>
-          Yes. Everything you enter is stored locally on your device first. If
-          you choose to enable sync, your data is end-to-end encrypted before
-          it ever leaves the device — see the <a href="#faq-sync">Sync &amp;
-          Privacy</a> section for details.
+          This is a feature we recommend all EvolvTrack users turn on (though
+          you don't have to). It keeps your data secure and private. Your data is encrypted before it leaves your
+          device so anyone with access to our servers cannot read your data
+          (that includes us!). This also means we can't help you recover it if
+          you lose your passphrase and recovery code.(These are different from your login password which can be reset if you use your email to sign up.)
+        </p>
+        <p>
+          At first login you will be prompted to set it up by the Setup Wizard,
+          but you can always enable or disable it later in settings. See the
+          <a href="#faq-sync">Sync &amp; Privacy</a> section for details.
         </p>
       </div>
     </details>
@@ -54,10 +71,18 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>Do I need an account to use it?</summary>
       <div class="faq-answer">
         <p>
-          No. EvolvTrack works fully offline with no account — your data lives
-          in this browser. An account is only needed if you want to sync across
-          multiple devices.
+          Nope! EvolvTrack works fully offline, just install the app on your
+          device. You can read about how to do that
+          <a href="#faq-install">here</a>.
         </p>
+        <p>
+          If you want to sync your data across multiple devices, you will need
+          an account. But we don't require an email to sign up. You can either:
+        </p>
+        <ul>
+          <li>Create a username and password</li>
+          <li>Use your email and sign in with your password or via magic link (passwordless sign-on)</li>
+        </ul>
       </div>
     </details>
   </section>
@@ -71,15 +96,15 @@
         <p>The Calculators tab has three tools:</p>
         <ul>
           <li>
-            <strong>Dosage calculator</strong> — given a vial concentration and
+            <strong>Dosage calculator</strong> - given a vial concentration and
             an intended dose, tells you how many syringe units to draw.
           </li>
           <li>
-            <strong>Reverse dose calculator</strong> — given a number of units
+            <strong>Reverse dose calculator</strong> - given a number of units
             drawn, tells you the dose in milligrams.
           </li>
           <li>
-            <strong>Vial transition calculator</strong> — helps you adjust when
+            <strong>Vial transition calculator</strong> - helps you adjust when
             you switch to a vial of a different concentration.
           </li>
         </ul>
@@ -92,8 +117,7 @@
         <p>
           A vial transition is when you move from one vial to another that has a
           different concentration. Because units drawn depend on concentration,
-          the same dose needs a different number of units from the new vial. The
-          transition calculator works out the new figure for you.
+          the same dose needs a different number of units from the new vial.
         </p>
       </div>
     </details>
@@ -104,7 +128,7 @@
         <p>
           U-100 insulin syringes are the most common tool for these injections.
           On a U-100 scale, 100 units = 1 mL, so the calculators convert your
-          dose to units to match the markings on the syringe.
+          dose to units to match the markings on the syringe. If your syringe uses a different scale, you will need to convert the result from the calculators.
         </p>
       </div>
     </details>
@@ -116,10 +140,18 @@
     <details class="faq-item">
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>How is &ldquo;amount in system&rdquo; calculated?</summary>
       <div class="faq-answer">
+
         <p>
           EvolvTrack estimates how much of each medication is still in your body
           using a pharmacokinetic (PK) model — the same kind of math used in
-          clinical drug research.
+          clinical drug research. Depedning on the medication, we use a combination of dose, bioavailability, absorption rate, eliminiation rate, and half life. A much more detailed explaination is below, but note:
+        </p>
+
+        <p class="faq-note">
+          Treat the &ldquo;amount in system&rdquo; figure as a well-grounded
+          estimate for spotting trends and comparing days, not as a clinical
+          measurement. It is not medical advice; dosing decisions belong with
+          your prescriber.
         </p>
 
         <h3 class="faq-subhead">The model</h3>
@@ -149,15 +181,15 @@
 
         <h3 class="faq-subhead">Semaglutide, tirzepatide &amp; dulaglutide: a two-compartment model</h3>
         <p>
-          The three long-acting weekly drugs — semaglutide, tirzepatide and
-          dulaglutide — are characterized in the published literature by
+          The three long-acting weekly drugs(semaglutide, tirzepatide, and
+          dulaglutide) are characterized in the published literature by
           <strong>two-compartment</strong> models, and EvolvTrack uses those
           published models directly (Overgaard et&nbsp;al. 2019; Schneck
           et&nbsp;al. 2024; Geiser et&nbsp;al. 2015).
         </p>
         <p>
           A two-compartment model splits the body into a <em>central</em>
-          compartment — the bloodstream and fast-equilibrating tissue — and a
+          compartment, the bloodstream and fast-equilibrating tissue, and a
           <em>peripheral</em> compartment of slower tissue. After absorption,
           drug shuttles back and forth between the two and is cleared from the
           central one. The figure EvolvTrack plots for these drugs is the
@@ -198,8 +230,8 @@
         <p>
           For semaglutide and tirzepatide, body weight scales clearance and the
           volume of distribution; for dulaglutide it scales bioavailability. If
-          you have logged no weigh-ins — or for a dose taken before your first
-          weigh-in — the model falls back to the study's reference weight, which
+          you have logged no weigh-ins, or for a dose taken before your first
+          weigh-in, the model falls back to the study's reference weight, which
           gives the population-average curve. Liraglutide and retatrutide are
           not weight-adjusted.
         </p>
@@ -238,33 +270,28 @@
           </li>
           <li>
             <strong>The absorption constant (k<sub>a</sub>) is directly measured
-            for only three of the drugs.</strong> For semaglutide, tirzepatide
+            for only three of the drugs.</strong> For semaglutide, tirzepatide,
             and dulaglutide, k<sub>a</sub> comes from published population-PK
-            studies. For liraglutide and retatrutide no compatible published
-            k<sub>a</sub> exists, so EvolvTrack solves it numerically from the
+            studies. For liraglutide and retatrutide, EvolvTrack instead solves
+            k<sub>a</sub> numerically from the
             label's reported time-to-peak (T<sub>max</sub>) using
             T<sub>max</sub> = ln(k<sub>a</sub>/k<sub>e</sub>) &divide;
             (k<sub>a</sub> &minus; k<sub>e</sub>). That is a reasonable
             approximation, but a derived figure rather than an observed one.
           </li>
           <li>
-            <strong>One model is still simplified.</strong> Liraglutide's
-            published model uses zero-order absorption with a lag time;
-            EvolvTrack approximates it with the standard one-compartment Bateman
-            curve. The three drugs with published two-compartment models —
-            semaglutide, tirzepatide and dulaglutide — are modeled in full (see
-            above).
+            <strong>Liraglutide's absorption is simplified.</strong> Liraglutide is
+            itself a one-compartment drug, and EvolvTrack matches that structure, 
+            but its published models describe absorption in more detail
+            (Watson et&nbsp;al. 2010 used sequential zero, then first-order
+            absorption). EvolvTrack uses a single first-order absorption rate,
+            solved from the label time-to-peak.
           </li>
           <li>
             <strong>Timing is rounded to whole days.</strong> EvolvTrack treats
             every injection as happening at midnight on its date and reads the
             system amount at midnight on the target date. Sub-day timing is not
             modeled.
-          </li>
-          <li>
-            <strong>Unknown medications are skipped.</strong> If you log a drug
-            EvolvTrack has no parameters for, it contributes nothing to the
-            total rather than being guessed at.
           </li>
         </ol>
 
@@ -277,12 +304,40 @@
           <li><strong>Liraglutide</strong> — PMC4875959; StatPearls NBK608007</li>
           <li><strong>Retatrutide</strong> — NEJM (NEJMoa2301972); PMC12190491</li>
         </ul>
+      </div>
+    </details>
 
-        <p class="faq-note">
-          Treat the &ldquo;amount in system&rdquo; figure as a well-grounded
-          estimate for spotting trends and comparing days — not as a clinical
-          measurement. It is not medical advice; dosing decisions belong with
-          your prescriber.
+    <details class="faq-item">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>Why is liraglutide less accurate than the other drugs?</summary>
+      <div class="faq-answer">
+        <p>
+          Liraglutide (Victoza, Saxenda) is normally injected
+          <strong>once per day</strong>, and its half-life of about
+          13&nbsp;hours means the dose rises and falls entirely within that
+          day — the peak lands roughly 10&nbsp;hours after the injection. The
+          other four medications EvolvTrack models are weekly drugs whose
+          curves are slow enough that the time of day they're taken barely
+          shifts the plasma level a week later.
+        </p>
+        <p>
+          To keep logging simple, EvolvTrack records each dose against a
+          <em>date</em> only, not a time of day, and reads the chart once
+          per day at midnight. For the four weekly drugs, that's effectively
+          lossless: knowing the exact hour wouldn't measurably improve their
+          curves, so asking for it would just be friction in the logging UI.
+          For liraglutide, though, that same simplification means the chart
+          never sees the daily peak; the line it draws sits well below the
+          real plasma level.
+        </p>
+        <p>
+          The pharmacokinetic model itself is faithful, liraglutide is a
+          one-compartment drug and EvolvTrack matches that structure. The
+          inaccuracy is purely a sampling-resolution choice that favors the
+          common case (weekly dosing) at liraglutide's expense.
+        </p>
+        <p>
+          Practical guidance: treat liraglutide's line as a rough day-to-day
+          trend, not as an accurate plasma level.
         </p>
       </div>
     </details>
@@ -304,10 +359,8 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>What do &ldquo;planned&rdquo; and &ldquo;skipped&rdquo; doses mean?</summary>
       <div class="faq-answer">
         <p>
-          A <strong>planned</strong> dose is one you intend to take but have not
-          confirmed yet — it appears on the chart as a projection. A
-          <strong>skipped</strong> dose is one you marked as not taken; a skipped
-          day is excluded from the chart so it does not distort your trend line.
+          A <em>planned</em> dose has a date that is in the future, it appears on the chart as a projection. A <em>skipped</em> dose is one you marked as not taken; a <em>skipped</em>
+          day is excluded from the chart so it does not distort your trend line. None of the data for a <em>skipped</em> dose is used for the chart, but it will remain in the table for reference until you delete it. 
         </p>
       </div>
     </details>
@@ -320,10 +373,22 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>How does sync keep my data private?</summary>
       <div class="faq-answer">
         <p>
-          Sync is end-to-end encrypted. Your data is encrypted on your device
-          with a key derived from your passphrase before it is uploaded, so the
-          server only ever stores ciphertext and cannot read your records. The
-          EvolvTrack source code is public so this can be independently audited.
+          Sync is only private if you have end-to-end encryption (E2EE) turned
+          on. We strongly recommend enabling it.
+        </p>
+        <ul>
+          <li>
+            <strong>With E2EE on:</strong> Your data is encrypted on your device
+            before it is sent to our servres, so the server only stores encrypted data.
+            Nobody — not even us — can read your records. The EvolvTrack source
+            code is <a href="https://github.com/glengerbush/EvolvTrack" target="_blank" rel="noopener">public</a> so this can be independently audited.
+          </li>
+          <li>
+            <strong>With E2EE off:</strong> Just turn it on...otherwise your data can be read by those with access to our server, which is <em>hopefully</em> just us. It does mean we can recover your data for you if you lose your password, but if you aren't using a password manager, it's probably time to start.
+          </li>
+        </ul>
+        <p>
+          You can turn E2EE on or off at any time from the Settings tab.
         </p>
       </div>
     </details>
@@ -332,21 +397,52 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>What happens if I forget my passphrase?</summary>
       <div class="faq-answer">
         <p>
-          Because encryption happens on your device, your passphrase is the only
-          thing that can decrypt synced data — it is never sent to the server.
-          If you lose it, that data cannot be recovered. Keep a copy somewhere
-          safe, such as a password manager.
+          You only have a passphrase if you enabled E2EE. It is separate from your login password. 
+          With E2EE on,your passphrase and your recovery code are the only two ways to unlock your
+          encrypted data, neither is ever sent to the server. You can use the
+          recovery code from the unlock screen to set a new passphrase if you
+          forget the old one.
+        </p>
+        <p>
+          <strong>If you lose both your passphrase and your recovery code, your
+          encrypted data is unrecoverable.</strong> No one(including us!) can decrypt
+          it.
         </p>
       </div>
     </details>
 
     <details class="faq-item">
-      <summary><span class="faq-chevron" aria-hidden="true">▸</span>What does a license unlock?</summary>
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>How does the recovery code work?</summary>
       <div class="faq-answer">
         <p>
-          Core tracking and the calculators are available without a license.
-          A license unlocks multi-device sync. See the Settings tab for license
-          details.
+          When you enable E2EE we generate a single recovery code
+          and show it to you once. Save it somewhere safe, we can't show it to
+          you again.
+        </p>
+        <p>
+          If you forget your passphrase, paste the recovery code into the unlock
+          screen and choose a new passphrase. Two important things happen
+          automatically:
+        </p>
+        <ul>
+          <li>The old recovery code stops working, a fresh one is issued.</li>
+          <li>A new encryption key is generated and your data is re-encrypted
+          under it. If the old code or key was exposed somehow, that exposure
+          doesn't carry into your future data.</li>
+        </ul>
+        <p>
+          You can also rotate the recovery code or the encryption key at any
+          time from Settings, useful if you think a code or device may have
+          been seen.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>What does a license do?</summary>
+      <div class="faq-answer">
+        <p>
+          A license allows for multi-device sync. This means your data is backed up and synced on our servers, which can then be synced to any logged in device. Without a license the app can be used offline on one device. See the Settings tab for license details.
         </p>
       </div>
     </details>
@@ -359,10 +455,7 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>A medication I logged isn't on the chart.</summary>
       <div class="faq-answer">
         <p>
-          The system-amount chart can only plot medications it has
-          pharmacokinetic parameters for (currently the five listed above). A
-          drug outside that set is still logged, but it is left off the
-          system-amount line because there is no model to estimate it.
+          The "amount in system" only appears the day after a dose, so if there aren't days logged after you logged a dose, you won't see a line for that yet. If you add planned doses to the chart, you will see an estimated "amount in system" starting the day after the dose was taken.
         </p>
       </div>
     </details>
@@ -371,10 +464,13 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>My data isn't appearing on another device.</summary>
       <div class="faq-answer">
         <p>
-          Check that sync is enabled and signed in on both devices, that both
-          use the same passphrase, and that each device has been online since
-          the change was made. If a device still looks out of date, open it and
-          let it finish syncing before editing.
+          Check that sync is enabled and signed in on both devices, and that
+          each device has been online since the change was made. If you have
+          end-to-end encryption turned on, both devices must also be unlocked
+          with the same passphrase. If a device still looks out of date, open
+          it, click the sync status pill in the top bar (next to the
+          &ldquo;Log out&rdquo; button), and press &ldquo;Sync now&rdquo; in
+          the panel that appears. Wait for the status to change from &ldquo;Syncing&rdquo; to &ldquo;Synced.&rdquo;
         </p>
       </div>
     </details>
@@ -440,7 +536,9 @@
   .faq-section {
     display: grid;
     gap: 0.5rem;
-    scroll-margin-top: 1rem;
+    /* Clear the sticky .tabbar in Dashboard.svelte so the section heading
+     * lands below the tab bar instead of underneath it. */
+    scroll-margin-top: 3.5rem;
   }
 
   .faq-section-title {

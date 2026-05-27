@@ -618,7 +618,7 @@
             <line x1={CHART.margin.left - 1} x2={CHART.margin.left - 1} y1={PLOT.top} y2={PLOT.bottom} />
           </g>
           <g class="axis-labels">
-            {#each effectiveLeftTicks as tick (tick.label)}
+            {#each effectiveLeftTicks as tick (tick.value)}
               <text x={CHART.margin.left - 11} y={tick.y + 4} text-anchor="end">{tick.label}</text>
             {/each}
             <text
@@ -688,7 +688,7 @@
 
             {#if showAnyAxis}
               <g class="grid-lines">
-                {#each effectiveLeftTicks as tick (tick.label)}
+                {#each effectiveLeftTicks as tick (tick.value)}
                   <line
                     x1={PLOT.left}
                     x2={chartModel.plotRight}
@@ -908,7 +908,7 @@
               <line x1={1} x2={1} y1={PLOT.top} y2={PLOT.bottom} />
             </g>
             <g class="axis-labels">
-              {#each effectiveRightTicks as tick (tick.label)}
+              {#each effectiveRightTicks as tick (tick.value)}
                 <text x={10} y={tick.y + 4}>{tick.label}</text>
               {/each}
               <text

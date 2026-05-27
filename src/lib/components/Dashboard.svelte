@@ -79,15 +79,20 @@
         suppressNextHashChange = false;
         return;
       }
-      const next = tabFromHash();
-      if (next === activeTab) return;
+      // Ignore hashes that aren't tab names — they're in-page anchors
+      // (e.g. the FAQ table of contents in the Info tab). Letting the
+      // fallback in tabFromHash() take over would yank the user back to
+      // the Health tab whenever they clicked an in-page link.
+      const rawHash = window.location.hash.slice(1) as ActiveTab;
+      if (!validTabs.has(rawHash)) return;
+      if (rawHash === activeTab) return;
       if (!confirmActiveTabNavigation()) {
         suppressNextHashChange = true;
         window.location.hash = activeTab;
         return;
       }
       discardTabChanges(activeTab);
-      activeTab = next;
+      activeTab = rawHash;
     }
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -231,7 +236,7 @@
           {#if tab.iconOnly}
             <span class="top-tab-icon-box">
               <svg viewBox="0 0 24 24" role="presentation" focusable="false" aria-hidden="true">
-                <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                <path d="M19.14 12.94c.04-.31.06-.62.06-.94 0-.32-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.55-1.62.94l-2.39-.96a.5.5 0 0 0-.59.22L2.71 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.62-.06.94 0 .32.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.13.23.41.31.59.22l2.39-.96c.49.39 1.03.7 1.62.94l.36 2.54c.05.24.27.42.5.42h3.84c.23 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.55 1.62-.94l2.39.96c.18.09.46.01.59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
               </svg>
             </span>
           {:else}

@@ -3,7 +3,7 @@ import { db } from '$lib/db/schema';
 import { clearSession } from '$lib/sync/session-key';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
 
 export const supabaseUrl = url || 'https://example.supabase.co';
 
@@ -28,7 +28,7 @@ function toAuthEmail(identifier: string) {
   return `${normalizeUsername(normalizedIdentifier)}@${USERNAME_AUTH_DOMAIN}`;
 }
 
-export const supabase = createClient(url || 'https://example.supabase.co', anonKey || 'demo-key', {
+export const supabase = createClient(url || 'https://example.supabase.co', publishableKey || 'demo-key', {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
@@ -42,6 +42,25 @@ export async function signInWithPassword(identifier: string, password: string) {
 
 export async function signInWithMagicLink(email: string) {
   return supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin + '/auth/callback' } });
+}
+
+/**
+ * Sends a password-reset email. Only real email accounts can be reset:
+ * username-only accounts are stored under a synthetic @users.evolvtrack.com
+ * address that has no inbox, so we refuse those at the boundary instead of
+ * silently mailing a domain that cannot deliver.
+ */
+export async function requestPasswordReset(
+  email: string,
+): Promise<{ error: { message: string } | null }> {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized.includes('@') || normalized.endsWith(`@${USERNAME_AUTH_DOMAIN}`)) {
+    return { error: { message: 'Password reset requires a real email address.' } };
+  }
+  const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
+    redirectTo: window.location.origin + '/auth/reset',
+  });
+  return { error };
 }
 
 export async function signUpWithPassword(identifier: string, password: string) {

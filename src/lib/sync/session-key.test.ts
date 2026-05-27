@@ -52,17 +52,32 @@ describe('session key cache', () => {
 describe('persistence', () => {
   it('does not write to localStorage by default', () => {
     setSessionKey('KEY_AAA');
-    expect(localStorage.getItem('et.session.key')).toBeNull();
+    expect(localStorage.getItem('et.session.dek')).toBeNull();
   });
 
   it('writes to localStorage when persist:true', () => {
     setSessionKey('KEY_AAA', { persist: true });
-    expect(localStorage.getItem('et.session.key')).toBe('KEY_AAA');
+    expect(localStorage.getItem('et.session.dek')).toBe('KEY_AAA');
   });
 
   it('clearSession wipes the persisted entry', () => {
     setSessionKey('KEY_AAA', { persist: true });
     clearSession();
+    expect(localStorage.getItem('et.session.dek')).toBeNull();
+  });
+
+  it('clearSession also wipes any legacy et.session.key entry', () => {
+    // Older builds cached the passphrase-derived key under et.session.key.
+    // The current build caches the DEK under et.session.dek. clearSession
+    // should evict both so a stale legacy value never re-hydrates.
+    localStorage.setItem('et.session.key', 'STALE');
+    clearSession();
+    expect(localStorage.getItem('et.session.key')).toBeNull();
+  });
+
+  it('setSessionKey wipes any legacy et.session.key entry too', () => {
+    localStorage.setItem('et.session.key', 'STALE');
+    setSessionKey('NEW_DEK');
     expect(localStorage.getItem('et.session.key')).toBeNull();
   });
 });
@@ -75,7 +90,7 @@ describe('rehydrateSession', () => {
   });
 
   it('loads a persisted key, unlocks, and exposes it via getSessionKey', () => {
-    localStorage.setItem('et.session.key', 'PERSISTED');
+    localStorage.setItem('et.session.dek', 'PERSISTED');
     expect(rehydrateSession()).toBe(true);
     expect(getSessionKey()).toBe('PERSISTED');
     expect(get(sessionLocked)).toBe(false);

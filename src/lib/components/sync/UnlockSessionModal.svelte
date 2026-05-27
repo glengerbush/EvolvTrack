@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { db } from '$lib/db/schema';
-  import { decryptRecord, deriveSessionKey } from '$lib/crypto/e2ee';
+  import { derivePassphraseKek, unwrapDek } from '$lib/crypto/e2ee';
   import { setSessionKey } from '$lib/sync/session-key';
+  import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
   import { requestSync } from '$lib/sync/sync-orchestrator';
+  import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
+  import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -10,6 +12,8 @@
   let remember = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let recoveryOpen = $state(false);
+  let newRecoveryCode = $state<string | null>(null);
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && !busy) {
@@ -23,18 +27,27 @@
     if (event.target === event.currentTarget) onClose();
   }
 
-  async function verify(keyB64: string): Promise<boolean> {
-    // Try decrypting one local encrypted record to confirm the derived key.
-    // If there are none locally yet, accept optimistically — the next push/pull
-    // will surface a mismatch as a sync error.
-    const sample = await db.encrypted.limit(1).first();
-    if (!sample) return true;
-    try {
-      await decryptRecord(keyB64, sample.ciphertext, sample.iv);
-      return true;
-    } catch {
-      return false;
-    }
+  function openRecovery() {
+    if (busy) return;
+    error = null;
+    recoveryOpen = true;
+  }
+
+  function closeRecovery() {
+    recoveryOpen = false;
+  }
+
+  function handleRecovered(code: string) {
+    recoveryOpen = false;
+    // The newly issued recovery code must be shown exactly once. Hold the
+    // unlock modal open behind a "save your new code" view; dismissing that
+    // closes the whole stack.
+    newRecoveryCode = code;
+  }
+
+  function acknowledgeNewCode() {
+    newRecoveryCode = null;
+    onClose();
   }
 
   async function submit() {
@@ -42,14 +55,25 @@
     busy = true;
     error = null;
     try {
-      const keyB64 = await deriveSessionKey(passphrase);
-      const ok = await verify(keyB64);
-      if (!ok) {
+      const bundle = await getLocalWrappedKeys();
+      if (!bundle) {
+        // No local bundle means we either haven't enabled E2EE on this device
+        // or the user signed in on a fresh device that hasn't fetched the
+        // remote bundle yet. New-device recovery will be wired separately.
+        error = 'No encrypted bundle on this device. Use a recovery code to set up this device.';
+        busy = false;
+        return;
+      }
+      const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64);
+      let dek: string;
+      try {
+        dek = await unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);
+      } catch {
         error = "That passphrase didn't unlock your encrypted data.";
         busy = false;
         return;
       }
-      setSessionKey(keyB64, { persist: remember });
+      setSessionKey(dek, { persist: remember });
       // Best-effort: ask the browser for persistent storage so it won't
       // evict the cached key under disk pressure. Safe to ignore failures.
       if (remember && typeof navigator !== 'undefined' && navigator.storage?.persist) {
@@ -107,6 +131,10 @@
         <p class="field-error" role="alert">{error}</p>
       {/if}
       <div class="modal-actions">
+        <button type="button" class="link" onclick={openRecovery} disabled={busy}>
+          Use recovery code instead
+        </button>
+        <span class="spacer"></span>
         <button type="button" class="ghost" onclick={onClose} disabled={busy}>Cancel</button>
         <button type="submit" class="primary" disabled={!passphrase || busy}>
           {busy ? 'Unlocking…' : 'Unlock'}
@@ -115,6 +143,14 @@
     </form>
   </div>
 </div>
+
+{#if recoveryOpen}
+  <RecoveryUnlockModal onClose={closeRecovery} onRecovered={handleRecovered} />
+{/if}
+
+{#if newRecoveryCode}
+  <RecoveryCodesModal code={newRecoveryCode} onClose={acknowledgeNewCode} />
+{/if}
 
 <style>
   .modal-backdrop {
@@ -244,5 +280,19 @@
     background: var(--brand);
     border: 1px solid var(--brand);
     color: #fff;
+  }
+
+  .modal-actions .link {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--brand);
+    font-weight: 500;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .modal-actions .spacer {
+    flex: 1;
   }
 </style>

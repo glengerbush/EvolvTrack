@@ -32,6 +32,7 @@ describe('schema.ts singleton', () => {
       'prescriptions',
       'profile',
       'weights',
+      'wrappedKeys',
     ]);
   });
 
@@ -43,6 +44,7 @@ describe('schema.ts singleton', () => {
     expect(db.encrypted).toBeDefined();
     expect(db.migrationBackfill).toBeDefined();
     expect(db.outbox).toBeDefined();
+    expect(db.wrappedKeys).toBeDefined();
 
     // Table accessors should be the same identity across reads.
     expect(db.weights).toBe(db.weights);

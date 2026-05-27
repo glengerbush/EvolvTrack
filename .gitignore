@@ -20,8 +20,15 @@ coverage/
 
 # Playwright artifacts
 .playwright/
+.playwright-mcp/
 test-results/
 
 # Local Supabase CLI state (created by `supabase start`)
 supabase/.temp/
 supabase/.branches/
+
+# Supabase env files (auto-loaded by the CLI). Only the .example is tracked.
+supabase/.env
+supabase/.env.local
+supabase/.env.*
+!supabase/.env.example

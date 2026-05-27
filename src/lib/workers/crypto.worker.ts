@@ -47,17 +47,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const msg = event.data;
   try {
-    if (msg.type === 'derive') {
-      // First-time setup: pick a fresh salt for this user and verify the
-      // passphrase derives. We never store the derived key here — the caller
-      // will follow up with `derive-key` once the salt is persisted.
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      const saltB64 = toB64(salt);
-      await deriveAesKey(msg.payload.passphrase, saltB64);
-      self.postMessage({ id: msg.id, ok: true, data: { saltB64 } });
-      return;
-    }
-
     if (msg.type === 'derive-key') {
       const { passphrase, saltB64 } = msg.payload;
       const key = await deriveAesKey(passphrase, saltB64);
@@ -86,6 +75,44 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         toArrayBuffer(cipherBytes)
       );
       self.postMessage({ id: msg.id, ok: true, data: { plaintext: td.decode(plain) } });
+      return;
+    }
+
+    if (msg.type === 'generate-dek') {
+      // The DEK is the raw AES key used to encrypt every record. It is
+      // generated once and never derived from a passphrase, so the user can
+      // rotate passphrases (or recover from one) without touching ciphertext.
+      const dek = crypto.getRandomValues(new Uint8Array(32));
+      self.postMessage({ id: msg.id, ok: true, data: { dekB64: toB64(dek) } });
+      return;
+    }
+
+    if (msg.type === 'wrap-key') {
+      // Encrypt the raw key bytes (not arbitrary plaintext) with a KEK. Kept
+      // distinct from `encrypt` so it's obvious at the call site whether the
+      // payload is record data or key material.
+      const { kekB64, keyB64 } = msg.payload;
+      const kek = await importRawKey(kekB64);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, toArrayBuffer(fromB64(keyB64)));
+      self.postMessage({
+        id: msg.id,
+        ok: true,
+        data: { iv: toB64(iv), ciphertext: toB64(new Uint8Array(wrapped)) },
+      });
+      return;
+    }
+
+    if (msg.type === 'unwrap-key') {
+      const { kekB64, ciphertext, iv } = msg.payload;
+      const kek = await importRawKey(kekB64);
+      const raw = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: toArrayBuffer(fromB64(iv)) },
+        kek,
+        toArrayBuffer(fromB64(ciphertext)),
+      );
+      self.postMessage({ id: msg.id, ok: true, data: { keyB64: toB64(new Uint8Array(raw)) } });
+      return;
     }
   } catch (error) {
     self.postMessage({ id: msg.id, ok: false, error: (error as Error).message });

@@ -86,6 +86,37 @@ describe('worker crypto round trip', () => {
     expect(td.decode(decrypted)).toBe(plaintext);
   });
 
+  it('wrap → unwrap round-trips a random DEK under a passphrase-derived KEK', async () => {
+    // Wrap/unwrap is the new path: the DEK is random bytes, and we encrypt it
+    // with a KEK derived from the passphrase. The unwrapped bytes must match
+    // exactly — any drift in b64 encoding or buffer slicing would break sync
+    // for every E2EE user on next unlock.
+    const passphrase = 'hunter2';
+    const saltB64 = toB64(crypto.getRandomValues(new Uint8Array(16)));
+    const kek = await deriveAesKey(passphrase, saltB64);
+    const kekB64 = await exportRawKey(kek);
+
+    const dekBytes = crypto.getRandomValues(new Uint8Array(32));
+    const dekB64 = toB64(dekBytes);
+
+    const wrapKey = await importRawKey(kekB64);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      wrapKey,
+      toArrayBuffer(fromB64(dekB64)),
+    );
+
+    const unwrapKey = await importRawKey(kekB64);
+    const unwrapped = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: toArrayBuffer(iv) },
+      unwrapKey,
+      toArrayBuffer(new Uint8Array(wrapped)),
+    );
+
+    expect(toB64(new Uint8Array(unwrapped))).toBe(dekB64);
+  });
+
   it('decrypts with a key freshly derived from the same passphrase + salt', async () => {
     // Belt-and-suspenders: two independent derives from the same inputs must
     // produce the same key bytes, so a key derived in session A can decrypt

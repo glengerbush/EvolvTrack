@@ -17,11 +17,12 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
    ```bash
    npm run db:start
    ```
-3. The command from step 2 prints the API url and Publishable authentication key. Create `.env`. Pointing at a hosted Supabase project:
+3. The command from step 2 prints the API URL and a Publishable key. Create `.env` pointing at the local Supabase stack (use the printed values verbatim):
    ```bash
    VITE_SUPABASE_URL=http://127.0.0.1:54321
-   VITE_SUPABASE_ANON_KEY=sb_publishable_xxxxxxxxxx
+   VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxxx
    ```
+   For a hosted Supabase project, swap the URL for your project's API URL and use that project's Publishable key.
 4. Run the dev server:
    ```bash
    npm run dev
@@ -49,10 +50,12 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
 
 ## Sync subsystem (src/lib/sync/)
 
-  The sync system is structured as orchestrator → engine → protocol.
+  The sync system is structured as orchestrator → engine → protocol, with several
+  supporting modules sitting alongside.
 
      outbox-change nudge ──► sync-orchestrator.ts
-                                │  (debounce ~1.2s, retry, mode dispatch)
+                                │  (debounce ~1.2s, retry, mode dispatch,
+                                │   license + session-key gating)
                                 ▼
                             sync-engine.ts
                          ┌────────────┐  ┌────────────┐
@@ -62,12 +65,30 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
                                 ▼              ▼
                          Supabase REST + Realtime (protocol.ts envelopes)
 
-  - sync-orchestrator.ts — singleton state machine started by +layout.svelte. Listens for
-  outbox nudges, debounces, calls pushOutbox() + pullAndApply(), exposes requestSync() /
-  syncNow().
-  - sync-engine.ts — does the actual HTTP. Two flavors: pushPlainChanges (server sees
-  plaintext) and pushEncryptedChanges (server sees only ciphertext blobs). Symmetric on the
-  pull side.
+  Core flow:
+  - `sync-orchestrator.ts` — singleton started by `+layout.svelte`. Listens for outbox
+  nudges, debounces (`SYNC_DEBOUNCE_MS = 1200`), and calls `pushOutbox()` + `pullAndApply()`.
+  Exposes `requestSync()` / `syncNow()` and subscribes to realtime updates on
+  `sync_changes_encrypted` / `sync_changes_plain`.
+  - `sync-engine.ts` — does the actual HTTP. Two flavors: `pushPlainChanges` (server
+  sees plaintext) and `pushEncryptedChanges` (server sees only ciphertext blobs).
+  Symmetric on the pull side.
+  - `protocol.ts` — wire envelopes, `SYNC_PROTOCOL_VERSION`.
+
+  Supporting modules:
+  - `account-state.ts` — observable account/sync state aggregate used by the UI pills.
+  - `license.ts` — license gating; sync is a no-op for accounts without a license.
+  - `pull-cursor.ts` — per-user incremental pull cursor so we don't re-fetch history.
+  - `session-key.ts` — in-memory cache of the derived E2EE key for the session.
+  - `e2ee-migration.ts` — drives mode transitions between `plain` / `e2ee` (and
+  `migrating_to_*`).
+  - `e2ee-key-rotation.test.ts` (+ runtime in `e2ee-migration.ts`) — rotates the
+  per-account encryption key without losing history.
+  - `recovery-code-rotation.ts` — rotates the recovery code used to recover an
+  account when the passphrase is lost.
+  - `wrapped-keys.ts` — wraps the E2EE data key under both the passphrase-derived
+  key and the recovery-code-derived key, persisted server-side in the
+  `wrapped_keys` table.
 
 ## Encryption (src/lib/crypto/ + src/lib/workers/)
 
@@ -100,22 +121,27 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
 - Login supports either:
   - password
   - magic-link by email.
+- Password reset is email-only (no recovery path for username-only accounts):
+  - request from the login form's "Forgot password?" affordance
+  - the recovery link lands on `/auth/reset` (`src/routes/(account)/auth/reset/+page.svelte`).
+- E2EE accounts also have a separate **recovery code** for unlocking the data key
+  if the passphrase is lost — distinct from the login password, surfaced via
+  `RecoveryUnlockModal.svelte`.
 
 To keep auth settings reproducible as IaC, this repo includes `supabase/config.toml` with local auth defaults.
 
-## Supabase notes
+## Supabase notes (more supabase info [HERE](supabase/README.md))
 
 RLS should allow users to read/write only rows tied to their auth UID.
 
 The sync schema lives in Supabase CLI migrations under `supabase/migrations/`.
 
-Sync mode is a four-state machine:
+Sync mode is a five-state machine (see `SyncMode` in `src/lib/domain/types.ts`):
 - `plain` - account has not enabled E2EE.
 - `migrating_to_e2ee` - E2EE upgrade has started; normal sync pauses while encrypted backfill is prepared/uploaded.
 - `e2ee` - encrypted event sync is active.
+- `rotating_e2ee_key` - existing E2EE data key is being rotated; normal sync pauses while history is re-encrypted under the new key.
 - `migrating_to_plain` - E2EE downgrade has started; normal sync pauses while plaintext events upload and encrypted events are removed.
-
-Settings recommends a fresh backup before any E2EE change. Turning E2EE off requires the passphrase, uploads decrypted sync events to `sync_plain_events`, then deletes encrypted `sync_events` after the plaintext upload succeeds.
 
 ### Supabase migration deployment
 

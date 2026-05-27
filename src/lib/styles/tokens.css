@@ -1,6 +1,9 @@
 :root {
   --bg: #eef1ea;
   --surface: #ffffff;
+  /* --surface-soft is the brand surface tone used for the PWA splash and
+   * installed-app chrome. If you change this value, also update
+   * theme_color + background_color in static/manifest.webmanifest. */
   --surface-soft: #d8e2cb;
   --surface-grid: #bfc8b8;
   --text: #111111;

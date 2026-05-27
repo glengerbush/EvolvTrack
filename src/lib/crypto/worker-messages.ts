@@ -1,17 +1,27 @@
-export type WorkerAction = 'encrypt' | 'decrypt' | 'derive' | 'derive-key';
+export type WorkerAction =
+  | 'encrypt'
+  | 'decrypt'
+  | 'derive-key'
+  | 'generate-dek'
+  | 'wrap-key'
+  | 'unwrap-key';
 
 export type WorkerPayloadMap = {
-  derive: { passphrase: string };
   'derive-key': { passphrase: string; saltB64: string };
   encrypt: { keyB64: string; plaintext: string };
   decrypt: { keyB64: string; ciphertext: string; iv: string };
+  'generate-dek': Record<string, never>;
+  'wrap-key': { kekB64: string; keyB64: string };
+  'unwrap-key': { kekB64: string; ciphertext: string; iv: string };
 };
 
 export type WorkerResultMap = {
-  derive: { saltB64: string };
   'derive-key': { keyB64: string };
   encrypt: { ciphertext: string; iv: string };
   decrypt: { plaintext: string };
+  'generate-dek': { dekB64: string };
+  'wrap-key': { ciphertext: string; iv: string };
+  'unwrap-key': { keyB64: string };
 };
 
 export type WorkerRequest<T extends WorkerAction = WorkerAction> = {

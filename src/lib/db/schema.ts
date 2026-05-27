@@ -1,5 +1,13 @@
 import Dexie, { type Table } from 'dexie';
-import type { InjectionEntry, MigrationBackfillEntry, OutboxEntry, Prescription, ProfileSettings, WeightEntry } from '$lib/domain/types';
+import type {
+  InjectionEntry,
+  MigrationBackfillEntry,
+  OutboxEntry,
+  Prescription,
+  ProfileSettings,
+  WeightEntry,
+  WrappedKeyBundle,
+} from '$lib/domain/types';
 import { defineDatabaseVersions } from '$lib/db/migrations';
 
 export { DB_SCHEMA_VERSION } from '$lib/db/migrations';
@@ -21,6 +29,7 @@ export class EvolvTrackDB extends Dexie {
   encrypted!: Table<EncryptedRecord, string>;
   migrationBackfill!: Table<MigrationBackfillEntry, string>;
   outbox!: Table<OutboxEntry, string>;
+  wrappedKeys!: Table<WrappedKeyBundle, 'self'>;
 
   constructor() {
     super('evolvtrack');

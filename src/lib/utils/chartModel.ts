@@ -253,13 +253,35 @@ export function buildChartModel(
       ...visibleSystemSeries.flatMap((series) => series.values.map((point) => point.value)),
     );
   }
-  const rightMax = rightAxisMax(rightAxisValues, showWellness && !showSysMg ? WELLNESS_SCORE_MAX : 5);
+  // Right axis scaling:
+  // - When mg-in-system is visible, scale to the min/max of the concentration
+  //   curve (with padding) so fine variation reads cleanly instead of being
+  //   crammed against a 0-baseline that's far below the data.
+  // - When only wellness is visible, keep the fixed 0..MAX wellness scale so
+  //   the bar stack stays legible.
+  // Wellness bars (`buildWellnessBlocks`) are always sized against
+  // WELLNESS_SCORE_MAX and the full plot height, so they remain visually
+  // intact regardless of axis label range.
+  let rightMin: number;
+  let rightMax: number;
+  if (showSysMg && rightAxisValues.length > 0) {
+    const [rawMin, rawMax] = paddedDomain(rightAxisValues, 0.1);
+    rightMin = Math.max(rawMin, 0);
+    rightMax = rawMax;
+  } else if (showWellness) {
+    rightMin = 0;
+    rightMax = WELLNESS_SCORE_MAX;
+  } else {
+    rightMin = 0;
+    rightMax = rightAxisMax(rightAxisValues, 5);
+  }
   const rightAxisLabel =
     showSysMg ? 'mg in system' :
     showWellness ? 'Wellness score' :
     'mg in system / wellness';
   const yLeft = (value: number) => PLOT.bottom - ((value - leftMin) / (leftMax - leftMin)) * PLOT.height;
-  const yRight = (value: number) => PLOT.bottom - (value / rightMax) * PLOT.height;
+  const yRight = (value: number) =>
+    PLOT.bottom - ((value - rightMin) / (rightMax - rightMin)) * PLOT.height;
   const projectionStartDate = getProjectionStartDate(today, projectedDoseDates, confirmedDoseDates, endDate);
 
   const takenDoses = doses.filter((dose) => !dose.planned);
@@ -321,16 +343,24 @@ export function buildChartModel(
     widthPx,
     plotRight,
     plotWidth,
-    leftTicks: buildTicks(leftMin, leftMax, 5).map((value) => ({
-      value,
-      label: formatAxisNumber(value),
-      y: yLeft(value),
-    })),
-    rightTicks: buildTicks(0, rightMax, 5).map((value) => ({
-      value,
-      label: formatAxisNumber(value),
-      y: yRight(value),
-    })),
+    leftTicks: (() => {
+      const ticks = buildTicks(leftMin, leftMax, 5);
+      const step = ticks.length > 1 ? ticks[1] - ticks[0] : undefined;
+      return ticks.map((value) => ({
+        value,
+        label: formatAxisNumber(value, step),
+        y: yLeft(value),
+      }));
+    })(),
+    rightTicks: (() => {
+      const ticks = buildTicks(rightMin, rightMax, 5);
+      const step = ticks.length > 1 ? ticks[1] - ticks[0] : undefined;
+      return ticks.map((value) => ({
+        value,
+        label: formatAxisNumber(value, step),
+        y: yRight(value),
+      }));
+    })(),
     dateTicks: buildDateTicks(dateKeys, xForDate, dayPixelWidth),
     wellnessStacks: dateKeys.map((date) => {
       const entry = wellnessByDate.get(date);
@@ -381,7 +411,7 @@ export function buildChartModel(
     },
     valueRightForY: (y: number) => {
       if (y < PLOT.top || y > PLOT.bottom) return null;
-      return ((PLOT.bottom - y) * rightMax) / PLOT.height;
+      return rightMin + ((PLOT.bottom - y) * (rightMax - rightMin)) / PLOT.height;
     },
   };
 }
@@ -676,6 +706,11 @@ function toPolyline(points: NumberPoint[]) {
   return points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
 }
 
-function formatAxisNumber(value: number) {
+function formatAxisNumber(value: number, step?: number) {
+  if (step != null && Number.isFinite(step) && step > 0) {
+    // Pick enough decimals that adjacent ticks aren't identical strings.
+    const decimals = step >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(step)));
+    return value.toFixed(decimals);
+  }
   return Math.abs(value - Math.round(value)) < 0.05 ? String(Math.round(value)) : value.toFixed(1);
 }

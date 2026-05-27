@@ -11,12 +11,16 @@ vi.mock('$lib/crypto/worker-client', () => ({
 
 import {
   ENCRYPTION_FORMAT_VERSION,
-  clearPassphraseMaterial,
   decryptRecord,
-  deriveSessionKey,
+  derivePassphraseKek,
+  deriveRecoveryKek,
   encryptRecord,
-  generateRecoveryCodes,
-  initializePassphrase,
+  generateDek,
+  generateRecoveryCode,
+  generateSaltB64,
+  normalizeRecoveryCode,
+  unwrapDek,
+  wrapDek,
 } from './e2ee';
 
 beforeEach(() => {
@@ -31,33 +35,18 @@ describe('ENCRYPTION_FORMAT_VERSION', () => {
   });
 });
 
-describe('initializePassphrase', () => {
-  it('asks the worker to derive a salt, stores it under et.salt, and returns it', async () => {
-    callMock.mockResolvedValueOnce({ saltB64: 'SALT_AAA' });
-
-    const result = await initializePassphrase('hunter2');
-
-    expect(result).toBe('SALT_AAA');
-    expect(localStorage.getItem('et.salt')).toBe('SALT_AAA');
-    expect(callMock).toHaveBeenCalledWith('derive', { passphrase: 'hunter2' });
-  });
-});
-
-describe('deriveSessionKey', () => {
-  it('throws when no salt is present (passphrase not initialized)', async () => {
-    await expect(deriveSessionKey('pw')).rejects.toThrow(/missing key salt/i);
+describe('derivePassphraseKek', () => {
+  it('rejects an empty passphrase', async () => {
+    await expect(derivePassphraseKek('', 'SALT')).rejects.toThrow(/passphrase is required/i);
     expect(callMock).not.toHaveBeenCalled();
   });
 
-  it('forwards the passphrase and stored salt to the worker and returns the key bytes', async () => {
-    localStorage.setItem('et.salt', 'SALT_XYZ');
-    callMock.mockResolvedValueOnce({ keyB64: 'KEY_XYZ' });
-
-    const result = await deriveSessionKey('pw');
-
-    expect(result).toBe('KEY_XYZ');
+  it('forwards passphrase + salt to the worker and returns the KEK bytes', async () => {
+    callMock.mockResolvedValueOnce({ keyB64: 'KEK_XYZ' });
+    const result = await derivePassphraseKek('hunter2', 'SALT_XYZ');
+    expect(result).toBe('KEK_XYZ');
     expect(callMock).toHaveBeenCalledWith('derive-key', {
-      passphrase: 'pw',
+      passphrase: 'hunter2',
       saltB64: 'SALT_XYZ',
     });
   });
@@ -96,37 +85,92 @@ describe('decryptRecord', () => {
   });
 });
 
-describe('generateRecoveryCodes', () => {
-  it('produces 8 uppercase 8-char codes without writing to storage', () => {
-    const codes = generateRecoveryCodes();
-    expect(codes).toHaveLength(8);
-    for (const code of codes) {
-      expect(code).toHaveLength(8);
-      expect(code).toBe(code.toUpperCase());
-      // First 8 chars of a v4 UUID: hex chars and a possible dash.
-      expect(code).toMatch(/^[0-9A-F-]{8}$/);
-    }
-    // Codes are ephemeral; the modal owns their visibility lifecycle.
-    expect(localStorage.getItem('et.recovery.codes')).toBeNull();
-  });
+describe('generateDek', () => {
+  it('asks the worker for a fresh DEK and returns it unchanged', async () => {
+    callMock.mockResolvedValueOnce({ dekB64: 'DEK_AAA' });
 
-  it('returns a different set on each call (entropy from crypto.randomUUID)', () => {
-    const a = generateRecoveryCodes();
-    const b = generateRecoveryCodes();
-    expect(a).not.toEqual(b);
+    const result = await generateDek();
+
+    expect(result).toBe('DEK_AAA');
+    expect(callMock).toHaveBeenCalledWith('generate-dek', {});
   });
 });
 
-describe('clearPassphraseMaterial', () => {
-  it('removes the salt and wipes any legacy recovery codes', () => {
-    localStorage.setItem('et.salt', 'x');
-    localStorage.setItem('et.recovery.codes', '["a"]'); // legacy from older builds
-    localStorage.setItem('unrelated', 'keepme');
+describe('generateRecoveryCode', () => {
+  it('returns a 6×4 dash-grouped string drawn from the recovery alphabet', () => {
+    const code = generateRecoveryCode();
+    expect(code).toMatch(/^[2-9A-HJ-NP-Z_]{4}(-[2-9A-HJ-NP-Z_]{4}){5}$/);
+  });
 
-    clearPassphraseMaterial();
+  it('omits ambiguous characters (0, 1, I, O, U) entirely', () => {
+    // 200 samples × 24 chars each → ~5000 chars; flake risk is statistically zero.
+    const corpus = Array.from({ length: 200 }, () => generateRecoveryCode()).join('');
+    for (const banned of ['0', '1', 'I', 'O', 'U']) {
+      expect(corpus.includes(banned)).toBe(false);
+    }
+  });
 
-    expect(localStorage.getItem('et.salt')).toBeNull();
-    expect(localStorage.getItem('et.recovery.codes')).toBeNull();
-    expect(localStorage.getItem('unrelated')).toBe('keepme');
+  it('produces a different code every call', () => {
+    expect(generateRecoveryCode()).not.toBe(generateRecoveryCode());
+  });
+});
+
+describe('normalizeRecoveryCode', () => {
+  it('strips spaces and dashes and uppercases', () => {
+    expect(normalizeRecoveryCode(' abcd-efgh xyzz-2345-6789-jkmn ')).toBe(
+      'ABCDEFGHXYZZ23456789JKMN',
+    );
+  });
+
+  it('returns empty string for whitespace-only input', () => {
+    expect(normalizeRecoveryCode('   -- - ')).toBe('');
+  });
+});
+
+describe('generateSaltB64', () => {
+  it('returns 16 random bytes as base64 (24 chars with padding)', () => {
+    const a = generateSaltB64();
+    const b = generateSaltB64();
+    expect(a).toHaveLength(24);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('deriveRecoveryKek', () => {
+  it('normalizes the code before sending it to the worker', async () => {
+    callMock.mockResolvedValueOnce({ keyB64: 'KEK_R' });
+
+    const result = await deriveRecoveryKek(' abcd-efgh ', 'SALT_R');
+
+    expect(result).toBe('KEK_R');
+    expect(callMock).toHaveBeenCalledWith('derive-key', {
+      passphrase: 'ABCDEFGH',
+      saltB64: 'SALT_R',
+    });
+  });
+
+  it('refuses an empty (post-normalization) code', async () => {
+    await expect(deriveRecoveryKek('  --  ', 'SALT_R')).rejects.toThrow(/empty/i);
+    expect(callMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('wrapDek / unwrapDek', () => {
+  it('wrap forwards the kek + raw DEK bytes to the worker', async () => {
+    callMock.mockResolvedValueOnce({ ciphertext: 'CT', iv: 'IV' });
+
+    const result = await wrapDek('KEK', 'DEK');
+
+    expect(result).toEqual({ ciphertext: 'CT', iv: 'IV' });
+    expect(callMock).toHaveBeenCalledWith('wrap-key', { kekB64: 'KEK', keyB64: 'DEK' });
+  });
+
+  it('unwrap forwards the kek + ciphertext and returns the DEK bytes', async () => {
+    callMock.mockResolvedValueOnce({ keyB64: 'DEK_OUT' });
+
+    const result = await unwrapDek('KEK', 'CT', 'IV');
+
+    expect(result).toBe('DEK_OUT');
+    expect(callMock).toHaveBeenCalledWith('unwrap-key', { kekB64: 'KEK', ciphertext: 'CT', iv: 'IV' });
   });
 });

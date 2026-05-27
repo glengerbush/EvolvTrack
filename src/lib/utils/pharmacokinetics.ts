@@ -119,8 +119,9 @@ export const DRUG_PK: Record<Medication, DrugPK> = {
     halfLifeHours: 13,
     tmaxHours: 10,
     bioavailability: 0.55,
-    ka: 0.170,             // h⁻¹, solved from Tmax ≈ 10h; published models use zero-order
-                           // + lag-time absorption (incompatible with Bateman equation)
+    ka: 0.170,             // h⁻¹, solved from label Tmax ≈ 10h. Liraglutide's published
+                           // popPK models are one-compartment (Watson 2010; PMC5069304),
+                           // so the structure here is faithful; only ka is derived.
     ke: Math.LN2 / 13,
   },
   'Retatrutide': {

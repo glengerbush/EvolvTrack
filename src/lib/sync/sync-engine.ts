@@ -60,7 +60,11 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
   const profile = await getProfile();
   const syncMode = getProfileSyncMode(profile);
 
-  if (syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain') {
+  if (
+    syncMode === 'migrating_to_e2ee' ||
+    syncMode === 'migrating_to_plain' ||
+    syncMode === 'rotating_e2ee_key'
+  ) {
     return { pushed: 0, skipped: 'migration-in-progress' };
   }
 
@@ -197,7 +201,13 @@ export async function pullAndApply(): Promise<PullResult> {
   const profile = await getProfile();
   const syncMode = getProfileSyncMode(profile);
 
-  if (syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain') {
+  if (
+    syncMode === 'migrating_to_e2ee' ||
+    syncMode === 'migrating_to_plain' ||
+    syncMode === 'rotating_e2ee_key'
+  ) {
+    // During rotation the server holds old-DEK rows that the local (new) DEK
+    // can't decrypt — pause pull until rotation finishes.
     return { fetched: 0, applied: 0, skipped: 'migration-in-progress' };
   }
 
@@ -305,6 +315,10 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
 
   if (syncMode === 'migrating_to_plain') {
     throw new Error('E2EE disable is in progress. Finish or resume it before encrypted sync.');
+  }
+
+  if (syncMode === 'rotating_e2ee_key' && !options.allowMigrating) {
+    throw new Error('Key rotation is in progress. Finish or resume it before encrypted sync.');
   }
 
   const user = await requireAuthenticatedUser();

@@ -1,0 +1,63 @@
+name: Deploy Supabase config
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "supabase/config.toml"
+      - "supabase/templates/**"
+      - ".github/workflows/supabase-config.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: supabase-config-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Push config
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+
+    env:
+      # CLI auth + project targeting (shared with the migrations workflow).
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_ID: ${{ secrets.PRODUCTION_PROJECT_ID }}
+
+      # Resend SMTP password — referenced as env(RESEND_API_KEY) in
+      # supabase/config.toml. Secret, never logged.
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+
+      # Public production URLs — referenced as env(...) in config.toml.
+      # Inlined here (not secrets) so the deploy target is visible in code
+      # review. Workflow env always wins over supabase/.env via godotenv's
+      # non-overriding Load(), so a stray dev .env can't downgrade these to
+      # localhost. The guard step below removes any .env file in the runner
+      # to make that contract explicit.
+      SUPABASE_AUTH_SITE_URL: https://evolvtrack.com
+      SUPABASE_AUTH_REDIRECT_URL: https://evolvtrack.com/**
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Remove any dev env files
+        # Belt-and-suspenders. supabase/.env is gitignored and should never
+        # land here, but if it ever does, delete it before the CLI loads it.
+        run: rm -f supabase/.env supabase/.env.local supabase/.env.development supabase/.env.production
+
+      - name: Link Supabase project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
+
+      - name: Push Supabase config
+        run: supabase config push --yes

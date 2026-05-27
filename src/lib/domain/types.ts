@@ -13,9 +13,35 @@ export type IsoDate = string & { readonly [isoDateBrand]: true };
 export type IsoDateTime = string;
 
 export type WeightUnit = 'lbs' | 'kg';
-export type SyncMode = 'plain' | 'migrating_to_e2ee' | 'e2ee' | 'migrating_to_plain';
+export type SyncMode =
+  | 'plain'
+  | 'migrating_to_e2ee'
+  | 'e2ee'
+  | 'migrating_to_plain'
+  | 'rotating_e2ee_key';
 export type SyncAggregate = 'weight' | 'injection' | 'prescription' | 'profile';
-export type E2EEMigrationDirection = 'enable' | 'disable';
+export type E2EEMigrationDirection = 'enable' | 'disable' | 'rotate';
+
+/**
+ * A user's wrapped data encryption key, in both passphrase-wrapped and
+ * recovery-code-wrapped form. Stored locally (single-row Dexie table keyed
+ * `'self'`) and mirrored to `public.wrapped_keys` on the server. The local
+ * copy enables same-device recovery when the cached session key was cleared
+ * but the device is offline; the server copy enables new-device recovery.
+ *
+ * `dekVersion` bumps on every rotation. Once a record is encrypted under a
+ * new DEK, any cached bundle from a stale version is rejected on the next
+ * unlock so we never decrypt with a key that doesn't match the ciphertext.
+ */
+export interface WrappedKeyBundle {
+  id: 'self';
+  dekVersion: number;
+  passphraseSaltB64: string;
+  passphraseWrapped: { ciphertext: string; iv: string };
+  recoverySaltB64: string;
+  recoveryWrapped: { ciphertext: string; iv: string };
+  updatedAt: IsoDateTime;
+}
 
 export interface E2EEMigrationState {
   id: string;

@@ -1,22 +1,22 @@
 <script lang="ts">
   let {
-    codes,
+    code,
     onClose,
   }: {
-    codes: string[];
+    code: string;
     onClose: () => void;
   } = $props();
 
-  let copyLabel = $state('Copy all');
+  let copyLabel = $state('Copy');
 
-  async function copyCodes() {
+  async function copyCode() {
     try {
-      await navigator.clipboard.writeText(codes.join('\n'));
+      await navigator.clipboard.writeText(code);
       copyLabel = 'Copied!';
-      setTimeout(() => (copyLabel = 'Copy all'), 1800);
+      setTimeout(() => (copyLabel = 'Copy'), 1800);
     } catch {
       copyLabel = 'Copy failed';
-      setTimeout(() => (copyLabel = 'Copy all'), 1800);
+      setTimeout(() => (copyLabel = 'Copy'), 1800);
     }
   }
 
@@ -39,23 +39,19 @@
     class="modal"
     role="dialog"
     aria-modal="true"
-    aria-labelledby="recovery-codes-title"
+    aria-labelledby="recovery-code-title"
     tabindex="-1"
   >
-    <h3 id="recovery-codes-title">Recovery codes</h3>
+    <h3 id="recovery-code-title">Recovery code</h3>
     <p>
-      Save these somewhere safe — a password manager, a printed copy. They
-      won't be shown again once you close this dialog. Generate a fresh set
-      anytime from your encryption settings.
+      Save this code somewhere safe — a password manager, a printed copy. It
+      won't be shown again. If you lose both your passphrase and this code,
+      your encrypted data cannot be recovered.
     </p>
-    <ul class="codes-list">
-      {#each codes as code (code)}
-        <li><code>{code}</code></li>
-      {/each}
-    </ul>
+    <p class="code-box"><code>{code}</code></p>
     <div class="modal-actions">
       <button type="button" class="ghost" onclick={onClose}>Done</button>
-      <button type="button" class="primary" onclick={copyCodes}>{copyLabel}</button>
+      <button type="button" class="primary" onclick={copyCode}>{copyLabel}</button>
     </div>
   </div>
 </div>
@@ -94,26 +90,19 @@
     color: var(--muted, color-mix(in oklab, var(--text, #111) 65%, transparent));
   }
 
-  .codes-list {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.5rem;
-    padding: 0;
-    margin: 0;
-    list-style: none;
-  }
-
-  .codes-list li {
-    background: color-mix(in oklab, var(--text, #111) 5%, transparent);
-    border-radius: 6px;
-    padding: 0.45rem 0.6rem;
+  .code-box {
+    padding: 0.65rem 0.8rem;
+    background: color-mix(in oklab, var(--text, #111) 6%, transparent);
+    border-radius: 8px;
     text-align: center;
+    word-break: break-all;
+    color: var(--text, #111);
   }
 
-  .codes-list code {
+  .code-box code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.95rem;
-    letter-spacing: 0.04em;
+    font-size: 1rem;
+    letter-spacing: 0.06em;
   }
 
   .modal-actions {

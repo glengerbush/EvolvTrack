@@ -1,17 +1,53 @@
-# Supabase local/self-hosted configuration as IaC.
-# Hosted projects should mirror production-only settings via dashboard, API, or `supabase config push`.
+# Supabase configuration as IaC. One config.toml drives both local dev
+# (`supabase start`) and production (`supabase config push --project-ref <ref>`).
+#
+# Environment-specific values (URLs, secrets) come from env vars expanded via
+# the `env(...)` interpolation that Supabase CLI applies when reading this
+# file. Locally those vars are loaded from `supabase/.env` (auto-loaded by the
+# CLI via godotenv); in CI/prod they come from the runner's environment.
+#
+# IMPORTANT: `supabase config push` is replace-not-merge. Any auth/db/storage
+# setting NOT represented in this file will be reset to its CLI default on the
+# hosted project. Audit the dashboard before the first push.
 
 project_id = "evolvtrack"
 
 [auth]
 enabled = true
-site_url = "http://localhost:5173"
-additional_redirect_urls = ["http://localhost:5173/auth/callback"]
+# Base URL of the site — used to construct links in email templates and as the
+# allow-list anchor for redirects. Per-environment value lives in
+# SUPABASE_AUTH_SITE_URL (see supabase/.env.example).
+site_url = "env(SUPABASE_AUTH_SITE_URL)"
+# Allow-list of URLs Supabase Auth may redirect to after sign-in / email link
+# verification. We use a single wildcard so /auth/callback, /auth/reset, and
+# any future auth-completion paths work without editing config.
+additional_redirect_urls = ["env(SUPABASE_AUTH_REDIRECT_URL)"]
 enable_signup = true
 enable_anonymous_sign_ins = false
 minimum_password_length = 8
+
+[auth.rate_limit]
+# Caps outbound auth mail per hour to prevent runaway costs and abuse via
+# unrequested magic-link / reset flows.
+email_sent = 30
 
 [auth.email]
 # Keep email/password auth enabled so users can log in with username (mapped email) OR real email.
 enable_signup = true
 enable_confirmations = false
+
+# Transactional mail via Resend. API key is read from RESEND_API_KEY at push
+# time (set in CI, or in supabase/.env for local). Local dev with `supabase
+# start` routes mail to the in-tree inbucket viewer regardless of this block.
+[auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 465
+user = "resend"
+pass = "env(RESEND_API_KEY)"
+admin_email = "auth@evolvtrack.com"
+sender_name = "EvolvTrack"
+
+[auth.email.template.magic_link]
+subject = "Your sign-in link for EvolvTrack"
+content_path = "./supabase/templates/magic_link.html"

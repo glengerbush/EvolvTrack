@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import '../../test/dexie-setup';
 import Dexie from 'dexie';
-import { DB_SCHEMA_VERSION, defineDatabaseVersions, schemaV1 } from '$lib/db/migrations';
+import { DB_SCHEMA_VERSION, defineDatabaseVersions, schemaV1, schemaV2 } from '$lib/db/migrations';
 
 describe('DB_SCHEMA_VERSION', () => {
   it('is exported as a positive integer', () => {
@@ -64,14 +64,42 @@ describe('schemaV1', () => {
   });
 });
 
+describe('schemaV2', () => {
+  it('adds the wrappedKeys mirror table and keeps schemaV1 tables intact', () => {
+    expect(Object.keys(schemaV2).sort()).toEqual([
+      'encrypted',
+      'injections',
+      'migrationBackfill',
+      'outbox',
+      'prescriptions',
+      'profile',
+      'weights',
+      'wrappedKeys',
+    ]);
+    // Same primary key + index conventions as the rest.
+    expect(schemaV2.wrappedKeys).toBeTruthy();
+    const tokens = (schemaV2.wrappedKeys as string).split(',').map((t) => t.trim());
+    expect(tokens[0]).toBe('id');
+    expect(schemaV2.wrappedKeys).toContain('dekVersion');
+    expect(schemaV2.wrappedKeys).toContain('updatedAt');
+  });
+
+  it('does not alter any schemaV1 store definitions (additive only)', () => {
+    for (const [name, def] of Object.entries(schemaV1)) {
+      expect(schemaV2[name], `schemaV2.${name} preserved`).toBe(def);
+    }
+  });
+});
+
 describe('defineDatabaseVersions', () => {
-  it('registers schemaV1 against a Dexie instance', () => {
+  it('registers schemaV1 and schemaV2 against a Dexie instance', () => {
     const dexie = new Dexie('migrations-test-define');
     const versionSpy = vi.spyOn(dexie, 'version');
 
     defineDatabaseVersions(dexie);
 
     expect(versionSpy).toHaveBeenCalledWith(1);
+    expect(versionSpy).toHaveBeenCalledWith(2);
     dexie.close();
   });
 
@@ -91,6 +119,7 @@ describe('defineDatabaseVersions', () => {
       'prescriptions',
       'profile',
       'weights',
+      'wrappedKeys',
     ]);
 
     dexie.close();

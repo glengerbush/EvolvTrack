@@ -11,11 +11,13 @@
   import {
     resumeE2EEMigration,
     resumeE2EEDisableMigration,
+    resumeE2EEKeyRotation,
     startE2EEMigration,
     startE2EEDisableMigration,
+    startE2EEKeyRotation,
     type E2EEMigrationRunResult,
   } from '$lib/sync/e2ee-migration';
-  import { generateRecoveryCodes } from '$lib/crypto/e2ee';
+  import { rotateRecoveryCode } from '$lib/sync/recovery-code-rotation';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
@@ -64,7 +66,7 @@
   let email = $state('');
   let currentPassword = $state('');
   let newPassword = $state('');
-  let codes = $state<string[]>([]);
+  let codeToShow = $state<string | null>(null);
   let disableModalOpen = $state(false);
   let disableError = $state<string | null>(null);
   let status = $state('');
@@ -83,11 +85,15 @@
   const e2eeEnabled = $derived(syncMode === 'e2ee');
   const e2eeEnableMigrating = $derived(syncMode === 'migrating_to_e2ee');
   const e2eeDisableMigrating = $derived(syncMode === 'migrating_to_plain');
+  const e2eeKeyRotating = $derived(syncMode === 'rotating_e2ee_key');
   const e2eeToggleChecked = $derived(syncMode !== 'plain' || e2eeRequested);
   // Locked only while a migration is mid-flight. In steady-state 'e2ee' the
   // checkbox is unlock-able — unchecking opens the confirm-disable modal.
   const e2eeToggleLocked = $derived(
-    syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain' || e2eeBusy,
+    syncMode === 'migrating_to_e2ee'
+      || syncMode === 'migrating_to_plain'
+      || syncMode === 'rotating_e2ee_key'
+      || e2eeBusy,
   );
   const syncModeLabel = $derived(
     syncMode === 'e2ee'
@@ -96,6 +102,8 @@
         ? 'Migration in progress'
         : syncMode === 'migrating_to_plain'
           ? 'Disabling encryption'
+        : syncMode === 'rotating_e2ee_key'
+          ? 'Rotating encryption key'
         : 'Plain sync'
   );
 
@@ -110,22 +118,58 @@
     e2eeRequested = syncMode !== 'plain';
   }
 
-  function showRecoveryCodes(next: string[]) {
-    codes = next;
+  function showRecoveryCode(next: string) {
+    codeToShow = next;
   }
 
-  function dismissRecoveryCodes() {
-    // Codes are deliberately not persisted. Wiping the in-memory list when
-    // the modal closes means the only way to see them again is to generate
-    // a fresh set, which invalidates anything written down before.
-    codes = [];
+  function dismissRecoveryCode() {
+    // The code is deliberately not persisted in component state. Wiping it
+    // when the modal closes means the only way to see it again is to rotate
+    // to a fresh one, which invalidates anything written down before.
+    codeToShow = null;
   }
 
-  function generateAndShowRecoveryCodes() {
-    if (codes.length && !confirm(
-      'Generate a new set of recovery codes? The previous codes will be replaced.',
+  async function generateAndShowRecoveryCodes() {
+    if (!passphrase) {
+      status = 'Enter your current passphrase to rotate the recovery code.';
+      return;
+    }
+    if (!confirm(
+      'Generate a new recovery code? The previous code will stop working.',
     )) return;
-    showRecoveryCodes(generateRecoveryCodes());
+
+    e2eeBusy = true;
+    status = 'Rotating recovery code…';
+    try {
+      const { recoveryCode } = await rotateRecoveryCode(passphrase);
+      showRecoveryCode(recoveryCode);
+      passphrase = '';
+      status = 'Recovery code rotated. Save the new one — the old one no longer works.';
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      e2eeBusy = false;
+    }
+  }
+
+  async function rotateEncryptionKey() {
+    if (!passphrase) {
+      status = 'Enter your current passphrase to rotate the encryption key.';
+      return;
+    }
+    if (!confirm(
+      'Rotate the encryption key? Every record will be re-encrypted under a new key, and you will receive a new recovery code. Your passphrase is unchanged.',
+    )) return;
+
+    e2eeBusy = true;
+    status = 'Rotating encryption key…';
+    try {
+      applyMigrationResult(await startE2EEKeyRotation(passphrase));
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      e2eeBusy = false;
+    }
   }
 
   function handleE2eeCheckbox(checked: boolean) {
@@ -171,8 +215,8 @@
     syncMode = result.syncMode;
     e2eeMigration = result.migration;
     e2eeRequested = result.syncMode !== 'plain';
-    if (result.recoveryCodes) showRecoveryCodes(result.recoveryCodes);
-    if (result.syncMode === 'plain') codes = [];
+    if (result.recoveryCode) showRecoveryCode(result.recoveryCode);
+    if (result.syncMode === 'plain') codeToShow = null;
     passphrase = '';
     passphraseConfirm = '';
 
@@ -181,8 +225,18 @@
       return;
     }
 
+    if (result.completed && result.migration.direction === 'rotate') {
+      status = `Encryption key rotated. ${result.encryptedEventCount} records re-encrypted and ${result.pushed} sync events pushed.`;
+      return;
+    }
+
     if (result.completed) {
       status = `E2EE enabled. ${result.encryptedEventCount} local records encrypted and ${result.pushed} sync events pushed.`;
+      return;
+    }
+
+    if (result.migration.direction === 'rotate') {
+      status = `Key rotation paused. ${result.error ?? 'Resume when you are back online.'}`;
       return;
     }
 
@@ -216,6 +270,18 @@
     }
   }
 
+  async function resumeKeyRotation() {
+    e2eeBusy = true;
+    status = 'Resuming key rotation…';
+    try {
+      applyMigrationResult(await resumeE2EEKeyRotation(passphrase));
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      e2eeBusy = false;
+    }
+  }
+
   async function resumeDisableE2EE() {
     e2eeBusy = true;
     status = 'Resuming encryption disable...';
@@ -232,9 +298,23 @@
     status = 'Password update workflow is not wired yet.';
   }
 
-  function changePassphrase() {
+  async function changePassphrase() {
+    if (!passphrase) { status = 'Enter your current passphrase.'; return; }
+    if (!newPassphrase) { status = 'Enter a new passphrase.'; return; }
     if (newPassphrase !== newPassphraseConfirm) { status = 'New passphrases do not match.'; return; }
-    status = 'Passphrase rotation workflow is not wired yet.';
+
+    e2eeBusy = true;
+    status = 'Rotating encryption key under new passphrase…';
+    try {
+      applyMigrationResult(await startE2EEKeyRotation(passphrase, newPassphrase));
+      newPassphrase = '';
+      newPassphraseConfirm = '';
+      passphrase = '';
+    } catch (error) {
+      status = (error as Error).message;
+    } finally {
+      e2eeBusy = false;
+    }
   }
 
   function updateIdentity() {
@@ -628,7 +708,7 @@
             {#if !passphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
           </label>
           <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !passphraseMatch} onclick={enableE2EE}>
-            {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery codes'}
+            {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery code'}
           </button>
         {:else if e2eeEnableMigrating}
           <div class="migration-status">
@@ -662,23 +742,49 @@
           <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeDisableE2EE}>
             {e2eeBusy ? 'Resuming...' : 'Resume turning off E2EE'}
           </button>
+        {:else if e2eeKeyRotating}
+          <div class="migration-status">
+            <p class="toggle-hint">
+              Key rotation is in progress. Encrypted sync is paused until it finishes.
+            </p>
+            {#if e2eeMigration?.encryptedEventCount != null}
+              <p class="toggle-hint">{e2eeMigration.encryptedEventCount} records re-encrypted under the new key.</p>
+            {/if}
+            {#if e2eeMigration?.lastError}
+              <p class="field-error">{e2eeMigration.lastError}</p>
+            {/if}
+          </div>
+          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Passphrase you most recently set" /></label>
+          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeKeyRotation}>
+            {e2eeBusy ? 'Resuming…' : 'Resume key rotation'}
+          </button>
         {:else if e2eeEnabled}
+          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" autocomplete="current-password" /></label>
           <div class="recovery-row">
-            <button class="btn btn-ghost" type="button" onclick={generateAndShowRecoveryCodes}>
-              Generate recovery codes
+            <button class="btn btn-ghost" type="button" disabled={e2eeBusy || !passphrase} onclick={generateAndShowRecoveryCodes}>
+              Rotate recovery code
             </button>
             <p class="toggle-hint">
-              Used when you forget your passphrase. Generate a fresh set anytime — the previous set stops working when you do.
+              Use if your recovery code may have been seen. Issues a fresh code; the old one stops working immediately. Your encryption key is unchanged.
             </p>
           </div>
-          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
-          <label>New passphrase<input bind:value={newPassphrase} type="password" placeholder="New passphrase" /></label>
+          <div class="recovery-row">
+            <button class="btn btn-ghost" type="button" disabled={e2eeBusy || !passphrase} onclick={rotateEncryptionKey}>
+              Rotate encryption key
+            </button>
+            <p class="toggle-hint">
+              Use if a device may have been compromised. Mints a new encryption key, re-encrypts every record, and issues a fresh recovery code. Your passphrase is unchanged. Data captured before the rotation stays decryptable with the old key, but future data is safe.
+            </p>
+          </div>
+          <label>New passphrase<input bind:value={newPassphrase} type="password" placeholder="New passphrase" autocomplete="new-password" /></label>
           <label>
             Confirm new passphrase
-            <input bind:value={newPassphraseConfirm} type="password" placeholder="Confirm new passphrase" class:mismatch={!newPassphraseMatch} />
+            <input bind:value={newPassphraseConfirm} type="password" placeholder="Confirm new passphrase" class:mismatch={!newPassphraseMatch} autocomplete="new-password" />
             {#if !newPassphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
           </label>
-          <button class="btn btn-primary" disabled={!passphrase || !newPassphrase || !newPassphraseMatch} onclick={changePassphrase}>Rotate passphrase</button>
+          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !newPassphrase || !newPassphraseMatch} onclick={changePassphrase}>
+            {e2eeBusy ? 'Rotating…' : 'Rotate passphrase'}
+          </button>
         {/if}
       {/if}
     </div>
@@ -753,8 +859,8 @@
   />
 {/if}
 
-{#if codes.length}
-  <RecoveryCodesModal {codes} onClose={dismissRecoveryCodes} />
+{#if codeToShow}
+  <RecoveryCodesModal code={codeToShow} onClose={dismissRecoveryCode} />
 {/if}
 
 {#if disableModalOpen}
