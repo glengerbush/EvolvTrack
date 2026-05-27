@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
+import { db } from '$lib/db/schema';
 import {
   addInjection,
   addWeight,
@@ -268,6 +269,91 @@ describe('importTrackingFile — replace mode', () => {
     // EvolvTrack-branded source. The profile should remain.
     await importTrackingFile(csvFile('plain.csv', csv), 'replace');
     expect(await getProfile()).toBeTruthy();
+  });
+});
+
+describe('importTrackingFile — outbox enqueue', () => {
+  it('merge mode enqueues an upsert for every imported weight, injection, prescription, and the profile', async () => {
+    const payload = {
+      ...backupPayload({
+        prescriptions: [
+          {
+            id: 'rx-1',
+            type: SEMA,
+            createdAt: '2026-05-01T00:00:00.000Z',
+            updatedAt: '2026-05-01T00:00:00.000Z',
+          },
+        ],
+      }),
+      data: {
+        ...backupPayload().data,
+        prescriptions: [
+          {
+            id: 'rx-1',
+            type: SEMA,
+            createdAt: '2026-05-01T00:00:00.000Z',
+            updatedAt: '2026-05-01T00:00:00.000Z',
+          },
+        ],
+        profile: {
+          id: 'profile',
+          passphraseEnabled: false,
+          weightUnit: 'lbs',
+          createdAt: '2026-05-01T00:00:00.000Z',
+          updatedAt: '2026-05-01T00:00:00.000Z',
+        },
+      },
+    };
+    await importTrackingFile(jsonFile('b.json', payload), 'merge');
+
+    // Without these enqueue calls, imported rows live only locally and never
+    // reach the cloud — every other device on the account would be blind to
+    // the import. That's the bug this test pins down.
+    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('injection:i-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('prescription:rx-1')).toMatchObject({ op: 'upsert' });
+    const profileEntry = await db.outbox.get('profile:profile');
+    expect(profileEntry).toMatchObject({ op: 'upsert' });
+    // Profile payload must have device-local fields stripped on the wire.
+    expect((profileEntry!.payload as { passphraseEnabled: boolean }).passphraseEnabled).toBe(false);
+  });
+
+  it('replace mode enqueues delete tombstones for pre-existing rows that are not in the import', async () => {
+    // Pre-existing local rows that the import will wipe.
+    const oldWeight = await addWeight({ date: iso('2026-04-01'), weightLbs: 220 });
+    const oldInjection = await addInjection({
+      date: iso('2026-04-01'),
+      amountMg: 1,
+      medication: SEMA,
+      site: 'thigh',
+      symptoms: [],
+    });
+
+    await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');
+
+    expect(await db.outbox.get(`weight:${oldWeight.id}`)).toMatchObject({ op: 'delete', payload: null });
+    expect(await db.outbox.get(`injection:${oldInjection.id}`)).toMatchObject({ op: 'delete', payload: null });
+    // The imported rows still come through as upserts.
+    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('injection:i-1')).toMatchObject({ op: 'upsert' });
+  });
+
+  it('replace mode does not tombstone an id the import is re-inserting (the upsert wins)', async () => {
+    // Pre-seed a row with the same id the import carries. After replace, the
+    // outbox should hold an upsert, not a delete — outbox keys are
+    // `${aggregate}:${entityId}`, so a stale tombstone would just clobber the
+    // upsert on the cloud.
+    await db.weights.put({
+      id: 'w-1',
+      date: iso('2026-04-01'),
+      weightLbs: 999,
+      createdAt: '2026-04-01T00:00:00.000Z',
+      updatedAt: '2026-04-01T00:00:00.000Z',
+    });
+
+    await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');
+
+    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
   });
 });
 

@@ -1,5 +1,5 @@
 import { db } from '$lib/db/schema';
-import { emitHealthChange } from '$lib/domain/repo';
+import { emitHealthChange, enqueueImportedRows } from '$lib/domain/repo';
 import { setStartWeightIfUnset } from '$lib/stores/progressStore';
 import { BACKUP_FORMAT_VERSION, parseBackupPayload } from '$lib/importExport/backup';
 import {
@@ -476,8 +476,24 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
 async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): Promise<void> {
   const replaceProfile = parsed.source === 'EvolvTrack backup' || parsed.source === 'EvolvTrack spreadsheet' || Boolean(parsed.data.profile);
 
-  await db.transaction('rw', db.weights, db.injections, db.prescriptions, db.profile, async () => {
+  const tables = [db.weights, db.injections, db.prescriptions, db.profile, db.outbox];
+  await db.transaction('rw', tables, async () => {
+    let deletedIds: { weights: string[]; injections: string[]; prescriptions: string[] } | undefined;
     if (mode === 'replace') {
+      // Capture pre-clear primary keys so the outbox can publish delete
+      // tombstones for them. Without this, replace-mode imports drop local
+      // rows but leave the cloud copies in place, and the next pull
+      // resurrects them.
+      const [weightIds, injectionIds, prescriptionIds] = await Promise.all([
+        db.weights.toCollection().primaryKeys(),
+        db.injections.toCollection().primaryKeys(),
+        db.prescriptions.toCollection().primaryKeys(),
+      ]);
+      deletedIds = {
+        weights: weightIds as string[],
+        injections: injectionIds as string[],
+        prescriptions: prescriptionIds as string[],
+      };
       await Promise.all([
         db.weights.clear(),
         db.injections.clear(),
@@ -492,6 +508,11 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
       parsed.data.prescriptions.length ? db.prescriptions.bulkPut(parsed.data.prescriptions) : Promise.resolve(),
       parsed.data.profile ? db.profile.put(parsed.data.profile) : Promise.resolve(),
     ]);
+
+    // Bulk imports normally bypass the per-row mutate helpers that enqueue
+    // outbox entries. Re-attach the sync trail here so the cloud actually
+    // receives the imported data.
+    await enqueueImportedRows(parsed.data, deletedIds);
   });
 
   // Notify the in-memory health cache about the bulk write so it doesn't go stale.

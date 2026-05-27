@@ -5,6 +5,7 @@ import type {
   InjectionEntry,
   IsoDate,
   IsoDateTime,
+  OutboxEntry,
   Prescription,
   ProfileSettings,
   SyncAggregate,
@@ -106,6 +107,82 @@ async function enqueueOutbox(
   // Emitted inside the enclosing transaction. A later rollback would leave a
   // spurious nudge, but a debounced push against an empty outbox is a clean
   // no-op, so this is safe.
+  emitOutboxChange();
+}
+
+/**
+ * Enqueue outbox rows for a bulk import. Imports write straight to the entity
+ * tables (one `bulkPut` per aggregate) so they bypass the per-row mutate
+ * helpers that normally enqueue — without this, imported data lives only on
+ * the importing device and is silently invisible to every other one.
+ *
+ * Must be called inside a transaction that already includes `db.outbox` and
+ * the entity tables; the caller does the writes, this just records the
+ * matching outbox events. `deletedIds` are tombstoned (used by replace mode
+ * to drop rows that existed before the import); rows that appear in both
+ * lists are coalesced into a single upsert because outbox keys are
+ * `${aggregate}:${entityId}` and the upsert is what the caller actually
+ * wants on the remote.
+ */
+export async function enqueueImportedRows(
+  data: {
+    weights: WeightEntry[];
+    injections: InjectionEntry[];
+    prescriptions: Prescription[];
+    profile?: ProfileSettings;
+  },
+  deletedIds?: { weights: string[]; injections: string[]; prescriptions: string[] },
+): Promise<void> {
+  const enqueuedAt = now();
+  const entries: OutboxEntry[] = [];
+  const importedIds = {
+    weight: new Set(data.weights.map((w) => w.id)),
+    injection: new Set(data.injections.map((i) => i.id)),
+    prescription: new Set(data.prescriptions.map((p) => p.id)),
+  };
+
+  function tombstone(aggregate: SyncAggregate, ids: string[] | undefined, kept: Set<string>) {
+    for (const id of ids ?? []) {
+      if (kept.has(id)) continue;
+      entries.push({
+        id: `${aggregate}:${id}`,
+        aggregate,
+        entityId: id,
+        op: 'delete',
+        updatedAt: enqueuedAt,
+        payload: null,
+        enqueuedAt,
+        rev: nanoid(),
+      });
+    }
+  }
+
+  function upsert(aggregate: SyncAggregate, entityId: string, updatedAt: IsoDateTime, payload: unknown) {
+    entries.push({
+      id: `${aggregate}:${entityId}`,
+      aggregate,
+      entityId,
+      op: 'upsert',
+      updatedAt,
+      payload,
+      enqueuedAt,
+      rev: nanoid(),
+    });
+  }
+
+  tombstone('weight', deletedIds?.weights, importedIds.weight);
+  tombstone('injection', deletedIds?.injections, importedIds.injection);
+  tombstone('prescription', deletedIds?.prescriptions, importedIds.prescription);
+
+  for (const w of data.weights) upsert('weight', w.id, w.updatedAt, w);
+  for (const i of data.injections) upsert('injection', i.id, i.updatedAt, i);
+  for (const p of data.prescriptions) upsert('prescription', p.id, p.updatedAt, p);
+  if (data.profile) {
+    upsert('profile', 'profile', data.profile.updatedAt, toSyncableProfile(data.profile));
+  }
+
+  if (entries.length === 0) return;
+  await db.outbox.bulkPut(entries);
   emitOutboxChange();
 }
 

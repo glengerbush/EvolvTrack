@@ -25,8 +25,6 @@ export type PlainSyncChange = {
 
 export type EncryptedSyncChange = {
   id: string;
-  aggregate: SyncAggregate;
-  op: 'upsert' | 'delete';
   ciphertext: string;
   iv: string;
   protocolVersion: number;
@@ -117,14 +115,17 @@ async function pushEncryptedOutbox(
   userId: string,
   sessionKey: string,
 ): Promise<void> {
+  // `aggregate` and `op` are intentionally NOT in the wire payload — they
+  // live inside the encrypted envelope (see `syncEnvelope`) so the server
+  // cannot tell what kind of record this is or whether it's an upsert vs a
+  // delete. The matching server column was dropped in migration
+  // 20260528010000_strip_encrypted_metadata.sql.
   const payload = [];
   for (const row of rows) {
     const encrypted = await encryptRecord(sessionKey, syncEnvelope(row));
     payload.push({
       id: row.id,
       user_id: userId,
-      aggregate: row.aggregate,
-      op: row.op,
       ciphertext: encrypted.ciphertext,
       iv: encrypted.iv,
       protocol_version: SYNC_PROTOCOL_VERSION,
@@ -268,7 +269,7 @@ async function pullEncrypted(
 ): Promise<PulledEvent[]> {
   let query = supabase
     .from('sync_changes_encrypted')
-    .select('id,aggregate,op,ciphertext,iv,created_at,inserted_at')
+    .select('id,ciphertext,iv,created_at,inserted_at')
     .eq('user_id', userId)
     .order('inserted_at', { ascending: true });
   if (cursor) query = query.gt('inserted_at', cursor);
@@ -289,10 +290,17 @@ async function pullEncrypted(
       const message = (cause as Error).message ?? String(cause);
       throw new Error(`Failed to decrypt encrypted sync row ${row.id}: ${message}`);
     }
+    // `aggregate` and `op` come exclusively from the encrypted envelope now;
+    // the server columns were dropped to stop leaking per-aggregate volume.
+    // An envelope missing either field is a corrupted/forged row — skip it
+    // rather than guess at what the row was.
+    if (!envelope.aggregate || !envelope.op) {
+      throw new Error(`Encrypted sync row ${row.id} is missing aggregate/op in its envelope.`);
+    }
     events.push({
-      aggregate: (envelope.aggregate ?? row.aggregate) as SyncAggregate,
+      aggregate: envelope.aggregate,
       entityId: entityIdFromRowId(row.id),
-      op: (envelope.op ?? row.op) as 'upsert' | 'delete',
+      op: envelope.op,
       record: envelope.record ?? null,
       remoteUpdatedAt: row.created_at,
       insertedAt: row.inserted_at,
@@ -325,11 +333,11 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
   const rows = await db.migrationBackfill.orderBy('createdAt').toArray();
   if (!rows.length) return { pushed: 0 };
 
+  // `aggregate` and `op` stay inside the encrypted payload — see
+  // pushEncryptedOutbox for the rationale.
   const payload = rows.map((row) => ({
     id: row.id,
     user_id: user.id,
-    aggregate: row.aggregate,
-    op: row.op,
     ciphertext: row.payloadCiphertext,
     iv: row.payloadIv,
     protocol_version: row.protocolVersion,
@@ -388,7 +396,7 @@ export async function fetchRemoteEncryptedChanges(): Promise<EncryptedSyncChange
   const user = await requireAuthenticatedUser();
   const { data, error } = await supabase
     .from('sync_changes_encrypted')
-    .select('id,aggregate,op,ciphertext,iv,protocol_version,encryption_version,schema_version,created_at')
+    .select('id,ciphertext,iv,protocol_version,encryption_version,schema_version,created_at')
     .eq('user_id', user.id)
     .order('created_at', { ascending: true });
 
@@ -396,8 +404,6 @@ export async function fetchRemoteEncryptedChanges(): Promise<EncryptedSyncChange
 
   return (data ?? []).map((row) => ({
     id: row.id,
-    aggregate: row.aggregate as SyncAggregate,
-    op: row.op as 'upsert' | 'delete',
     ciphertext: row.ciphertext,
     iv: row.iv,
     protocolVersion: row.protocol_version,

@@ -222,10 +222,14 @@ describe('pushEncryptedChanges — happy path', () => {
     expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
       id: 'evt-1',
       user_id: 'user-1',
-      aggregate: 'weight',
       ciphertext: 'ct-evt-1',
       iv: 'iv-evt-1',
     });
+    // aggregate/op live inside the ciphertext only — leaking them in plaintext
+    // columns would let the server tally per-kind volume per user.
+    const wireRow = (rows as Array<Record<string, unknown>>)[0];
+    expect(wireRow).not.toHaveProperty('aggregate');
+    expect(wireRow).not.toHaveProperty('op');
     expect(h.recordMock).toHaveBeenCalledTimes(1);
   });
 
@@ -312,13 +316,11 @@ describe('fetchRemoteEncryptedChanges', () => {
     expect(rows).toEqual([]);
   });
 
-  it('maps snake_case columns back into camelCase EncryptedSyncChange shape', async () => {
+  it('maps snake_case columns back into camelCase EncryptedSyncChange shape (no aggregate/op leak)', async () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
         {
           id: 'r-1',
-          aggregate: 'weight',
-          op: 'upsert',
           ciphertext: 'ct',
           iv: 'iv',
           protocol_version: 1,
@@ -334,8 +336,6 @@ describe('fetchRemoteEncryptedChanges', () => {
     expect(rows).toEqual([
       {
         id: 'r-1',
-        aggregate: 'weight',
-        op: 'upsert',
         ciphertext: 'ct',
         iv: 'iv',
         protocolVersion: 1,
@@ -436,6 +436,10 @@ describe('pushOutbox', () => {
     expect(row.ciphertext).toContain('ct:');
     // The plaintext payload must never ride along on an encrypted row.
     expect(row).not.toHaveProperty('payload');
+    // aggregate/op are inside the encrypted envelope, not on the wire row —
+    // otherwise the server can tally per-aggregate volume per user.
+    expect(row).not.toHaveProperty('aggregate');
+    expect(row).not.toHaveProperty('op');
     expect(await db.outbox.count()).toBe(0);
   });
 

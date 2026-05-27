@@ -240,10 +240,15 @@ async function decryptRemoteBackfill(dek: string, migrationId: string) {
 
   for (const row of rows) {
     const decrypted = await decryptRecord<EncryptedSyncPayload>(dek, row.ciphertext, row.iv);
+    // aggregate/op live only in the encrypted envelope now (the server
+    // columns were dropped). A row whose envelope lacks them is malformed.
+    if (!decrypted.aggregate || !decrypted.op) {
+      throw new Error(`Encrypted sync row ${row.id} is missing aggregate/op in its envelope.`);
+    }
     plainChanges.push({
       id: makePlainChangeId(migrationId, row.id),
-      aggregate: decrypted.aggregate ?? row.aggregate,
-      op: decrypted.op ?? row.op,
+      aggregate: decrypted.aggregate,
+      op: decrypted.op,
       payload: decrypted.record ?? decrypted.payload ?? decrypted,
       protocolVersion: row.protocolVersion,
       schemaVersion: row.schemaVersion,
