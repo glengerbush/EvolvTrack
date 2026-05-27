@@ -1,4 +1,4 @@
-import { readable, writable } from 'svelte/store';
+import { readable } from 'svelte/store';
 import type { User } from '@supabase/supabase-js';
 import { browser } from '$app/environment';
 import { supabase } from '$lib/auth/supabase';
@@ -45,15 +45,3 @@ export const authState = browser
       return () => sub.subscription.unsubscribe();
     })
   : readable<AuthState>({ kind: 'loading' });
-
-/** Dismiss the "your session expired" banner without signing back in. */
-const _dismissed = writable<boolean>(false);
-export const expiredBannerDismissed = {
-  subscribe: _dismissed.subscribe,
-  dismiss() {
-    _dismissed.set(true);
-  },
-  reset() {
-    _dismissed.set(false);
-  },
-};

@@ -96,32 +96,39 @@ export async function deleteAccountAndClearLocalData() {
 }
 
 export async function logoutAndClearLocalData() {
-  // Tell the server to invalidate all sessions for this user. Best-effort:
+  // Tell the server to end *this device's* session. `scope: 'local'` (the
+  // supabase default) leaves the user's sessions on other devices alone —
+  // logging out on a laptop should not boot the user's phone PWA. Best-effort:
   // network failures, expired tokens, or server outages must NOT abort local
   // cleanup, otherwise the persisted session key and other auth state stay on
   // disk after the user clicked "Log out". The local credentials are gone
   // regardless of whether the server got the memo.
   try {
-    await supabase.auth.signOut({ scope: 'global' });
+    await supabase.auth.signOut({ scope: 'local' });
   } catch {
     // Best-effort server signout.
   }
 
   clearSession();
 
-  const dbDeleteTimeoutMs = 1500;
-  await Promise.race([
-    db.delete(),
-    new Promise<void>((resolve) => {
-      window.setTimeout(resolve, dbDeleteTimeoutMs);
-    })
-  ]).catch(() => undefined);
-
   try {
     localStorage.clear();
     sessionStorage.clear();
   } catch {
     // Best-effort local cleanup.
+  }
+
+  // Defer the IndexedDB wipe to the next boot. Inline `db.delete()` here
+  // cannot complete while the page's module-scoped `liveQuery` subscribers
+  // (outboxCount, profileStore, rawPrescriptions, medicationRows) hold the
+  // database open — the existing 1500 ms timeout would silently win and the
+  // user's data would survive logout. The boot guard in `hooks.client.ts`
+  // runs before any subscriber attaches, so the delete completes cleanly.
+  try {
+    localStorage.setItem(WIPE_DB_ON_BOOT_KEY, '1');
+  } catch {
+    // Best-effort: if this fails we still reload below, but stale rows may
+    // linger until the user signs in again and the next pull overwrites them.
   }
 
   if ('caches' in window) {
@@ -132,4 +139,11 @@ export async function logoutAndClearLocalData() {
       // Best-effort cache cleanup.
     }
   }
+
+  // Callers (AppShell/Dashboard handleLogout) follow this with
+  // `window.location.href = '/auth'`, which is the full reload that lets the
+  // boot guard wipe IndexedDB before any liveQuery subscribes again.
 }
+
+/** localStorage flag consumed by the client boot guard to wipe IndexedDB. */
+export const WIPE_DB_ON_BOOT_KEY = 'evolvtrack-wipe-db-on-boot';

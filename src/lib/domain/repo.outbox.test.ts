@@ -10,8 +10,10 @@ import {
   deleteInjection,
   deletePrescription,
   deleteWeight,
+  getProfile,
   onOutboxChange,
   saveProfile,
+  setLocalProfileSyncState,
   updateInjection,
   updatePrescription,
   updateWeight,
@@ -144,6 +146,39 @@ describe('outbox capture — profile', () => {
     expect(await db.outbox.count()).toBe(1);
     const entry = await db.outbox.get('profile:profile');
     expect(entry!.payload).toMatchObject({ startWeight: 200, goalWeight: 165 });
+  });
+});
+
+describe('setLocalProfileSyncState — device-local writer', () => {
+  it('creates a profile stub with the supplied mode and does NOT enqueue an outbox row', async () => {
+    await setLocalProfileSyncState({ syncMode: 'e2ee', passphraseEnabled: true });
+
+    const profile = await getProfile();
+    expect(profile).toMatchObject({
+      id: 'profile',
+      syncMode: 'e2ee',
+      passphraseEnabled: true,
+    });
+    // Device-local writes must not push: a profile-aggregate outbox row here
+    // would be a wasted round-trip (toSyncableProfile strips these fields).
+    expect(await db.outbox.count()).toBe(0);
+  });
+
+  it('updates an existing profile without enqueueing or touching syncable fields', async () => {
+    await saveProfile({ startWeight: 200 });
+    const beforeCount = await db.outbox.count();
+    expect(beforeCount).toBe(1);
+
+    await setLocalProfileSyncState({ syncMode: 'e2ee', passphraseEnabled: true });
+
+    const profile = await getProfile();
+    expect(profile).toMatchObject({
+      startWeight: 200,
+      syncMode: 'e2ee',
+      passphraseEnabled: true,
+    });
+    // No new outbox entry beyond the original saveProfile one.
+    expect(await db.outbox.count()).toBe(beforeCount);
   });
 });
 

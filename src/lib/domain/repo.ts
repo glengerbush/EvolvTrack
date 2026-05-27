@@ -622,6 +622,39 @@ export async function getProfile(): Promise<ProfileSettings | undefined> {
   return db.profile.get('profile');
 }
 
+/**
+ * Set this device's sync-mode bookkeeping (`syncMode`, `passphraseEnabled`,
+ * `e2eeMigration`) without enqueueing an outbox push. These fields are
+ * device-local — `toSyncableProfile` strips them on the way out and
+ * `applyRemoteProfileChange` strips them on the way in — so pushing the
+ * profile from here would be a no-op at best and a wasted round-trip at
+ * worst. The orchestrator's server-mode reconciliation calls this to flip a
+ * stale local mode to match what the server already knows.
+ */
+export async function setLocalProfileSyncState(state: {
+  syncMode?: SyncMode;
+  passphraseEnabled?: boolean;
+  e2eeMigration?: ProfileSettings['e2eeMigration'];
+}): Promise<void> {
+  const ts = now();
+  await db.transaction('rw', db.profile, async () => {
+    const existing = await db.profile.get('profile');
+    if (existing) {
+      await db.profile.put({ ...existing, ...state, updatedAt: ts });
+      return;
+    }
+    const seed: ProfileSettings = {
+      id: 'profile',
+      passphraseEnabled: state.passphraseEnabled ?? false,
+      syncMode: state.syncMode ?? DEFAULT_SYNC_MODE,
+      e2eeMigration: state.e2eeMigration,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await db.profile.put(stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL }));
+  });
+}
+
 export async function saveProfile(
   partial: Partial<Omit<ProfileSettings, 'id' | 'createdAt'>>,
 ): Promise<void> {

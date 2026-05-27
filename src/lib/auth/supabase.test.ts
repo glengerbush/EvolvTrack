@@ -29,6 +29,7 @@ vi.mock('$lib/db/schema', () => ({
 }));
 
 import {
+  WIPE_DB_ON_BOOT_KEY,
   logoutAndClearLocalData,
   requestPasswordReset,
   signInWithMagicLink,
@@ -159,25 +160,24 @@ describe('requestPasswordReset', () => {
 });
 
 describe('logoutAndClearLocalData', () => {
-  it('signs out globally, deletes the DB, and clears local/session storage', async () => {
+  it('signs out locally, sets the wipe-on-boot sentinel, and clears local/session storage', async () => {
     localStorage.setItem('k', 'v');
     sessionStorage.setItem('k', 'v');
 
     await logoutAndClearLocalData();
 
-    expect(h.signOutMock).toHaveBeenCalledWith({ scope: 'global' });
-    expect(h.dbDeleteMock).toHaveBeenCalledTimes(1);
+    // `scope: 'local'` ends this device's session only. A 'global' signout
+    // would invalidate every other device's refresh token and surprise users
+    // who expected the laptop logout to leave the phone PWA alone.
+    expect(h.signOutMock).toHaveBeenCalledWith({ scope: 'local' });
+    // db.delete() is deferred to the boot guard (hooks.client.ts) — inline
+    // delete cannot complete while module-scoped liveQuery subscribers hold
+    // the database open, so it must NOT be called here.
+    expect(h.dbDeleteMock).not.toHaveBeenCalled();
     expect(localStorage.getItem('k')).toBeNull();
     expect(sessionStorage.getItem('k')).toBeNull();
-  });
-
-  it('completes even if the DB delete hangs (the 1.5s timeout race wins)', async () => {
-    h.dbDeleteMock.mockImplementationOnce(() => new Promise<void>(() => {}));
-    vi.useFakeTimers();
-    const promise = logoutAndClearLocalData();
-    await vi.advanceTimersByTimeAsync(2000);
-    await expect(promise).resolves.toBeUndefined();
-    vi.useRealTimers();
+    // The sentinel must survive the storage clear so the next boot can act on it.
+    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBe('1');
   });
 
   it('still wipes local storage when the server signOut fails', async () => {
@@ -192,6 +192,6 @@ describe('logoutAndClearLocalData', () => {
 
     expect(localStorage.getItem('et.session.key')).toBeNull();
     expect(localStorage.getItem('et.salt')).toBeNull();
-    expect(h.dbDeleteMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBe('1');
   });
 });

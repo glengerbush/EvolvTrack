@@ -169,6 +169,20 @@ export async function adminGrantAdmin(userId: string): Promise<void> {
   if (error) throw new Error(licenseErrorMessage(error.message));
 }
 
+/**
+ * Grants admin by username, email, or UUID. Username-only accounts are
+ * resolved by the same normalization the client uses at sign-up
+ * (see toAuthEmail in src/lib/auth/supabase.ts).
+ */
+export async function adminGrantAdminByIdentifier(identifier: string): Promise<string> {
+  const { data, error } = await supabase.rpc('admin_grant_admin_by_identifier', {
+    p_identifier: identifier,
+  });
+  if (error) throw new Error(licenseErrorMessage(error.message));
+  if (typeof data !== 'string') throw new Error('Unexpected response from admin_grant_admin_by_identifier.');
+  return data;
+}
+
 export async function adminRevokeAdmin(userId: string): Promise<void> {
   const { error } = await supabase.rpc('admin_revoke_admin', { p_user_id: userId });
   if (error) throw new Error(licenseErrorMessage(error.message));
@@ -187,6 +201,8 @@ function licenseErrorMessage(raw: string): string {
     case 'invalid_count': return 'Count must be between 1 and 500.';
     case 'invalid_tier': return 'Invalid tier.';
     case 'cannot_revoke_self': return 'You cannot remove your own admin access.';
+    case 'invalid_identifier': return 'Enter a username, email, or user UUID.';
+    case 'user_not_found': return 'No account found for that username, email, or UUID.';
     case 'license_code_pepper missing': return 'Server is misconfigured. Contact support.';
     default: return raw;
   }

@@ -13,12 +13,15 @@
  */
 import { get } from 'svelte/store';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
-import { getAuthenticatedUserId } from '$lib/sync/account-state';
+import { fetchRemoteSyncMode, getAuthenticatedUserId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
-import { onOutboxChange } from '$lib/domain/repo';
+import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
+import { fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
+import { clearPullCursor } from '$lib/sync/pull-cursor';
 import { supabase, supabaseUrl } from '$lib/auth/supabase';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
 import { rehydrateSession } from '$lib/sync/session-key';
+import type { SyncMode } from '$lib/domain/types';
 import {
   connectivity,
   lastPullAt,
@@ -76,6 +79,50 @@ async function probeReachable(): Promise<boolean> {
   }
 }
 
+function isEncryptedMode(mode: SyncMode): boolean {
+  return mode === 'e2ee' || mode === 'migrating_to_e2ee' || mode === 'rotating_e2ee_key';
+}
+
+/**
+ * If the server's `sync_accounts.sync_mode` disagrees with this device's
+ * local profile in the privacy-sensitive direction (server: encrypted,
+ * local: plain), flip the device to match. Also caches the remote wrapped-
+ * key bundle so the unlock modal has something to work with. The pull cursor
+ * is reset because it points into the old table's `inserted_at` sequence.
+ *
+ * Deliberately one-way for now: the encrypted→plain transition is gated by
+ * the explicit `startE2EEDisableMigration` flow on the device that owns the
+ * change, and forcing a remote downgrade here would risk losing in-flight
+ * encrypted local edits.
+ */
+async function reconcileSyncMode(): Promise<void> {
+  const remoteMode = await fetchRemoteSyncMode();
+  if (!remoteMode) return;
+  if (!isEncryptedMode(remoteMode)) return;
+
+  const profile = await getProfile();
+  const localMode = getProfileSyncMode(profile);
+  if (isEncryptedMode(localMode)) return;
+
+  // Make sure the wrapped-key bundle is available locally so UnlockSessionModal
+  // can derive the DEK from the user's passphrase. Best-effort: if the fetch
+  // fails (network blip), the unlock screen will retry on its own path.
+  if (!(await getLocalWrappedKeys())) {
+    try {
+      const remoteBundle = await fetchRemoteWrappedKeys();
+      if (remoteBundle) {
+        const { id: _id, ...rest } = remoteBundle;
+        await saveLocalWrappedKeys(rest);
+      }
+    } catch (cause) {
+      console.warn('Failed to fetch remote wrapped-key bundle during reconcile:', cause);
+    }
+  }
+
+  await setLocalProfileSyncState({ syncMode: remoteMode, passphraseEnabled: true });
+  clearPullCursor();
+}
+
 export function createSyncOrchestrator(): SyncOrchestrator {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
@@ -125,6 +172,14 @@ export function createSyncOrchestrator(): SyncOrchestrator {
         lastSyncError.set(null);
         return;
       }
+
+      // Reconcile the local sync mode with what the server says is canonical.
+      // Closes a privacy hole: a fresh device (PWA install, post-logout
+      // re-login) defaults to plain mode locally; without this check it would
+      // happily push plaintext to an account the user has switched to E2EE
+      // elsewhere. If reconciliation throws, we surface the failure rather
+      // than proceed on stale assumptions.
+      await reconcileSyncMode();
 
       syncStatus.set('syncing');
       // Pull first so local LWW-merges remote state (and reconciles the

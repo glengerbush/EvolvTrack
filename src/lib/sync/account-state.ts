@@ -2,6 +2,14 @@ import { nanoid } from 'nanoid';
 import { supabase } from '$lib/auth/supabase';
 import type { E2EEMigrationState, SyncMode } from '$lib/domain/types';
 
+const SYNC_MODES: ReadonlySet<SyncMode> = new Set<SyncMode>([
+  'plain',
+  'migrating_to_e2ee',
+  'e2ee',
+  'migrating_to_plain',
+  'rotating_e2ee_key',
+]);
+
 const DEVICE_ID_KEY = 'evolvtrack-device-id';
 
 function nowIso() {
@@ -35,6 +43,26 @@ export async function getAuthenticatedUserId(): Promise<string | null> {
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user) return null;
   return data.user.id;
+}
+
+/**
+ * Read the server's canonical sync mode for the current user. Returns null
+ * when the account has no `sync_accounts` row yet (brand-new user that has
+ * never enabled E2EE — the orchestrator treats this the same as a default
+ * plain account). Throws on transport/auth errors so the caller can decide
+ * whether to bail out of the cycle.
+ */
+export async function fetchRemoteSyncMode(): Promise<SyncMode | null> {
+  const user = await requireAuthenticatedUser();
+  const { data, error } = await supabase
+    .from('sync_accounts')
+    .select('sync_mode')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const mode = data.sync_mode as string;
+  return SYNC_MODES.has(mode as SyncMode) ? (mode as SyncMode) : null;
 }
 
 export async function upsertRemoteSyncAccount(

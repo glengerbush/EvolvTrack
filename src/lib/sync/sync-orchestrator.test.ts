@@ -7,6 +7,13 @@ const h = vi.hoisted(() => {
   const pushImpl = vi.fn();
   const getUserIdImpl = vi.fn();
   const wizardPendingImpl = vi.fn();
+  const fetchRemoteSyncModeImpl = vi.fn();
+  const getProfileImpl = vi.fn();
+  const setLocalSyncStateImpl = vi.fn();
+  const getLocalWrappedKeysImpl = vi.fn();
+  const fetchRemoteWrappedKeysImpl = vi.fn();
+  const saveLocalWrappedKeysImpl = vi.fn();
+  const clearPullCursorImpl = vi.fn();
   const channelOn = vi.fn();
   const channelSubscribe = vi.fn();
   const removeChannel = vi.fn();
@@ -24,6 +31,13 @@ const h = vi.hoisted(() => {
     pushImpl,
     getUserIdImpl,
     wizardPendingImpl,
+    fetchRemoteSyncModeImpl,
+    getProfileImpl,
+    setLocalSyncStateImpl,
+    getLocalWrappedKeysImpl,
+    fetchRemoteWrappedKeysImpl,
+    saveLocalWrappedKeysImpl,
+    clearPullCursorImpl,
     channelOn,
     channelSubscribe,
     removeChannel,
@@ -43,6 +57,7 @@ vi.mock('$lib/sync/sync-engine', () => ({
 
 vi.mock('$lib/sync/account-state', () => ({
   getAuthenticatedUserId: () => h.getUserIdImpl(),
+  fetchRemoteSyncMode: () => h.fetchRemoteSyncModeImpl(),
 }));
 
 vi.mock('$lib/domain/repo', () => ({
@@ -50,6 +65,24 @@ vi.mock('$lib/domain/repo', () => ({
     h.outboxListeners.add(listener);
     return () => h.outboxListeners.delete(listener);
   },
+  getProfile: () => h.getProfileImpl(),
+  getProfileSyncMode: (profile: { syncMode?: string } | undefined) =>
+    (profile?.syncMode ?? 'plain') as string,
+  setLocalProfileSyncState: (state: unknown) => h.setLocalSyncStateImpl(state),
+}));
+
+vi.mock('$lib/sync/wrapped-keys', () => ({
+  getLocalWrappedKeys: () => h.getLocalWrappedKeysImpl(),
+  fetchRemoteWrappedKeys: () => h.fetchRemoteWrappedKeysImpl(),
+  saveLocalWrappedKeys: (bundle: unknown) => h.saveLocalWrappedKeysImpl(bundle),
+}));
+
+vi.mock('$lib/sync/pull-cursor', () => ({
+  clearPullCursor: () => h.clearPullCursorImpl(),
+}));
+
+vi.mock('$lib/sync/session-key', () => ({
+  rehydrateSession: () => undefined,
 }));
 
 vi.mock('$lib/auth/supabase', () => ({
@@ -89,6 +122,13 @@ beforeEach(() => {
   h.pushImpl.mockReset().mockResolvedValue({ pushed: 0 });
   h.getUserIdImpl.mockReset().mockResolvedValue('user-1');
   h.wizardPendingImpl.mockReset().mockReturnValue(false);
+  h.fetchRemoteSyncModeImpl.mockReset().mockResolvedValue(null);
+  h.getProfileImpl.mockReset().mockResolvedValue(undefined);
+  h.setLocalSyncStateImpl.mockReset().mockResolvedValue(undefined);
+  h.getLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
+  h.fetchRemoteWrappedKeysImpl.mockReset().mockResolvedValue(null);
+  h.saveLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
+  h.clearPullCursorImpl.mockReset();
   h.channelOn.mockReset().mockReturnValue(h.channelObj);
   h.channelSubscribe.mockReset().mockReturnValue(h.channelObj);
   h.channelFn.mockClear();
@@ -172,6 +212,80 @@ describe('createSyncOrchestrator — runCycle', () => {
     await expect(orchestrator.syncNow()).resolves.toBeUndefined();
 
     expect(get(syncStatus)).toBe('error');
+    expect(h.pushImpl).not.toHaveBeenCalled();
+  });
+
+  it('reconciles to e2ee when the server says e2ee but local is plain — fetching the wrapped bundle and clearing the cursor', async () => {
+    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
+    h.getLocalWrappedKeysImpl.mockResolvedValue(undefined);
+    h.fetchRemoteWrappedKeysImpl.mockResolvedValue({
+      id: 'self',
+      passphraseSaltB64: 's',
+      passphraseWrapped: { ciphertext: 'c', iv: 'i' },
+      recoverySaltB64: 'r',
+      recoveryWrapped: { ciphertext: 'rc', iv: 'ri' },
+      dekVersion: 1,
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.setLocalSyncStateImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ syncMode: 'e2ee', passphraseEnabled: true }),
+    );
+    expect(h.saveLocalWrappedKeysImpl).toHaveBeenCalledTimes(1);
+    expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reconcile when the server has no sync_accounts row (brand-new user)', async () => {
+    h.fetchRemoteSyncModeImpl.mockResolvedValue(null);
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.setLocalSyncStateImpl).not.toHaveBeenCalled();
+    expect(h.clearPullCursorImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not reconcile when local is already encrypted (no-op when in sync)', async () => {
+    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'e2ee' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.setLocalSyncStateImpl).not.toHaveBeenCalled();
+    expect(h.fetchRemoteWrappedKeysImpl).not.toHaveBeenCalled();
+    expect(h.clearPullCursorImpl).not.toHaveBeenCalled();
+  });
+
+  it('skips the bundle fetch when one is already cached locally', async () => {
+    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
+    h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.fetchRemoteWrappedKeysImpl).not.toHaveBeenCalled();
+    expect(h.saveLocalWrappedKeysImpl).not.toHaveBeenCalled();
+    expect(h.setLocalSyncStateImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ syncMode: 'e2ee' }),
+    );
+  });
+
+  it('fails the cycle into `error` when the sync_mode probe throws', async () => {
+    h.fetchRemoteSyncModeImpl.mockRejectedValueOnce(new Error('rpc-failed'));
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(get(syncStatus)).toBe('error');
+    // Pull must not run on stale assumptions when we couldn't verify the mode.
+    expect(h.pullImpl).not.toHaveBeenCalled();
     expect(h.pushImpl).not.toHaveBeenCalled();
   });
 

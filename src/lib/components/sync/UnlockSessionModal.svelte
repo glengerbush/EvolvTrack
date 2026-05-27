@@ -1,7 +1,11 @@
 <script lang="ts">
   import { derivePassphraseKek, unwrapDek } from '$lib/crypto/e2ee';
   import { setSessionKey } from '$lib/sync/session-key';
-  import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
+  import {
+    fetchRemoteWrappedKeys,
+    getLocalWrappedKeys,
+    saveLocalWrappedKeys,
+  } from '$lib/sync/wrapped-keys';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
@@ -55,12 +59,26 @@
     busy = true;
     error = null;
     try {
-      const bundle = await getLocalWrappedKeys();
+      let bundle = await getLocalWrappedKeys();
       if (!bundle) {
-        // No local bundle means we either haven't enabled E2EE on this device
-        // or the user signed in on a fresh device that hasn't fetched the
-        // remote bundle yet. New-device recovery will be wired separately.
-        error = 'No encrypted bundle on this device. Use a recovery code to set up this device.';
+        // Fresh device that hasn't cached the bundle yet (orchestrator
+        // reconcile usually pre-fetches this, but the user can also open the
+        // modal before the first sync cycle runs). Try the server before
+        // sending them down the recovery-code path.
+        try {
+          const remote = await fetchRemoteWrappedKeys();
+          if (remote) {
+            const { id: _id, ...rest } = remote;
+            bundle = await saveLocalWrappedKeys(rest);
+          }
+        } catch (cause) {
+          error = (cause as Error).message ?? 'Could not reach the server to fetch your encrypted key.';
+          busy = false;
+          return;
+        }
+      }
+      if (!bundle) {
+        error = 'No encrypted bundle on the server for this account. Use a recovery code to set up this device.';
         busy = false;
         return;
       }

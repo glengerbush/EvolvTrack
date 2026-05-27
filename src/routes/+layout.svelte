@@ -7,6 +7,7 @@
   import { startSyncOrchestrator } from '$lib/sync/sync-orchestrator';
   import SyncBanner from '$lib/components/sync/SyncBanner.svelte';
   import { activeColorMode } from '$lib/stores/themeStore';
+  import { authState } from '$lib/stores/authStore';
 
   let { children }: { children?: Snippet } = $props();
 
@@ -19,6 +20,20 @@
     if (typeof document === 'undefined') return;
     document.documentElement.dataset.colorMode = $activeColorMode;
     document.documentElement.style.colorScheme = $activeColorMode;
+  });
+
+  // The supabase client surfaces `signed-out-expired` when the refresh token
+  // has been confirmed dead by the server (revoked, rotated elsewhere, panic
+  // global signout). Drop the user straight onto the sign-in form rather than
+  // stranding them on a stale dashboard. Don't wipe local data — they can
+  // sign back in to the same account and pick up where they left off.
+  $effect(() => {
+    if ($authState.kind !== 'signed-out-expired') return;
+    if (typeof window === 'undefined') return;
+    const path = page.url.pathname;
+    if (path.startsWith('/auth')) return;
+    if (path === '/') return;
+    window.location.assign('/auth');
   });
 
   onMount(() => {

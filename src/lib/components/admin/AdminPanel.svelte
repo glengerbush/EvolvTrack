@@ -3,7 +3,7 @@
   import {
     adminChangeTier,
     adminGenerateLicenses,
-    adminGrantAdmin,
+    adminGrantAdminByIdentifier,
     adminListAdmins,
     adminListLicenses,
     adminRevoke,
@@ -41,7 +41,7 @@
   let editNote = $state('');
 
   // admin management
-  let newAdminUid = $state('');
+  let newAdminIdentifier = $state('');
 
   onMount(() => { void boot(); });
 
@@ -154,11 +154,11 @@
   }
 
   async function handleGrantAdmin() {
-    if (!newAdminUid.trim()) return;
+    if (!newAdminIdentifier.trim()) return;
     busy = true;
     try {
-      await adminGrantAdmin(newAdminUid.trim());
-      newAdminUid = '';
+      await adminGrantAdminByIdentifier(newAdminIdentifier.trim());
+      newAdminIdentifier = '';
       await refreshAdmins();
       setStatus('success', 'Admin added.');
     } catch (error) {
@@ -326,8 +326,13 @@
     <div class="card">
       <h2>Admins</h2>
       <div class="form-row">
-        <input type="text" placeholder="auth user UUID" bind:value={newAdminUid} />
-        <button class="btn-primary" disabled={busy || !newAdminUid.trim()} onclick={handleGrantAdmin}>Add admin</button>
+        <input
+          type="text"
+          placeholder="username, email, or UUID"
+          bind:value={newAdminIdentifier}
+          onkeydown={(e) => e.key === 'Enter' && !busy && newAdminIdentifier.trim() && handleGrantAdmin()}
+        />
+        <button class="btn-primary" disabled={busy || !newAdminIdentifier.trim()} onclick={handleGrantAdmin}>Add admin</button>
       </div>
       <ul class="admin-list">
         {#each admins as a (a.user_id)}

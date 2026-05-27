@@ -1397,6 +1397,7 @@ function markRowsAsBaseline() {
           {@const dueConfirm = isDueConfirmation(row)}
           {@const isExpanded = !!row.injectionId && expandedDueId === row.injectionId}
           <tr
+            class:row-alt={rowIndex % 2 === 1}
             class:new-row={isDraftRow(row)}
             class:row-skipped={row.doseSkipped}
             class:row-needs-medication={rowMissingMedication(row)}
@@ -1945,7 +1946,7 @@ function markRowsAsBaseline() {
     background: var(--surface);
   }
 
-  .inputs-table tbody tr:nth-child(even) {
+  .inputs-table tbody tr.row-alt {
     background: var(--rowAlt);
   }
 
