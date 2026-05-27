@@ -1,9 +1,9 @@
-# EVOLVETRACK (SvelteKit PWA)
+# EVOLVETRACK
 
 Local-first GLP-1 tracking app with offline-first UX and E2EE capable cloud sync. Installable as a PWA.
 
-# TODO:
-Make mobile friendly
+# Upcoming features:
+Mobile friendly interface 
 
 
 ## Setup
