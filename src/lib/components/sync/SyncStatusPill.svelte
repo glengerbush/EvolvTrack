@@ -3,6 +3,7 @@
   import { syncIndicator } from '$lib/stores/syncIndicator';
   import { formatRelativeTime } from '$lib/stores/syncStore';
   import { syncNow } from '$lib/sync/sync-orchestrator';
+  import { displayUserIdentifier } from '$lib/auth/supabase';
   import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
 
   let open = $state(false);
@@ -49,8 +50,10 @@
       ? formatRelativeTime(indicator.lastSynced, new Date(nowTick))
       : null,
   );
-  const userEmail = $derived(
-    indicator.user.kind === 'signed-in' ? indicator.user.user.email ?? null : null,
+  const userIdentifier = $derived(
+    indicator.user.kind === 'signed-in'
+      ? displayUserIdentifier(indicator.user.user.email)
+      : null,
   );
   const encryptionLabel = $derived(
     indicator.encryption === 'e2ee'
@@ -96,9 +99,6 @@
       </header>
 
       <dl class="grid">
-        <dt>Account</dt>
-        <dd>{userEmail ?? 'Not signed in'}</dd>
-
         <dt>Encryption</dt>
         <dd>
           {encryptionLabel}
@@ -117,11 +117,9 @@
           <dd>{indicator.kind === 'locked' ? 'Locked' : 'Unlocked for this session'}</dd>
         {/if}
 
-        <dt>Connectivity</dt>
         {#if indicator.kind === 'no-license'}
-          <dd>Cloud sync disabled</dd>
-        {:else}
-          <dd class="cap">{indicator.connectivity}</dd>
+          <dt>Cloud sync</dt>
+          <dd>Disabled</dd>
         {/if}
 
         <dt>Pending</dt>
@@ -154,6 +152,9 @@
       </dl>
 
       <footer class="actions">
+        <span class="account">
+          {userIdentifier ? `Signed in as ${userIdentifier}` : 'Not signed in'}
+        </span>
         <button
           type="button"
           class="sync-btn"
@@ -238,8 +239,7 @@
     margin: 0 0 0.8rem;
   }
   .grid dt { color: color-mix(in oklab, currentColor 55%, transparent); font-weight: 500; }
-  .grid dd { margin: 0; word-break: break-word; }
-  .grid dd.cap { text-transform: capitalize; }
+  .grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .grid dd.error { color: var(--danger, #b3413f); }
 
   .enc-warn {
@@ -249,7 +249,20 @@
     cursor: help;
   }
 
-  .actions { display: flex; justify-content: flex-end; }
+  .actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid color-mix(in oklab, currentColor 10%, transparent);
+  }
+  .account {
+    color: color-mix(in oklab, currentColor 65%, transparent);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
   .sync-btn {
     padding: 0.35rem 0.85rem;
     border: 1px solid color-mix(in oklab, currentColor 25%, transparent);

@@ -8,10 +8,18 @@
   import { weightUnit, displayWeight, toStoredLbs } from '$lib/stores/unitStore';
   import { medicationRows } from '$lib/stores/medicationStore';
   import {
+    addSymptomOption,
+    removeSymptomOption,
+    setSymptomColor,
     symptomColor as resolveSymptomColor,
     symptomColors,
     symptomOptions,
   } from '$lib/stores/symptomStore';
+  import {
+    addShotLocationOption,
+    removeShotLocationOption,
+    shotLocationOptions,
+  } from '$lib/stores/shotLocationStore';
   import { columnDecimals, fmtNum, lbsToDisplayNum } from '$lib/utils/format';
   import {
     getInputTableSettings,
@@ -187,8 +195,6 @@
     }
   }
 
-  const defaultShotLocationOptions = ['Abdomen (Left)', 'Abdomen (Right)', 'Thigh (Left)', 'Thigh (Right)'];
-
   const medicationOptions = $derived.by(() => {
     const seen = new Set<string>();
     const options: string[] = [];
@@ -343,8 +349,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     weightDrafts.clear();
   }
 
-  let shotLocationOptions = $state([...defaultShotLocationOptions]);
-  const shotLocationSelectOptions = $derived(['', ...shotLocationOptions]);
+  const shotLocationSelectOptions = $derived(['', ...$shotLocationOptions]);
   let newSymptomOption = $state('');
   let newSymptomColor = $state('#c8ccd4');
   let newShotLocationOption = $state('');
@@ -1030,21 +1035,21 @@ function markRowsAsBaseline() {
       : [...selectedValues, symptom];
   }
 
-  function addOption(kind: ManagedOptionKind) {
+  async function addOption(kind: ManagedOptionKind) {
     if (kind === 'symptom') {
       const option = newSymptomOption.trim();
       if (!option || $symptomOptions.includes(option)) return;
-      $symptomOptions = [...$symptomOptions, option];
-      $symptomColors = { ...$symptomColors, [option]: newSymptomColor };
       newSymptomOption = '';
+      const color = newSymptomColor;
       newSymptomColor = '#c8ccd4';
+      await addSymptomOption(option, color);
       return;
     }
 
     const option = newShotLocationOption.trim();
-    if (!option || shotLocationOptions.includes(option)) return;
-    shotLocationOptions = [...shotLocationOptions, option];
+    if (!option || $shotLocationOptions.includes(option)) return;
     newShotLocationOption = '';
+    await addShotLocationOption(option);
   }
 
   function optionKindLabel(kind: ManagedOptionKind): string {
@@ -1097,15 +1102,12 @@ function markRowsAsBaseline() {
     });
   }
 
-  function removeOptionDefinition(kind: ManagedOptionKind, option: string) {
+  async function removeOptionDefinition(kind: ManagedOptionKind, option: string) {
     if (kind === 'shotLocation') {
-      shotLocationOptions = shotLocationOptions.filter((item) => item !== option);
+      await removeShotLocationOption(option);
       return;
     }
-
-    $symptomOptions = $symptomOptions.filter((item) => item !== option);
-    const { [option]: _, ...rest } = $symptomColors;
-    $symptomColors = rest;
+    await removeSymptomOption(option);
   }
 
   async function deletePersistedOptionRecords(
@@ -1162,7 +1164,7 @@ function markRowsAsBaseline() {
 
     try {
       await deletePersistedOptionRecords(await readPersistedHealthRecords(), kind, option);
-      removeOptionDefinition(kind, option);
+      await removeOptionDefinition(kind, option);
       tableRows = removeOptionFromRows(tableRows, kind, option);
       draftBaseTableRows = removeOptionFromRows(draftBaseTableRows, kind, option);
     } catch (err) {
@@ -1250,7 +1252,7 @@ function markRowsAsBaseline() {
                   <input
                     type="color"
                     value={$symptomColors[option] ?? '#c8ccd4'}
-                    oninput={(e) => { $symptomColors = { ...$symptomColors, [option]: e.currentTarget.value }; }}
+                    oninput={(e) => { void setSymptomColor(option, e.currentTarget.value); }}
                   />
                 </label>
                 {option}
@@ -1270,7 +1272,7 @@ function markRowsAsBaseline() {
         <fieldset>
           <legend>Shot location options</legend>
           <div class="option-list">
-            {#each shotLocationOptions as option (option)}
+            {#each $shotLocationOptions as option (option)}
               <span class="option-chip">
                 {option}
                 <button

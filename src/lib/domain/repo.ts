@@ -22,6 +22,10 @@ import {
   stampAllFields,
   type Mergeable,
 } from '$lib/domain/merge';
+import {
+  DEFAULT_SYMPTOM_OPTIONS,
+  generateSymptomColor,
+} from '$lib/utils/symptoms';
 
 const now = () => new Date().toISOString();
 export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
@@ -110,19 +114,35 @@ async function enqueueOutbox(
   emitOutboxChange();
 }
 
+export type ApplyImportOptions = {
+  /** Pre-existing row ids that the caller cleared (replace-mode only) — they
+   *  get delete tombstones on the wire so the cloud actually drops them. Ids
+   *  also present in `data` are coalesced into the upsert instead. */
+  deletedIds?: { weights: string[]; injections: string[]; prescriptions: string[] };
+  /** Every symptom string found on the imported rows. Any not already known
+   *  to the profile are added to `profile.symptomOptions` with a generated
+   *  color, in the same Dexie write and the same outbox entry as the rest of
+   *  the import — so there's exactly one profile push per import. */
+  importedSymptoms?: Iterable<string>;
+};
+
 /**
- * Enqueue outbox rows for a bulk import. Imports write straight to the entity
- * tables (one `bulkPut` per aggregate) so they bypass the per-row mutate
- * helpers that normally enqueue — without this, imported data lives only on
- * the importing device and is silently invisible to every other one.
+ * Apply a bulk import's profile-side work and enqueue every matching outbox
+ * row in one atomic step. The caller is responsible for the entity-table
+ * bulkPuts (weights/injections/prescriptions); this function:
  *
- * Must be called inside a transaction that already includes `db.outbox` and
- * the entity tables; the caller does the writes, this just records the
- * matching outbox events. `deletedIds` are tombstoned (used by replace mode
- * to drop rows that existed before the import); rows that appear in both
- * lists are coalesced into a single upsert because outbox keys are
- * `${aggregate}:${entityId}` and the upsert is what the caller actually
- * wants on the remote.
+ *   1. Decides which profile to persist: the imported profile (if any),
+ *      otherwise the existing one patched with new symptoms, otherwise a
+ *      stub seeded with the new symptoms. If neither an imported profile
+ *      nor new symptoms are present, the profile row is left untouched.
+ *   2. Writes that profile to `db.profile` (if any).
+ *   3. Builds outbox entries: delete tombstones for `deletedIds`, upserts
+ *      for every row in `data`, and a single upsert for the merged profile.
+ *
+ * Must be called inside a transaction that already includes `db.profile`,
+ * `db.outbox`, and the entity tables. Single profile write per import is the
+ * point — keeps push order deterministic and avoids the brief window where
+ * the cloud could see a profile that lacks the symptoms its rows reference.
  */
 export async function enqueueImportedRows(
   data: {
@@ -131,8 +151,14 @@ export async function enqueueImportedRows(
     prescriptions: Prescription[];
     profile?: ProfileSettings;
   },
-  deletedIds?: { weights: string[]; injections: string[]; prescriptions: string[] },
-): Promise<void> {
+  options: ApplyImportOptions = {},
+): Promise<ProfileSettings | undefined> {
+  const { deletedIds, importedSymptoms } = options;
+  const profileToPersist = await mergeImportedProfile(data.profile, importedSymptoms);
+  if (profileToPersist) {
+    await db.profile.put(profileToPersist);
+  }
+
   const enqueuedAt = now();
   const entries: OutboxEntry[] = [];
   const importedIds = {
@@ -177,13 +203,96 @@ export async function enqueueImportedRows(
   for (const w of data.weights) upsert('weight', w.id, w.updatedAt, w);
   for (const i of data.injections) upsert('injection', i.id, i.updatedAt, i);
   for (const p of data.prescriptions) upsert('prescription', p.id, p.updatedAt, p);
-  if (data.profile) {
-    upsert('profile', 'profile', data.profile.updatedAt, toSyncableProfile(data.profile));
+  if (profileToPersist) {
+    upsert('profile', 'profile', profileToPersist.updatedAt, toSyncableProfile(profileToPersist));
   }
 
-  if (entries.length === 0) return;
-  await db.outbox.bulkPut(entries);
-  emitOutboxChange();
+  if (entries.length > 0) {
+    await db.outbox.bulkPut(entries);
+    emitOutboxChange();
+  }
+
+  return profileToPersist;
+}
+
+/**
+ * Compute the profile that should be persisted as part of an import.
+ *
+ * Three cases:
+ *   - Import carries a profile + new symptoms: fold the symptoms into the
+ *     imported profile (the import wins on every field, including starting
+ *     point for the symptom list).
+ *   - No imported profile, but new symptoms: patch the existing profile (or
+ *     stub one) with `symptomOptions` and `symptomColors`.
+ *   - Neither: return undefined — no profile write needed.
+ *
+ * Whenever the function returns a value, `updatedAt` is bumped so the new
+ * version wins LWW against any concurrent edit on another device.
+ */
+async function mergeImportedProfile(
+  importedProfile: ProfileSettings | undefined,
+  importedSymptoms: Iterable<string> | undefined,
+): Promise<ProfileSettings | undefined> {
+  const symptomSet = new Set<string>();
+  if (importedSymptoms) {
+    for (const raw of importedSymptoms) {
+      const trimmed = raw.trim();
+      if (trimmed) symptomSet.add(trimmed);
+    }
+  }
+
+  const existing = await db.profile.get('profile');
+  const baseForSymptoms = importedProfile ?? existing;
+  const baseOptions = baseForSymptoms?.symptomOptions ?? [...DEFAULT_SYMPTOM_OPTIONS];
+  const baseColors = baseForSymptoms?.symptomColors ?? {};
+
+  const known = new Set(baseOptions);
+  const additions: string[] = [];
+  for (const symptom of symptomSet) {
+    if (known.has(symptom)) continue;
+    known.add(symptom);
+    additions.push(symptom);
+  }
+
+  const ts = now();
+
+  if (importedProfile) {
+    if (additions.length === 0) return importedProfile;
+    const nextColors = { ...baseColors };
+    for (const symptom of additions) nextColors[symptom] = generateSymptomColor();
+    return {
+      ...importedProfile,
+      symptomOptions: [...baseOptions, ...additions],
+      symptomColors: nextColors,
+      updatedAt: ts,
+    };
+  }
+
+  if (additions.length === 0) return undefined;
+
+  const nextOptions = [...baseOptions, ...additions];
+  const nextColors = { ...baseColors };
+  for (const symptom of additions) nextColors[symptom] = generateSymptomColor();
+
+  if (existing) {
+    return {
+      ...existing,
+      symptomOptions: nextOptions,
+      symptomColors: nextColors,
+      updatedAt: ts,
+    };
+  }
+
+  const seed: ProfileSettings = {
+    id: 'profile',
+    passphraseEnabled: false,
+    syncMode: DEFAULT_SYNC_MODE,
+    symptomOptions: nextOptions,
+    symptomColors: nextColors,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  return stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL });
 }
 
 // ── Remote apply ───────────────────────────────────────────────────────────

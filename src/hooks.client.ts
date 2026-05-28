@@ -23,6 +23,12 @@ export async function init(): Promise<void> {
   if (!shouldWipe) return;
   try {
     await db.delete();
+    // Dexie 4's `delete()` closes the connection with auto-open disabled — it
+    // does NOT lazily reopen on the next operation the way Dexie 3 did. Reopen
+    // the (now empty) database explicitly so the rest of the session can use
+    // it; otherwise every subsequent read/write throws "Database has been
+    // closed". `open()` re-runs the version definitions, recreating the schema.
+    await db.open();
   } catch (cause) {
     console.error('Failed to wipe local database after logout:', cause);
   }

@@ -1,6 +1,7 @@
 import { db } from '$lib/db/schema';
 import { emitHealthChange, enqueueImportedRows } from '$lib/domain/repo';
 import { setStartWeightIfUnset } from '$lib/stores/progressStore';
+import { hydrateSymptomStoresFromProfile } from '$lib/stores/symptomStore';
 import { BACKUP_FORMAT_VERSION, parseBackupPayload } from '$lib/importExport/backup';
 import {
   SPREADSHEET_FORMAT_VERSION,
@@ -476,6 +477,19 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
 async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): Promise<void> {
   const replaceProfile = parsed.source === 'EvolvTrack backup' || parsed.source === 'EvolvTrack spreadsheet' || Boolean(parsed.data.profile);
 
+  // Collect every symptom referenced by the imported rows up-front. Folded
+  // into the profile write below so the import produces exactly one profile
+  // outbox entry (not one for `parsed.data.profile` and a second for the
+  // newly-registered symptoms).
+  const importedSymptoms = new Set<string>();
+  for (const w of parsed.data.weights) {
+    for (const s of w.symptoms ?? []) importedSymptoms.add(s);
+  }
+  for (const i of parsed.data.injections) {
+    for (const s of i.symptoms ?? []) importedSymptoms.add(s);
+  }
+
+  let mergedProfile: ProfileSettings | undefined;
   const tables = [db.weights, db.injections, db.prescriptions, db.profile, db.outbox];
   await db.transaction('rw', tables, async () => {
     let deletedIds: { weights: string[]; injections: string[]; prescriptions: string[] } | undefined;
@@ -506,14 +520,19 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
       parsed.data.weights.length ? db.weights.bulkPut(parsed.data.weights) : Promise.resolve(),
       parsed.data.injections.length ? db.injections.bulkPut(parsed.data.injections) : Promise.resolve(),
       parsed.data.prescriptions.length ? db.prescriptions.bulkPut(parsed.data.prescriptions) : Promise.resolve(),
-      parsed.data.profile ? db.profile.put(parsed.data.profile) : Promise.resolve(),
     ]);
 
     // Bulk imports normally bypass the per-row mutate helpers that enqueue
-    // outbox entries. Re-attach the sync trail here so the cloud actually
-    // receives the imported data.
-    await enqueueImportedRows(parsed.data, deletedIds);
+    // outbox entries. Re-attach the sync trail here; the profile (including
+    // any imported `profile` block and any newly-registered symptoms) is
+    // written and enqueued in one atomic step by `enqueueImportedRows`.
+    mergedProfile = await enqueueImportedRows(parsed.data, { deletedIds, importedSymptoms });
   });
+
+  // The store's liveQuery will eventually pick this up, but hydrate
+  // synchronously so callers awaiting the import see the dropdown updated
+  // by the time control returns.
+  if (mergedProfile) hydrateSymptomStoresFromProfile(mergedProfile);
 
   // Notify the in-memory health cache about the bulk write so it doesn't go stale.
   if (mode === 'replace') {

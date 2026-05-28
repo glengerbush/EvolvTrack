@@ -26,7 +26,7 @@
   import { isDemoMode } from '$lib/stores/demoStore';
   import { authState } from '$lib/stores/authStore';
   import { clearAllData } from '$lib/domain/repo';
-  import { deleteAccountAndClearLocalData } from '$lib/auth/supabase';
+  import { deleteAccountAndClearLocalData, displayUserIdentifier } from '$lib/auth/supabase';
   import { downloadBackup } from '$lib/importExport/backup';
   import { downloadOdsSpreadsheet } from '$lib/importExport/spreadsheet';
   import {
@@ -411,6 +411,11 @@
 
   let dangerBusy = $state(false);
   const isSignedIn = $derived($authState.kind === 'signed-in');
+  const currentIdentifier = $derived(
+    $authState.kind === 'signed-in'
+      ? displayUserIdentifier($authState.user.email)
+      : null,
+  );
 
   async function clearLocalData() {
     if (!confirm('This permanently deletes all data on this device. Continue?')) return;
@@ -806,6 +811,11 @@
     <div class="card-wrap">
       <h2>Change username / email</h2>
       <div class="panel">
+        {#if currentIdentifier}
+          <p class="toggle-hint">
+            Currently signed in as <strong>{currentIdentifier}</strong>
+          </p>
+        {/if}
         <label>Username<input bind:value={username} type="text" placeholder="New username" /></label>
         <label>Email<input bind:value={email} type="email" placeholder="New email" /></label>
         <button class="btn btn-primary" onclick={updateIdentity}>Update account identity</button>

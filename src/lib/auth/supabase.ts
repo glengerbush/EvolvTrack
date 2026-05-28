@@ -19,6 +19,17 @@ function normalizeUsername(username: string) {
   return normalized || 'user';
 }
 
+/**
+ * The user-facing identifier for an auth account. Username-only sign-ups are
+ * stored under a synthetic `@users.evolvtrack.com` address (`toAuthEmail`
+ * above); that suffix is server-side plumbing the user never typed, so we
+ * strip it on display. Returns null when the user isn't signed in.
+ */
+export function displayUserIdentifier(email: string | null | undefined): string | null {
+  if (!email) return null;
+  return email.endsWith(`@${USERNAME_AUTH_DOMAIN}`) ? email.split('@')[0] : email;
+}
+
 function toAuthEmail(identifier: string) {
   const normalizedIdentifier = identifier.trim().toLowerCase();
   if (normalizedIdentifier.includes('@')) {

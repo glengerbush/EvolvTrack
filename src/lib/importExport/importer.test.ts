@@ -338,6 +338,85 @@ describe('importTrackingFile — outbox enqueue', () => {
     expect(await db.outbox.get('injection:i-1')).toMatchObject({ op: 'upsert' });
   });
 
+  it('registers symptoms not in the default palette so imported rows show in the dropdown and persist to the profile', async () => {
+    const { DEFAULT_SYMPTOM_COLORS, symptomColors, symptomOptions } =
+      await import('$lib/stores/symptomStore');
+    const { getProfile } = await import('$lib/domain/repo');
+    const { get } = await import('svelte/store');
+
+    const payload = backupPayload({
+      weights: [
+        {
+          id: 'w-sym',
+          date: '2026-05-10',
+          weightLbs: 180,
+          symptoms: ['Nausea', 'Fatigue', 'Brain fog'],
+          createdAt: '2026-05-10T12:00:00.000Z',
+          updatedAt: '2026-05-10T12:00:00.000Z',
+        },
+      ],
+    });
+    await importTrackingFile(jsonFile('b.json', payload), 'merge');
+
+    const opts = get(symptomOptions);
+    const colors = get(symptomColors);
+    expect(opts).toContain('Fatigue');
+    expect(opts).toContain('Brain fog');
+    expect(colors['Fatigue']).toMatch(/^#[0-9a-f]{6}$/);
+    expect(colors['Brain fog']).toMatch(/^#[0-9a-f]{6}$/);
+    // Known symptoms keep their original color.
+    expect(colors['Nausea']).toBe(DEFAULT_SYMPTOM_COLORS['Nausea']);
+
+    // Survives a reload — persisted to the profile, not just the in-memory store.
+    const profile = await getProfile();
+    expect(profile?.symptomOptions).toEqual(expect.arrayContaining(['Fatigue', 'Brain fog']));
+  });
+
+  it('an import with both a profile block and new symptoms produces exactly one profile outbox entry', async () => {
+    // Atomicity guarantee: the imported profile and any newly-registered
+    // symptoms collapse into a single profile:profile outbox row, so the
+    // server never briefly sees a profile whose symptomOptions lag behind
+    // the rows that reference them.
+    const payload = {
+      ...backupPayload(),
+      data: {
+        ...backupPayload().data,
+        weights: [
+          {
+            id: 'w-sym',
+            date: '2026-05-10',
+            weightLbs: 180,
+            symptoms: ['Brain fog'],
+            createdAt: '2026-05-10T12:00:00.000Z',
+            updatedAt: '2026-05-10T12:00:00.000Z',
+          },
+        ],
+        profile: {
+          id: 'profile',
+          passphraseEnabled: false,
+          weightUnit: 'lbs',
+          createdAt: '2026-05-01T00:00:00.000Z',
+          updatedAt: '2026-05-01T00:00:00.000Z',
+        },
+      },
+    };
+    await importTrackingFile(jsonFile('b.json', payload), 'merge');
+
+    const profileOutboxRows = await db.outbox
+      .where('aggregate')
+      .equals('profile')
+      .toArray();
+    expect(profileOutboxRows).toHaveLength(1);
+
+    // The single entry carries the imported profile fields AND the new symptom.
+    const wirePayload = profileOutboxRows[0].payload as {
+      weightUnit?: string;
+      symptomOptions?: string[];
+    };
+    expect(wirePayload.weightUnit).toBe('lbs');
+    expect(wirePayload.symptomOptions).toContain('Brain fog');
+  });
+
   it('replace mode does not tombstone an id the import is re-inserting (the upsert wins)', async () => {
     // Pre-seed a row with the same id the import carries. After replace, the
     // outbox should hold an upsert, not a delete — outbox keys are

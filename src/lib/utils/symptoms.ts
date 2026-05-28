@@ -14,6 +14,31 @@ export function symptomColor(symptom: string, colors: Record<string, string>): s
   return colors[symptom] ?? '#c8ccd4';
 }
 
+function hslToHex(hue: number, saturation: number, lightness: number): string {
+  const s = saturation / 100;
+  const l = lightness / 100;
+  const k = (n: number) => (n + hue / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const value = l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return Math.round(value * 255).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/**
+ * Pick a hex color for a freshly-discovered symptom. Hue is randomized;
+ * saturation/lightness sit in the same range as the built-in defaults so
+ * imported entries don't look out of place next to "Nausea" or "Headache".
+ * Pass a custom `rng` in tests for determinism.
+ */
+export function generateSymptomColor(rng: () => number = Math.random): string {
+  const hue = Math.floor(rng() * 360);
+  const saturation = 55 + Math.floor(rng() * 20);
+  const lightness = 70 + Math.floor(rng() * 8);
+  return hslToHex(hue, saturation, lightness);
+}
+
 export function symptomInitial(symptom: string): string {
   const trimmed = symptom.trim();
   if (!trimmed) return '?';

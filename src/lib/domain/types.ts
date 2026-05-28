@@ -177,6 +177,23 @@ export interface ProfileSettings {
   vialHiddenCols?: VialColKey[];
   healthColOrder?: HealthColKey[];
   healthHiddenCols?: HealthColKey[];
+  /**
+   * Symptom dropdown contents for this account. When defined, replaces the
+   * built-in DEFAULT_SYMPTOM_OPTIONS wholesale — the user has explicitly
+   * curated their list. When undefined (fresh account), the defaults apply.
+   */
+  symptomOptions?: string[];
+  /**
+   * Per-symptom hex color overrides. Merged on top of DEFAULT_SYMPTOM_COLORS
+   * at read time, so the defaults remain a floor and only user-customized
+   * entries need to be stored here.
+   */
+  symptomColors?: Record<string, string>;
+  /**
+   * Shot location dropdown contents. Same semantics as `symptomOptions`:
+   * defined replaces the built-in defaults; undefined keeps them.
+   */
+  shotLocationOptions?: string[];
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   /**
