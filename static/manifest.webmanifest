@@ -11,5 +11,13 @@
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
     { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "screenshots": [
+    { "src": "/screenshots/desktop-dashboard.png", "sizes": "1280x720", "type": "image/png", "form_factor": "wide", "label": "Health dashboard with weight, medication level, and wellness trends" },
+    { "src": "/screenshots/desktop-medication.png", "sizes": "1280x720", "type": "image/png", "form_factor": "wide", "label": "Track vials, dosage, cost, and refill reminders" },
+    { "src": "/screenshots/desktop-calculators.png", "sizes": "1280x720", "type": "image/png", "form_factor": "wide", "label": "Dose and syringe-unit calculators" },
+    { "src": "/screenshots/mobile-dashboard.png", "sizes": "390x844", "type": "image/png", "form_factor": "narrow", "label": "Health dashboard with weight, medication level, and wellness trends" },
+    { "src": "/screenshots/mobile-medication.png", "sizes": "390x844", "type": "image/png", "form_factor": "narrow", "label": "Track vials, dosage, cost, and refill reminders" },
+    { "src": "/screenshots/mobile-calculators.png", "sizes": "390x844", "type": "image/png", "form_factor": "narrow", "label": "Dose and syringe-unit calculators" }
   ]
 }
