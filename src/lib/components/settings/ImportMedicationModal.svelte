@@ -93,6 +93,11 @@
     padding: 1.25rem;
     max-width: 28rem;
     width: 100%;
+    /* On short viewports (landscape phone, or keyboard up) a tall modal would
+     * overflow off-screen past the centred backdrop; cap it and scroll inside.
+     * 2rem = the backdrop's 1rem padding top + bottom. */
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
   }
 

@@ -238,6 +238,7 @@
 
         <h3 class="faq-subhead">Per-drug parameters</h3>
         <p>EvolvTrack ships published parameters for five GLP-1 / GIP medications:</p>
+        <div class="faq-table-frame">
         <div class="faq-table-wrap">
           <table class="faq-table">
             <thead>
@@ -251,6 +252,7 @@
               <tr><td>Retatrutide</td><td>One-compartment</td><td>~6 days</td><td>80%</td></tr>
             </tbody>
           </table>
+        </div>
         </div>
 
         <h3 class="faq-subhead">Which values are estimates, and why</h3>
@@ -539,6 +541,16 @@
     /* Clear the sticky .tabbar in Dashboard.svelte so the section heading
      * lands below the tab bar instead of underneath it. */
     scroll-margin-top: 3.5rem;
+    min-width: 0;
+  }
+
+  /* Grid items default to min-width:auto (min-content); without this the wide
+   * FAQ parameters table makes .faq-section/.faq-item grow to the table's
+   * min-width and push the whole page sideways, instead of the table scrolling
+   * inside its own .faq-table-wrap. Same containment rule as the foundation. */
+  .faq-section > :global(*),
+  .faq-item {
+    min-width: 0;
   }
 
   .faq-section-title {
@@ -625,9 +637,13 @@
     padding: 0.6rem 0.8rem;
   }
 
+  .faq-table-frame {
+    position: relative;
+    margin-bottom: 0.65rem;
+  }
+
   .faq-table-wrap {
     overflow-x: auto;
-    margin-bottom: 0.65rem;
   }
 
   .faq-table {
@@ -646,6 +662,45 @@
   .faq-table th {
     background: color-mix(in oklab, var(--headerBg) 18%, var(--surface) 82%);
     font-weight: 700;
+  }
+
+  /* ── Scroll-better treatment for the narrow viewport (≤640px) ──
+   * The table can't shrink below ~28rem without becoming unreadable, so instead
+   * of wrapping it to cards we let it scroll horizontally but pin the Medication
+   * column (the row's identity) so it stays visible while Model / half-life /
+   * bioavailability scroll into view, and fade the right edge to hint there's
+   * more. On wider screens the table fits, so none of this applies. */
+  @media (max-width: 640px) {
+    .faq-table th:first-child,
+    .faq-table td:first-child {
+      position: sticky;
+      left: 0;
+      /* Opaque so scrolled cells pass behind it; box-shadow redraws the divider
+       * that border-collapse drops underneath a sticky cell. */
+      background: var(--surface);
+      box-shadow: 1px 0 0 color-mix(in oklab, var(--cardBorder) 40%, #d4d4d4 60%);
+      z-index: 1;
+    }
+
+    .faq-table th:first-child {
+      background: color-mix(in oklab, var(--headerBg) 18%, var(--surface) 82%);
+      z-index: 2;
+    }
+
+    .faq-table-frame::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 1.6rem;
+      pointer-events: none;
+      background: linear-gradient(
+        to right,
+        transparent,
+        color-mix(in oklab, var(--surface) 86%, transparent)
+      );
+    }
   }
 
   .faq-note {

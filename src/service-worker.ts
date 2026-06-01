@@ -15,10 +15,6 @@ sw.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)));
 });
 
-sw.addEventListener('message', (event) => {
-  if (event.data?.type === 'SKIP_WAITING') sw.skipWaiting();
-});
-
 sw.addEventListener('activate', (event) => {
   event.waitUntil(
     caches

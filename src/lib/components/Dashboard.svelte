@@ -6,9 +6,7 @@
   import { isDemoMode } from "$lib/stores/demoStore";
   import { authState } from "$lib/stores/authStore";
   import { setupWizardPending } from "$lib/stores/setupWizardStore";
-  import { APP_VERSION } from "$lib/version";
   import { logoutAndClearLocalData } from "$lib/auth/supabase";
-  import { updateAvailable, applyUpdate } from "$lib/utils/pwa";
   import SetupWizard from "$lib/components/SetupWizard.svelte";
   import SyncStatusPill from "$lib/components/sync/SyncStatusPill.svelte";
   import HealthTab from "$lib/components/dashboard/tabs/HealthTab.svelte";
@@ -197,16 +195,14 @@
   <header class="app-topbar">
     <div class="brand-lockup" aria-label="EvolvTrack">
       <span class="brand-icon" role="img" aria-label="EvolvTrack logo"></span>
-      <span class="brand-name">EvolvTrack</span>
-      <span class="version-badge">v{APP_VERSION}</span>
-      {#if $isDemoMode}
-        <span class="demo-badge">Demo</span>
-      {/if}
+      <span class="brand-text">
+        <span class="brand-name">EvolvTrack</span>
+        {#if $isDemoMode}
+          <span class="demo-badge">Demo</span>
+        {/if}
+      </span>
     </div>
     <div class="topbar-right">
-      {#if $updateAvailable}
-        <button class="update-button" onclick={applyUpdate}>Update available</button>
-      {/if}
       <SyncStatusPill />
       {#if topbarAuthMode === 'logout'}
         <button class="logout-button" onclick={handleLogout}>Log out</button>
@@ -310,6 +306,16 @@
     min-width: 0;
   }
 
+  /* Wraps the wordmark + Demo badge. On desktop they sit side by side; on mobile
+   * (≤560px) the badge stacks above the wordmark (column-reverse) so it costs no
+   * horizontal room and the pill + button stay on the same row as the logo. */
+  .brand-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+  }
+
   .brand-icon {
     width: 2.35rem;
     height: 2.35rem;
@@ -335,36 +341,12 @@
     font-size: 1.35rem;
     font-weight: 800;
     line-height: 1;
-  }
-
-  .version-badge {
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 42%, transparent 58%);
-    border-radius: 999px;
-    background: color-mix(in oklab, var(--surface) 66%, transparent);
-    color: var(--text);
-    font-size: 0.82rem;
-    font-weight: 800;
-    line-height: 1;
-    padding: 0.28rem 0.48rem;
+    /* Shrink valve: if a width is ever too tight, the wordmark truncates rather
+     * than wrapping the bar or pushing the pill/button off-row. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .update-button {
-    border: 2px solid var(--success, #16a34a);
-    border-radius: 10px;
-    background: color-mix(in oklab, var(--success, #16a34a) 15%, white 85%);
-    color: color-mix(in oklab, var(--success, #16a34a) 40%, black 60%);
-    font-weight: 700;
-    font-size: 0.88rem;
-    cursor: pointer;
-    padding: 0.3rem 0.8rem;
-    white-space: nowrap;
-    animation: pulse-accent 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse-accent {
-    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--success, #16a34a) 40%, transparent 60%); }
-    50% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--success, #16a34a) 0%, transparent 100%); }
   }
 
   .tabbar {
@@ -411,7 +393,14 @@
   .top-tabs {
     display: flex;
     gap: 0.75rem;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .top-tabs::-webkit-scrollbar {
+    display: none;
   }
 
   .top-tab {
@@ -432,6 +421,8 @@
     cursor: pointer;
     line-height: 1;
     text-decoration: none;
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .tab-panel[hidden] {
@@ -478,10 +469,6 @@
       font-size: 1.08rem;
     }
 
-    .version-badge {
-      font-size: 0.72rem;
-    }
-
     .logout-button,
     .signup-button {
       height: 2.45rem;
@@ -489,15 +476,102 @@
     }
   }
 
+  @media (max-width: 640px) {
+    .tabbar {
+      padding: 0.5rem 0.55rem 0;
+      gap: 0.5rem;
+    }
+
+    .top-tabs {
+      gap: 0.4rem;
+    }
+
+    .top-tab {
+      padding: 0 0.8rem;
+      font-size: 0.95rem;
+    }
+
+    .top-tab-icon-box {
+      width: 2.1rem;
+      height: 2.1rem;
+    }
+  }
+
+  /* Keep the top bar a single row on phones (logo + sync pill + action button).
+   * The right-hand controls never shrink/wrap; the brand side gives way first
+   * (wordmark truncates via the ellipsis valve only as a last resort). */
   @media (max-width: 560px) {
     .app-topbar {
+      padding: 0.5rem 0.6rem;
+      gap: 0.5rem;
+    }
+
+    .brand-lockup {
+      gap: 0.45rem;
+      flex-shrink: 1;
+    }
+
+    .brand-text {
+      flex-direction: column-reverse;
       align-items: flex-start;
-      flex-direction: column;
+      gap: 0.14rem;
+    }
+
+    .brand-icon {
+      width: 1.85rem;
+      height: 1.85rem;
+    }
+
+    .brand-name {
+      font-size: 1rem;
+    }
+
+    .demo-badge {
+      font-size: 0.6rem;
+      padding: 0.07rem 0.32rem;
+      letter-spacing: 0.04em;
+    }
+
+    .topbar-right {
+      gap: 0.4rem;
     }
 
     .logout-button,
     .signup-button {
-      width: 100%;
+      height: 2.2rem;
+      font-size: 0.82rem;
+      padding: 0 0.6rem;
+      border-width: 2px;
+      border-radius: 10px;
+    }
+  }
+
+  /* Very narrow phones (original iPhone SE, 320px): tighten further so the
+   * full "EvolvTrack" wordmark still fits beside the pill and button. */
+  @media (max-width: 400px) {
+    .app-topbar {
+      padding: 0.5rem 0.5rem;
+      gap: 0.4rem;
+    }
+
+    .brand-icon {
+      width: 1.6rem;
+      height: 1.6rem;
+    }
+
+    .brand-name {
+      font-size: 0.92rem;
+    }
+
+    .topbar-right {
+      gap: 0.35rem;
+    }
+
+    .logout-button,
+    .signup-button {
+      height: 2.1rem;
+      font-size: 0.78rem;
+      padding: 0 0.5rem;
     }
   }
 </style>

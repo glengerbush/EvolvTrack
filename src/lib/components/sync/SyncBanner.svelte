@@ -3,12 +3,13 @@
   import { syncIndicator } from '$lib/stores/syncIndicator';
   import UnlockSessionModal from '$lib/components/sync/UnlockSessionModal.svelte';
 
-  // Only the two states that require user action surface here. Everything
-  // else (offline, error, pending) lives in the pill — banners interrupt and
-  // we don't want to interrupt for self-healing states. `signed-out-expired`
-  // used to render here, but the root layout now redirects to /auth on that
-  // state so the user lands on the actual sign-in form instead of a banner
-  // CTA that pointed at the settings tab.
+  // `locked` takes over the whole screen with a non-dismissible unlock modal:
+  // a locked session means the DEK is gone, so there's nothing meaningful to
+  // show behind it and the user must unlock (or log out) to proceed.
+  // `migration-paused` stays a soft banner — it's recoverable from Settings
+  // and the rest of the app is still usable. `signed-out-expired` used to
+  // render here, but the root layout now redirects to /auth on that state so
+  // the user lands on the actual sign-in form instead of a banner CTA.
   const visible = $derived.by(() => {
     const ind = $syncIndicator;
     if (ind.kind === 'locked') return 'locked' as const;
@@ -17,20 +18,10 @@
   });
 
   const settingsHref = resolve('/app') + '#settings';
-  let unlockOpen = $state(false);
 </script>
 
 {#if visible === 'locked'}
-  <div class="banner" role="alert" data-tone="warn">
-    <div class="text">
-      <strong>Sync is paused — session locked.</strong>
-      <span>Enter your passphrase to resume encrypted sync.</span>
-    </div>
-    <button type="button" class="cta" onclick={() => (unlockOpen = true)}>Unlock</button>
-  </div>
-  {#if unlockOpen}
-    <UnlockSessionModal onClose={() => (unlockOpen = false)} />
-  {/if}
+  <UnlockSessionModal dismissible={false} onClose={() => {}} />
 {:else if visible === 'migration-paused'}
   <div class="banner" role="alert" data-tone="warn">
     <div class="text">

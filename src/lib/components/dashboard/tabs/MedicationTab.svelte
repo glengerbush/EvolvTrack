@@ -59,21 +59,19 @@
     onUnsavedChange?: (hasUnsavedChanges: boolean) => void;
   } = $props();
 
-  let medicationInputsEditable = $state(false);
-  let vialTrackingEditable = $state(false);
-  let dosageSettingsOpen = $state(false);
-  let vialSettingsOpen = $state(false);
+  let editable = $state(false);
+  let settingsOpen = $state(false);
+  let activeMedTab = $state<'dosage' | 'vial'>('dosage');
 
-  let dosageCardRegion: HTMLElement | undefined = $state();
-  let vialCardRegion: HTMLElement | undefined = $state();
+  let medTableCardRegion: HTMLElement | undefined = $state();
 
   const hiddenDosageCols = new SvelteSet<DosageColKey>();
   const savedHiddenDosageCols = new SvelteSet<DosageColKey>();
   const visibleDosageCols = $derived(dosageCols.filter((c) => !hiddenDosageCols.has(c.key)));
   const savedVisibleDosageCols = $derived(savedDosageCols.filter((c) => !savedHiddenDosageCols.has(c.key)));
   const hiddenDosageColumnOptions = $derived(dosageCols.filter((c) => hiddenDosageCols.has(c.key)));
-  const activeDosageCols = $derived(medicationInputsEditable ? visibleDosageCols : savedVisibleDosageCols);
-  const dosageSettingsActive = $derived(medicationInputsEditable && dosageSettingsOpen);
+  const activeDosageCols = $derived(editable ? visibleDosageCols : savedVisibleDosageCols);
+  const dosageSettingsActive = $derived(editable && settingsOpen);
 
   const DEFAULT_VIAL_COLS: TableColumn<VialColKey>[] = [
     { key: 'compoundDate', label: 'Compound Date' },
@@ -92,11 +90,11 @@
   const visibleVialCols = $derived(vialTrackingCols.filter((c) => !hiddenVialCols.has(c.key)));
   const savedVisibleVialCols = $derived(savedVialTrackingCols.filter((c) => !savedHiddenVialCols.has(c.key)));
   const hiddenVialColumnOptions = $derived(vialTrackingCols.filter((c) => hiddenVialCols.has(c.key)));
-  const activeVialCols = $derived(vialTrackingEditable ? visibleVialCols : savedVisibleVialCols);
-  const vialSettingsActive = $derived(vialTrackingEditable && vialSettingsOpen);
+  const activeVialCols = $derived(editable ? visibleVialCols : savedVisibleVialCols);
+  const vialSettingsActive = $derived(editable && settingsOpen);
 
   function getMedRowById(id: number): MedicationInputRow | undefined {
-    const sourceRows = vialTrackingEditable ? medicationInputRows : savedMedicationInputRows;
+    const sourceRows = editable ? medicationInputRows : savedMedicationInputRows;
     return sourceRows.find((r) => r.id === id);
   }
 
@@ -148,8 +146,8 @@
   let vialTrackingRows = $state<VialTrackingRow[]>([]);
   let savedVialTrackingRows = $state<VialTrackingRow[]>([]);
   let draftBaseVialTrackingRows = $state<VialTrackingRow[]>([]);
-  const displayedMedicationInputRows = $derived(medicationInputsEditable ? medicationInputRows : savedMedicationInputRows);
-  const displayedVialTrackingRows = $derived(vialTrackingEditable ? vialTrackingRows : savedVialTrackingRows);
+  const displayedMedicationInputRows = $derived(editable ? medicationInputRows : savedMedicationInputRows);
+  const displayedVialTrackingRows = $derived(editable ? vialTrackingRows : savedVialTrackingRows);
   let syncedPrescriptions = $state.raw<Prescription[] | null>(null);
   let colSettingsLoaded = $state(false);
   let lastNotifiedUnsavedChanges = false;
@@ -380,10 +378,8 @@
 
   $effect(() => {
     if (active) return;
-    medicationInputsEditable = false;
-    vialTrackingEditable = false;
-    dosageSettingsOpen = false;
-    vialSettingsOpen = false;
+    editable = false;
+    settingsOpen = false;
   });
 
   $effect(() => {
@@ -553,12 +549,8 @@
     vialTrackingRows = vialTrackingRows.filter((r) => r.vialId !== id);
   }
 
-  function addMedicationRow(surface: 'dosage' | 'vial' = 'dosage') {
-    if (surface === 'vial') {
-      vialTrackingEditable = true;
-    } else {
-      medicationInputsEditable = true;
-    }
+  function addMedicationRow() {
+    editable = true;
 
     const newId = Math.max(...medicationInputRows.map((r) => r.id), 0) + 1;
     medicationInputRows = [
@@ -685,67 +677,35 @@
     markRowsAsBaseline();
   }
 
-  async function persistMedicationInputEdits() {
+  async function persistEdits() {
     await commitVialOrder();
-    medicationInputsEditable = false;
-    dosageSettingsOpen = false;
+    editable = false;
+    settingsOpen = false;
   }
 
-  async function persistVialTrackingEdits() {
-    await commitVialOrder();
-    vialTrackingEditable = false;
-    vialSettingsOpen = false;
-  }
-
-  function toggleMedicationInputsEditable() {
-    if (medicationInputsEditable) {
-      void persistMedicationInputEdits();
+  function toggleEditable() {
+    if (editable) {
+      void persistEdits();
       return;
     }
-    medicationInputsEditable = true;
-    dosageSettingsOpen = false;
+    editable = true;
+    settingsOpen = false;
   }
 
-  function toggleVialTrackingEditable() {
-    if (vialTrackingEditable) {
-      void persistVialTrackingEdits();
-      return;
+  function toggleSettings() {
+    settingsOpen = !settingsOpen;
+    if (!settingsOpen) {
+      resetDosageColumnInteractionState();
+      resetVialColumnInteractionState();
     }
-    vialTrackingEditable = true;
-    vialSettingsOpen = false;
-  }
-
-  function toggleDosageSettings() {
-    dosageSettingsOpen = !dosageSettingsOpen;
-    if (!dosageSettingsOpen) resetDosageColumnInteractionState();
-  }
-
-  function toggleVialSettings() {
-    vialSettingsOpen = !vialSettingsOpen;
-    if (!vialSettingsOpen) resetVialColumnInteractionState();
-  }
-
-  function discardMedicationInputEdits() {
-    medicationInputRows = savedMedicationInputRows.map(cloneMedicationRow);
-    vialTrackingRows = savedVialTrackingRows.map(cloneVialRow);
-    markRowsAsBaseline();
-    medicationInputsEditable = false;
-    dosageSettingsOpen = false;
-  }
-
-  function discardVialTrackingEdits() {
-    medicationInputRows = savedMedicationInputRows.map(cloneMedicationRow);
-    vialTrackingRows = savedVialTrackingRows.map(cloneVialRow);
-    markRowsAsBaseline();
-    vialTrackingEditable = false;
-    vialSettingsOpen = false;
   }
 
   function discardMedicationEdits() {
-    const discardDosageChanges = hasUnsavedDosageChanges;
-    const discardVialTrackingChanges = hasUnsavedVialTrackingChanges;
-    if (discardDosageChanges) discardMedicationInputEdits();
-    if (discardVialTrackingChanges) discardVialTrackingEdits();
+    medicationInputRows = savedMedicationInputRows.map(cloneMedicationRow);
+    vialTrackingRows = savedVialTrackingRows.map(cloneVialRow);
+    markRowsAsBaseline();
+    editable = false;
+    settingsOpen = false;
   }
 
   function resetDosageTable() {
@@ -851,7 +811,7 @@
   }
 
   function dosageRowKeydown(e: KeyboardEvent, index: number) {
-    if (!medicationInputsEditable) return;
+    if (!editable) return;
     const n = medicationInputRows.length;
     if (e.key === ' ') {
       e.preventDefault();
@@ -888,7 +848,7 @@
   }
 
   function vialRowKeydown(e: KeyboardEvent, index: number) {
-    if (!vialTrackingEditable) return;
+    if (!editable) return;
     const n = vialTrackingRows.length;
     if (e.key === ' ') {
       e.preventDefault();
@@ -1009,15 +969,9 @@
     if (!isPlainEnter(event)) return;
     if (!(event.target instanceof Node)) return;
 
-    if (medicationInputsEditable && dosageCardRegion?.contains(event.target)) {
+    if (editable && medTableCardRegion?.contains(event.target)) {
       event.preventDefault();
-      void persistMedicationInputEdits();
-      return;
-    }
-
-    if (vialTrackingEditable && vialCardRegion?.contains(event.target)) {
-      event.preventDefault();
-      void persistVialTrackingEdits();
+      void persistEdits();
     }
   }
 </script>
@@ -1026,45 +980,66 @@
 
 <main class="content">
   <section class="medication-layout">
-    <article class="card inputs-card medication-inputs-card" bind:this={dosageCardRegion}>
+    <article class="card med-table-card" bind:this={medTableCardRegion}>
       <div class="chip-row">
-        <h2 class="section-chip">Dosage</h2>
+        <div class="med-tabs" role="tablist" aria-label="Medication view">
+          <button
+            type="button"
+            role="tab"
+            id="med-tab-dosage"
+            class="med-tab"
+            class:active={activeMedTab === 'dosage'}
+            aria-selected={activeMedTab === 'dosage'}
+            onclick={() => (activeMedTab = 'dosage')}
+          >Dosage</button>
+          <button
+            type="button"
+            role="tab"
+            id="med-tab-vial"
+            class="med-tab"
+            class:active={activeMedTab === 'vial'}
+            aria-selected={activeMedTab === 'vial'}
+            onclick={() => (activeMedTab = 'vial')}
+          >Vial Info</button>
+        </div>
         <button
           type="button"
           class="add-row-btn"
-          aria-label="Add medication row"
-          onclick={() => addMedicationRow('dosage')}
+          aria-label="Add vial"
+          onclick={addMedicationRow}
         >+</button>
         <button
           class="mini-icon"
-          class:active={medicationInputsEditable}
-          aria-label="Toggle medication input editing"
-          onclick={toggleMedicationInputsEditable}
+          class:active={editable}
+          aria-label="Toggle medication editing"
+          onclick={toggleEditable}
         >
-          <EditIcon size="var(--edit-icon-scale)" color="white" active={medicationInputsEditable} />
+          <EditIcon size="var(--edit-icon-scale)" color="white" active={editable} />
         </button>
-        {#if medicationInputsEditable}
+        {#if editable}
           <button
             type="button"
             class="mini-icon"
-            class:active={dosageSettingsOpen}
-            aria-label={dosageSettingsOpen ? 'Hide dosage table settings' : 'Show dosage table settings'}
-            title={dosageSettingsOpen ? 'Hide dosage table settings' : 'Show dosage table settings'}
-            aria-pressed={dosageSettingsOpen}
-            onclick={toggleDosageSettings}
+            class:active={settingsOpen}
+            aria-label={settingsOpen ? 'Hide table settings' : 'Show table settings'}
+            title={settingsOpen ? 'Hide table settings' : 'Show table settings'}
+            aria-pressed={settingsOpen}
+            onclick={toggleSettings}
           >
-            <GearIcon size="60%" color="white" />
+            <GearIcon size="var(--edit-icon-scale)" color="white" />
           </button>
         {/if}
-        {#if hasUnsavedDosageChanges}
+        {#if hasUnsavedChanges}
           <button
             type="button"
             class="discard-btn"
-            aria-label="Cancel unsaved dosage changes"
-            onclick={discardMedicationInputEdits}
+            aria-label="Cancel unsaved changes"
+            onclick={discardMedicationEdits}
           >Cancel</button>
         {/if}
       </div>
+      <div class="tab-panel" role="tabpanel" aria-labelledby={activeMedTab === 'dosage' ? 'med-tab-dosage' : 'med-tab-vial'}>
+      {#if activeMedTab === 'dosage'}
       {#if dosageSettingsActive}
         <section class="column-manager" aria-label="Dosage hidden columns">
           <fieldset>
@@ -1144,9 +1119,9 @@
             {#each displayedMedicationInputRows as row, index (row.id)}
               <tr
                 class={vialStatusClass(row)}
-                class:row-dragging={medicationInputsEditable && (dosageDragIndex === index || dosageKbIndex === index)}
-                class:row-dragover={medicationInputsEditable && dosageDragoverIndex === index && dosageDragIndex !== index}
-                draggable={medicationInputsEditable}
+                class:row-dragging={editable && (dosageDragIndex === index || dosageKbIndex === index)}
+                class:row-dragover={editable && dosageDragoverIndex === index && dosageDragIndex !== index}
+                draggable={editable}
                 ondragstart={() => (dosageDragIndex = index)}
                 ondragover={(e) => { e.preventDefault(); dosageDragoverIndex = index; }}
                 ondragleave={() => { if (dosageDragoverIndex === index) dosageDragoverIndex = null; }}
@@ -1155,7 +1130,7 @@
               >
                 <td>
                   <div class="reorder-cell">
-                    {#if medicationInputsEditable}
+                    {#if editable}
                       <button
                         type="button"
                         class="drag-handle"
@@ -1168,7 +1143,7 @@
                       >⠿</button>
                     {/if}
                     <span>{row.id}</span>
-                    {#if medicationInputsEditable}
+                    {#if editable}
                       <button
                         type="button"
                         class="delete-btn"
@@ -1180,6 +1155,7 @@
                 </td>
                 {#each activeDosageCols as col, colIndex (col.key)}
                   <td
+                    data-label={col.label}
                     class:col-type={col.key === 'type'}
                     class:col-narrow={col.key === 'additive' || col.key === 'mlInVial' || col.key === 'dosesLeft'}
                     class:col-compact={col.key === 'additive' || col.key === 'mlInVial' || col.key === 'dosesLeft'}
@@ -1187,7 +1163,7 @@
                     class:col-indicator-right={dosageSettingsActive && dosageColIndicator?.col === colIndex && dosageColIndicator?.side === 'right'}
                   >
                     {#if col.key === 'type'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <select bind:value={row.type}>
                           <option value="">— select —</option>
                           {#each peptideOptions as opt (opt)}
@@ -1198,31 +1174,31 @@
                         {row.type}
                       {/if}
                     {:else if col.key === 'concentration'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <input type="number" bind:value={row.concentrationMg} />
                       {:else}
                         {fmtNum(row.concentrationMg, concentrationDecimals)}
                       {/if}
                     {:else if col.key === 'additive'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <input type="text" bind:value={row.additive} />
                       {:else}
                         {row.additive}
                       {/if}
                     {:else if col.key === 'mlInVial'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <input type="number" bind:value={row.mlInVial} step="0.1" />
                       {:else}
                         {row.mlInVial}
                       {/if}
                     {:else if col.key === 'prescribedDosage'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <input type="number" bind:value={row.prescribedDosage} step="0.1" />
                       {:else}
                         {fmtNum(row.prescribedDosage, prescribedDosageDecimals)}
                       {/if}
                     {:else if col.key === 'dosesLeft'}
-                      {#if medicationInputsEditable}
+                      {#if editable}
                         <input type="number" bind:value={row.dosesLeft} step="0.1" />
                       {:else}
                         {row.dosesLeft.toFixed(1)}
@@ -1232,7 +1208,7 @@
                 {/each}
               </tr>
             {/each}
-            {#if medicationInputsEditable}
+            {#if editable}
               <tr
                 class="drop-sentinel"
                 class:drop-sentinel-active={dosageDragoverIndex === medicationInputRows.length && dosageDragIndex !== null}
@@ -1246,167 +1222,37 @@
           </tbody>
         </table>
       </div>
-    </article>
-
-    <section class="medication-subgrid">
-      <div class="left-col">
-        <article class="card">
-          <h2 class="section-chip">Cost</h2>
-          <table class="kv-table">
-            <tbody>
-              <tr>
-                <th>Total Spend</th>
-                <td>
-                  {#if totalSpend != null}
-                    {formatCurrency(totalSpend)}
-                  {:else}
-                    <span class="empty-value">--</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <th>{$weightUnit} Lost</th>
-                <td>
-                  {#if displayLost != null}
-                    {displayLost}
-                  {:else}
-                    <span class="empty-value">--</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <th>$/{$weightUnit} Lost</th>
-                <td>
-                  {#if costPerUnit != null}
-                    {formatCurrency(costPerUnit)}
-                  {:else}
-                    <span class="empty-value">--</span>
-                  {/if}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </article>
-
-        <article class="card">
-          <h2 class="section-chip">Reminders</h2>
-          <div class="reminders-list">
-            {#if !hasReminders}
-              {#if hiddenReminderCount > 0}
-                <p class="reminders-empty">
-                  No reminders remaining.
-                  {hiddenReminderCount} dismissed —
-                  <button type="button" class="reminders-restore" onclick={() => dismissedReminders.restoreAll()}>
-                    restore
-                  </button>
-                  to review.
-                </p>
-              {:else}
-                <p class="reminders-empty">Nothing pressing — supplies and vial dates look healthy.</p>
-              {/if}
-            {:else}
-              {#each visibleBudReminders as reminder (reminder.dbId)}
-                <p>
-                  <strong>Vial {reminder.vialNumber}</strong>
-                  ({shortDrugName(reminder.type)}) approaches its BUD on
-                  <strong>{formatShortDate(reminder.bud)}</strong>
-                  ({reminder.daysUntilBud} day{reminder.daysUntilBud === 1 ? '' : 's'}) — use it next.
-                  <button
-                    type="button"
-                    class="reminder-dismiss"
-                    aria-label="Dismiss reminder"
-                    title="Dismiss"
-                    onclick={() => dismissedReminders.dismissBud(reminder.dbId, reminder.bud)}
-                  >×</button>
-                </p>
-              {/each}
-              {#each visibleRefillReminders as reminder (reminder.type)}
-                <p>
-                  Less than 1 month of <strong>{shortDrugName(reminder.type)}</strong>
-                  left ({formatDoses(reminder.dosesLeft)} dose{reminder.dosesLeft === 1 ? '' : 's'})
-                  — schedule a refill.
-                  <button
-                    type="button"
-                    class="reminder-dismiss"
-                    aria-label="Dismiss reminder"
-                    title="Dismiss"
-                    onclick={() => dismissedReminders.dismissRefill(reminder.type, reminder.dosesLeft)}
-                  >×</button>
-                </p>
-              {/each}
-            {/if}
-          </div>
-        </article>
-      </div>
-
-      <article class="card vial-tracking-card" bind:this={vialCardRegion}>
-        <div class="chip-row">
-          <h2 class="section-chip">Vial Tracking</h2>
-          <button
-            type="button"
-            class="add-row-btn"
-            aria-label="Add vial tracking row"
-            onclick={() => addMedicationRow('vial')}
-          >+</button>
-          <button
-            class="mini-icon"
-            class:active={vialTrackingEditable}
-            aria-label="Toggle vial tracking editing"
-            onclick={toggleVialTrackingEditable}
-          >
-            <EditIcon size="var(--edit-icon-scale)" color="white" active={vialTrackingEditable} />
-          </button>
-          {#if vialTrackingEditable}
-            <button
-              type="button"
-              class="mini-icon"
-              class:active={vialSettingsOpen}
-              aria-label={vialSettingsOpen ? 'Hide vial tracking table settings' : 'Show vial tracking table settings'}
-              title={vialSettingsOpen ? 'Hide vial tracking table settings' : 'Show vial tracking table settings'}
-              aria-pressed={vialSettingsOpen}
-              onclick={toggleVialSettings}
-            >
-              <GearIcon size="60%" color="white" />
-            </button>
-          {/if}
-          {#if hasUnsavedVialTrackingChanges}
-            <button
-              type="button"
-              class="discard-btn"
-              aria-label="Cancel unsaved vial tracking changes"
-              onclick={discardVialTrackingEdits}
-            >Cancel</button>
-          {/if}
-        </div>
-        {#if vialSettingsActive}
-          <section class="column-manager" aria-label="Vial tracking hidden columns">
-            <fieldset>
-              <legend class="hidden-columns-legend">
-                <span>Hidden columns</span>
+      {:else}
+      {#if vialSettingsActive}
+        <section class="column-manager" aria-label="Vial info hidden columns">
+          <fieldset>
+            <legend class="hidden-columns-legend">
+              <span>Hidden columns</span>
+              <button
+                type="button"
+                class="legend-reset-btn"
+                aria-label="Reset vial info table columns to defaults"
+                title="Reset columns"
+                onclick={resetVialTable}
+              >↺</button>
+            </legend>
+            <div class="option-list">
+              {#each hiddenVialColumnOptions as col (col.key)}
                 <button
                   type="button"
-                  class="legend-reset-btn"
-                  aria-label="Reset vial tracking table columns to defaults"
-                  title="Reset columns"
-                  onclick={resetVialTable}
-                >↺</button>
-              </legend>
-              <div class="option-list">
-                {#each hiddenVialColumnOptions as col (col.key)}
-                  <button
-                    type="button"
-                    class="option-chip option-chip--restore"
-                    aria-label={`Show ${col.label} column`}
-                    onclick={() => showVialColumn(col.key)}
-                  >
-                    <span>{col.label}</span>
-                    <span class="restore-mark" aria-hidden="true">+</span>
-                  </button>
-                {/each}
-              </div>
-            </fieldset>
-          </section>
-        {/if}
+                  class="option-chip option-chip--restore"
+                  aria-label={`Show ${col.label} column`}
+                  onclick={() => showVialColumn(col.key)}
+                >
+                  <span>{col.label}</span>
+                  <span class="restore-mark" aria-hidden="true">+</span>
+                </button>
+              {/each}
+            </div>
+          </fieldset>
+        </section>
+      {/if}
+      <div class="table-scroll">
         <table class="inputs-table medication-table">
           <thead>
             <tr>
@@ -1457,9 +1303,9 @@
           <tbody>
             {#each displayedVialTrackingRows as row, index (row.vialId)}
               <tr
-                class:row-dragging={vialTrackingEditable && (vialDragIndex === index || vialKbIndex === index)}
-                class:row-dragover={vialTrackingEditable && vialDragoverIndex === index && vialDragIndex !== index}
-                draggable={vialTrackingEditable}
+                class:row-dragging={editable && (vialDragIndex === index || vialKbIndex === index)}
+                class:row-dragover={editable && vialDragoverIndex === index && vialDragIndex !== index}
+                draggable={editable}
                 ondragstart={() => (vialDragIndex = index)}
                 ondragover={(e) => { e.preventDefault(); vialDragoverIndex = index; }}
                 ondragleave={() => { if (vialDragoverIndex === index) vialDragoverIndex = null; }}
@@ -1468,7 +1314,7 @@
               >
                 <td>
                   <div class="reorder-cell">
-                    {#if vialTrackingEditable}
+                    {#if editable}
                       <button
                         type="button"
                         class="drag-handle"
@@ -1481,7 +1327,7 @@
                       >⠿</button>
                     {/if}
                     <span>{row.vialId}</span>
-                    {#if vialTrackingEditable}
+                    {#if editable}
                       <button
                         type="button"
                         class="delete-btn"
@@ -1493,31 +1339,32 @@
                 </td>
                 {#each activeVialCols as col, colIndex (col.key)}
                   <td
+                    data-label={col.label}
                     class:col-pharmacy={col.key === 'pharmacy'}
                     class:col-narrow={col.key === 'compoundDate' || col.key === 'lotNumber' || col.key === 'costPerMg'}
                     class:col-indicator-left={vialSettingsActive && vialColIndicator?.col === colIndex && vialColIndicator?.side === 'left'}
                     class:col-indicator-right={vialSettingsActive && vialColIndicator?.col === colIndex && vialColIndicator?.side === 'right'}
                   >
                     {#if col.key === 'compoundDate'}
-                      {#if vialTrackingEditable}
+                      {#if editable}
                         <DateInput bind:value={row.compoundDate} />
                       {:else}
                         {formatLocaleDate(row.compoundDate)}
                       {/if}
                     {:else if col.key === 'bud'}
-                      {#if vialTrackingEditable}
+                      {#if editable}
                         <DateInput bind:value={row.bud} />
                       {:else}
                         {formatLocaleDate(row.bud)}
                       {/if}
                     {:else if col.key === 'lotNumber'}
-                      {#if vialTrackingEditable}
+                      {#if editable}
                         <input type="text" bind:value={row.lotNumber} />
                       {:else}
                         {row.lotNumber}
                       {/if}
                     {:else if col.key === 'pharmacy'}
-                      {#if vialTrackingEditable && getMedRowById(row.vialId)}
+                      {#if editable && getMedRowById(row.vialId)}
                         <input
                           type="text"
                           value={getMedRowById(row.vialId)?.pharmacy ?? ''}
@@ -1527,7 +1374,7 @@
                         {getMedRowById(row.vialId)?.pharmacy ?? ''}
                       {/if}
                     {:else if col.key === 'cost'}
-                      {#if vialTrackingEditable && getMedRowById(row.vialId)}
+                      {#if editable && getMedRowById(row.vialId)}
                         <input
                           type="number"
                           step="0.01"
@@ -1546,7 +1393,7 @@
                 {/each}
               </tr>
             {/each}
-            {#if vialTrackingEditable}
+            {#if editable}
               <tr
                 class="drop-sentinel"
                 class:drop-sentinel-active={vialDragoverIndex === vialTrackingRows.length && vialDragIndex !== null}
@@ -1559,6 +1406,98 @@
             {/if}
           </tbody>
         </table>
+        </div>
+      {/if}
+      </div>
+    </article>
+
+    <section class="med-summary-row">
+      <article class="card">
+        <h2 class="section-chip">Cost</h2>
+        <table class="kv-table">
+          <tbody>
+            <tr>
+              <th>Total Spend</th>
+              <td>
+                {#if totalSpend != null}
+                  {formatCurrency(totalSpend)}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>{$weightUnit} Lost</th>
+              <td>
+                {#if displayLost != null}
+                  {displayLost}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+            <tr>
+              <th>$/{$weightUnit} Lost</th>
+              <td>
+                {#if costPerUnit != null}
+                  {formatCurrency(costPerUnit)}
+                {:else}
+                  <span class="empty-value">--</span>
+                {/if}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+
+      <article class="card">
+        <h2 class="section-chip">Reminders</h2>
+        <div class="reminders-list">
+          {#if !hasReminders}
+            {#if hiddenReminderCount > 0}
+              <p class="reminders-empty">
+                No reminders remaining.
+                {hiddenReminderCount} dismissed —
+                <button type="button" class="reminders-restore" onclick={() => dismissedReminders.restoreAll()}>
+                  restore
+                </button>
+                to review.
+              </p>
+            {:else}
+              <p class="reminders-empty">Nothing pressing — supplies and vial dates look healthy.</p>
+            {/if}
+          {:else}
+            {#each visibleBudReminders as reminder (reminder.dbId)}
+              <p>
+                <strong>Vial {reminder.vialNumber}</strong>
+                ({shortDrugName(reminder.type)}) approaches its BUD on
+                <strong>{formatShortDate(reminder.bud)}</strong>
+                ({reminder.daysUntilBud} day{reminder.daysUntilBud === 1 ? '' : 's'}) — use it next.
+                <button
+                  type="button"
+                  class="reminder-dismiss"
+                  aria-label="Dismiss reminder"
+                  title="Dismiss"
+                  onclick={() => dismissedReminders.dismissBud(reminder.dbId, reminder.bud)}
+                >×</button>
+              </p>
+            {/each}
+            {#each visibleRefillReminders as reminder (reminder.type)}
+              <p>
+                Less than 1 month of <strong>{shortDrugName(reminder.type)}</strong>
+                left ({formatDoses(reminder.dosesLeft)} dose{reminder.dosesLeft === 1 ? '' : 's'})
+                — schedule a refill.
+                <button
+                  type="button"
+                  class="reminder-dismiss"
+                  aria-label="Dismiss reminder"
+                  title="Dismiss"
+                  onclick={() => dismissedReminders.dismissRefill(reminder.type, reminder.dosesLeft)}
+                >×</button>
+              </p>
+            {/each}
+          {/if}
+        </div>
       </article>
     </section>
   </section>
@@ -1584,9 +1523,15 @@
 
   .chip-row {
     display: flex;
-    align-items: center;
+    align-items: stretch;
     gap: 0.4rem;
-    margin-bottom: 0.35rem;
+    /* Each tab extends a "skirt" (var(--tab-skirt)) below the line via extra
+     * padding-bottom, cancelled by a negative margin so the flex layout height
+     * is unaffected. The content panel sits on top (z-index) and hides the
+     * skirt; the skirt is taller than the cards' corner radius, so a tab's
+     * background/border runs down behind the rounded corner and blends in. */
+    --tab-skirt: 1rem;
+    margin-bottom: 0;
   }
 
   .section-chip {
@@ -1745,25 +1690,32 @@
     background: rgba(255, 255, 255, 0.34);
   }
 
+  /* Action buttons share the inactive-tab look: a chip on the table's line. */
   .add-row-btn {
-    border: 0;
-    border-radius: 10px;
-    width: 2rem;
-    height: 2rem;
-    padding: 0;
-    margin-left: 0.1rem;
-    background: color-mix(in oklab, var(--headerBg) 88%, transparent);
+    border: 2px solid transparent;
+    border-radius: 12px 12px 0 0;
+    width: 2.5rem;
+    /* Same skirt as the tabs so a rightmost button's bottom corner tucks behind
+     * the content instead of hanging off the card's rounded corner. */
+    padding: 0 0 var(--tab-skirt);
+    margin-bottom: calc(-1 * var(--tab-skirt));
+    background: color-mix(in oklab, var(--headerBg) 92%, transparent);
     color: var(--headerText);
-    font-size: 1.15rem;
+    font-size: 1.25rem;
     font-weight: 600;
     line-height: 0;
     display: inline-grid;
     place-items: center;
     cursor: pointer;
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
+  }
+
+  .add-row-btn:hover,
+  .mini-icon:hover {
+    background: color-mix(in oklab, var(--headerBg) 82%, white 18%);
   }
 
   .discard-btn {
+    align-self: center;
     border: 1.5px solid color-mix(in oklab, var(--warning) 70%, black 30%);
     border-radius: 8px;
     background: color-mix(in oklab, var(--warning) 22%, white 78%);
@@ -1780,19 +1732,18 @@
   }
 
   .mini-icon {
-    border: 0;
-    border-radius: 10px;
-    width: 2rem;
-    height: 2rem;
-    padding: 0;
-    background: color-mix(in oklab, var(--headerBg) 88%, transparent);
+    border: 2px solid transparent;
+    border-radius: 12px 12px 0 0;
+    width: 2.5rem;
+    padding: 0 0 var(--tab-skirt);
+    margin-bottom: calc(-1 * var(--tab-skirt));
+    background: color-mix(in oklab, var(--headerBg) 92%, transparent);
     line-height: 0;
     cursor: pointer;
     color: var(--headerText);
     display: inline-grid;
     place-items: center;
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
-    --edit-icon-scale: 60%;
+    --edit-icon-scale: 1.15rem;
   }
 
   .mini-icon.active {
@@ -1856,6 +1807,8 @@
 
   .table-scroll {
     overflow-x: auto;
+    max-width: 100%;
+    min-width: 0;
   }
 
   .kv-table th {
@@ -1871,26 +1824,78 @@
   .medication-layout {
     display: grid;
     gap: 1rem;
+    min-width: 0;
   }
 
-  .medication-inputs-card {
+  /* Grid/flex children default to min-width:auto (min-content), which lets the
+   * wide tables inside push the whole layout past the viewport. min-width:0
+   * lets the fr tracks actually shrink so the .table-scroll wrappers scroll
+   * internally instead of overflowing the page. */
+  .medication-layout > *,
+  .med-summary-row > * {
+    min-width: 0;
+  }
+
+  .med-table-card {
     overflow-x: auto;
+    min-width: 0;
+  }
+
+  /* Opaque panel that paints over the chips' skirts so they vanish cleanly
+   * behind the content (on desktop the table fills this, so it never shows). */
+  .tab-panel {
+    /* Sits above the chip strip so the table/cards always cover the tab skirts
+     * (and any overlap of tab and content shows the content on top). */
+    position: relative;
+    z-index: 1;
   }
 
   .medication-table {
     min-width: 950px;
   }
 
-  .medication-subgrid {
+  /* Cost + Reminders sit side by side when there's room, and wrap to a single
+   * column when there isn't — no hard breakpoint, stays fluid at any width. */
+  .med-summary-row {
     display: grid;
-    grid-template-columns: 0.95fr 1.25fr;
     gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
   }
 
-  .left-col {
-    display: grid;
-    gap: 1rem;
-    align-content: start;
+  /* ── Tabbed table header ── */
+  .med-tabs {
+    display: flex;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .med-tab {
+    /* Transparent border: the table (painted in front) draws the one border
+     * line; the selected tab adds its own top/side outline above it. */
+    border: 2px solid transparent;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    background: color-mix(in oklab, var(--headerBg) 92%, transparent);
+    color: var(--headerText);
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-variant: small-caps;
+    line-height: 1;
+    padding: 0.45rem 0.75rem calc(0.5rem + var(--tab-skirt));
+    margin-bottom: calc(-1 * var(--tab-skirt));
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .med-tab:not(.active):hover {
+    background: color-mix(in oklab, var(--headerBg) 82%, white 18%);
+  }
+
+  .med-tab.active {
+    /* Outline matches the content's border colour. No bottom border — the side
+     * borders butt straight down (no 45° miter) and the content covers them. */
+    border-color: color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+    border-bottom: 0;
   }
 
   .reminders-list p {
@@ -2039,12 +2044,149 @@
   }
 
   @media (max-width: 1100px) {
-    .medication-subgrid {
-      grid-template-columns: 1fr;
-    }
-
     .medication-table {
       min-width: 760px;
+    }
+  }
+
+  /* ── Phone layout (≤640px): both tabs render one card per vial. ───────────
+   * Responsive-table pattern — the <table>/edit/drag logic is untouched; the
+   * thead is visually hidden and each <td>'s data-label becomes its row label. */
+  @media (max-width: 640px) {
+    /* Reclaim horizontal room on very narrow phones (e.g. iPhone SE) so the tab
+     * strip's buttons don't collide with the Vial Info tab. */
+    .content {
+      min-width: calc(100% - 1rem);
+    }
+
+    /* Drop the min-width scroll and let rows stack as cards. */
+    .med-table-card {
+      overflow-x: visible;
+      padding: 0.5rem;
+    }
+
+    .med-table-card .table-scroll {
+      overflow-x: visible;
+      max-width: none;
+    }
+
+    .med-table-card .medication-table {
+      min-width: 0;
+    }
+
+    .med-table-card .medication-table,
+    .med-table-card .medication-table tbody {
+      display: block;
+    }
+
+    /* Keep the header in the DOM for screen readers, but hide it visually. */
+    .med-table-card .medication-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .med-table-card .medication-table tbody tr {
+      display: block;
+      border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+      border-radius: 12px;
+      padding: 0.35rem 0.6rem 0.5rem;
+      margin-bottom: 0.6rem;
+    }
+
+    /* Cards must be opaque so the tab skirt shows only at their rounded corners,
+     * not through the body. The vial-status / row tints are semi-transparent, so
+     * paint them as an overlay on an opaque --surface base — same composited
+     * colour as elsewhere, but no longer see-through. (Order mirrors the desktop
+     * cascade: status tints win over the even-row tint.) */
+    .med-table-card .medication-table tbody tr {
+      background: var(--surface);
+    }
+
+    .med-table-card .medication-table tbody tr:nth-child(even) {
+      background: linear-gradient(var(--rowAlt), var(--rowAlt)), var(--surface);
+    }
+
+    .med-table-card .medication-table tbody tr.vial-status-active {
+      background: linear-gradient(var(--vialActive), var(--vialActive)), var(--surface);
+    }
+
+    .med-table-card .medication-table tbody tr.vial-status-warning {
+      background: linear-gradient(var(--vialWarning), var(--vialWarning)), var(--surface);
+    }
+
+    .med-table-card .medication-table tbody tr.vial-status-neutral {
+      background: var(--surface);
+    }
+
+    .med-table-card .medication-table tbody tr:last-child {
+      margin-bottom: 0;
+    }
+
+    .med-table-card .medication-table td {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      text-align: right;
+      border: none;
+      border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 22%, transparent);
+      padding: 0.34rem 0;
+    }
+
+    .med-table-card .medication-table td:last-child {
+      border-bottom: none;
+    }
+
+    .med-table-card .medication-table td::before {
+      content: attr(data-label);
+      flex: 0 1 auto;
+      text-align: left;
+      font-weight: 600;
+      font-variant: small-caps;
+      color: color-mix(in oklab, currentColor 60%, transparent);
+    }
+
+    /* The Vial cell becomes the card header: "⠿ Vial 1 ×". */
+    .med-table-card .medication-table td:first-child {
+      justify-content: flex-start;
+      border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
+      padding-top: 0.1rem;
+      margin-bottom: 0.15rem;
+      font-weight: 700;
+      font-size: 1.05rem;
+    }
+
+    .med-table-card .medication-table td:first-child::before {
+      content: none;
+    }
+
+    .med-table-card .reorder-cell span::before {
+      content: 'Vial ';
+    }
+
+    /* Inputs/selects share the row with their label instead of filling it. */
+    .med-table-card .medication-table td :global(input),
+    .med-table-card .medication-table td :global(select) {
+      width: auto;
+      flex: 1 1 0;
+      min-width: 0;
+      max-width: 62%;
+    }
+
+    .med-table-card .medication-table td.col-compact :global(input) {
+      width: auto;
+    }
+
+    /* Drag-to-reorder is a pointer affordance; the empty drop row is noise here. */
+    .med-table-card .medication-table tr.drop-sentinel {
+      display: none;
     }
   }
 </style>

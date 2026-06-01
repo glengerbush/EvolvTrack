@@ -133,7 +133,9 @@ export type ChartModel = {
 export const CHART = {
   width: 920,
   height: 440,
-  margin: { top: 30, right: 68, bottom: 50, left: 58 },
+  // Left and right gutters are kept equal so the plot sits symmetrically in the
+  // card (matters most on mobile, where wide asymmetric gutters waste space).
+  margin: { top: 30, right: 50, bottom: 50, left: 50 },
 };
 
 export const PLOT = {

@@ -50,18 +50,13 @@ describe('session key cache', () => {
 });
 
 describe('persistence', () => {
-  it('does not write to localStorage by default', () => {
+  it('always writes the DEK to localStorage', () => {
     setSessionKey('KEY_AAA');
-    expect(localStorage.getItem('et.session.dek')).toBeNull();
-  });
-
-  it('writes to localStorage when persist:true', () => {
-    setSessionKey('KEY_AAA', { persist: true });
     expect(localStorage.getItem('et.session.dek')).toBe('KEY_AAA');
   });
 
   it('clearSession wipes the persisted entry', () => {
-    setSessionKey('KEY_AAA', { persist: true });
+    setSessionKey('KEY_AAA');
     clearSession();
     expect(localStorage.getItem('et.session.dek')).toBeNull();
   });

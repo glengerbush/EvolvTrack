@@ -7,28 +7,42 @@
     saveLocalWrappedKeys,
   } from '$lib/sync/wrapped-keys';
   import { requestSync } from '$lib/sync/sync-orchestrator';
+  import { logoutAndClearLocalData } from '$lib/auth/supabase';
   import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
 
-  let { onClose }: { onClose: () => void } = $props();
+  // `dismissible` is false when the modal is the app's lock gate: there's no
+  // Cancel / Escape / backdrop-close, because the only way past a locked
+  // session is to unlock it or log out.
+  let { onClose, dismissible = true }: { onClose: () => void; dismissible?: boolean } =
+    $props();
 
   let passphrase = $state('');
-  let remember = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let recoveryOpen = $state(false);
   let newRecoveryCode = $state<string | null>(null);
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && !busy) {
+    if (event.key === 'Escape' && dismissible && !busy) {
       event.preventDefault();
       onClose();
     }
   }
 
   function handleBackdropClick(event: MouseEvent) {
-    if (busy) return;
+    if (!dismissible || busy) return;
     if (event.target === event.currentTarget) onClose();
+  }
+
+  async function logOut() {
+    if (busy) return;
+    busy = true;
+    try {
+      await logoutAndClearLocalData();
+    } finally {
+      window.location.href = '/auth';
+    }
   }
 
   function openRecovery() {
@@ -91,10 +105,10 @@
         busy = false;
         return;
       }
-      setSessionKey(dek, { persist: remember });
+      setSessionKey(dek);
       // Best-effort: ask the browser for persistent storage so it won't
       // evict the cached key under disk pressure. Safe to ignore failures.
-      if (remember && typeof navigator !== 'undefined' && navigator.storage?.persist) {
+      if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
         navigator.storage.persist().catch(() => undefined);
       }
       requestSync();
@@ -108,7 +122,12 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="modal-backdrop" role="presentation" onclick={handleBackdropClick}>
+<div
+  class="modal-backdrop"
+  class:solid={!dismissible}
+  role="presentation"
+  onclick={handleBackdropClick}
+>
   <div
     class="modal"
     role="dialog"
@@ -116,11 +135,11 @@
     aria-labelledby="unlock-session-title"
     tabindex="-1"
   >
-    <h3 id="unlock-session-title">Unlock encrypted sync</h3>
+    <h3 id="unlock-session-title">Unlock encrypted data</h3>
     <p>
-      Your passphrase isn't kept on this device — it's held in memory only and
-      cleared whenever this app reloads. Enter it again to resume end-to-end
-      encrypted sync.
+      Enter your passphrase to decrypt your data on this device. Your passphrase
+      itself is never stored — once unlocked, this device stays unlocked until
+      you log out.
     </p>
     <form
       onsubmit={(e) => {
@@ -138,22 +157,20 @@
           disabled={busy}
         />
       </label>
-      <label class="remember">
-        <input type="checkbox" bind:checked={remember} disabled={busy} />
-        <span>
-          Trust this device
-          <em>Until you Logout, this device will be able to decrypt your data.</em>
-        </span>
-      </label>
       {#if error}
         <p class="field-error" role="alert">{error}</p>
       {/if}
-      <div class="modal-actions">
+      <div class="recovery-row">
         <button type="button" class="link" onclick={openRecovery} disabled={busy}>
           Use recovery code instead
         </button>
-        <span class="spacer"></span>
-        <button type="button" class="ghost" onclick={onClose} disabled={busy}>Cancel</button>
+      </div>
+      <div class="modal-actions">
+        {#if dismissible}
+          <button type="button" class="ghost" onclick={onClose} disabled={busy}>Cancel</button>
+        {:else}
+          <button type="button" class="ghost" onclick={logOut} disabled={busy}>Log out</button>
+        {/if}
         <button type="submit" class="primary" disabled={!passphrase || busy}>
           {busy ? 'Unlocking…' : 'Unlock'}
         </button>
@@ -180,6 +197,12 @@
     justify-content: center;
     padding: 1rem;
     z-index: 1000;
+  }
+
+  /* Lock-gate variant: fully opaque so the data behind it isn't visible
+     while the session is locked. */
+  .modal-backdrop.solid {
+    background: var(--surface);
   }
 
   .modal {
@@ -235,44 +258,21 @@
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 25%, transparent);
   }
 
-  .remember {
-    display: flex;
-    gap: 0.55rem;
-    align-items: flex-start;
-    margin-top: 0.85rem;
-    font-size: 0.85rem;
-    color: var(--text);
-    cursor: pointer;
-  }
-
-  .remember input[type='checkbox'] {
-    flex-shrink: 0;
-    margin-top: 0.15rem;
-    accent-color: var(--brand);
-    width: 1rem;
-    height: 1rem;
-  }
-
-  .remember em {
-    display: block;
-    font-style: normal;
-    color: var(--muted, color-mix(in oklab, var(--text) 60%, transparent));
-    font-weight: 400;
-    line-height: 1.35;
-    margin-top: 0.15rem;
-  }
-
   .field-error {
     color: var(--accent-orange, #c5682f);
     font-size: 0.85rem;
     margin: 0.5rem 0 0;
   }
 
+  .recovery-row {
+    margin-top: 1rem;
+  }
+
   .modal-actions {
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;
-    margin-top: 1.25rem;
+    margin-top: 0.75rem;
   }
 
   .modal-actions button {
@@ -281,6 +281,12 @@
     padding: 0.45rem 1rem;
     border-radius: 999px;
     cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .modal-actions .ghost,
+  .modal-actions .primary {
+    flex-shrink: 0;
   }
 
   .modal-actions button:disabled {
@@ -300,7 +306,7 @@
     color: #fff;
   }
 
-  .modal-actions .link {
+  .recovery-row .link {
     background: transparent;
     border: none;
     padding: 0;
@@ -310,7 +316,8 @@
     cursor: pointer;
   }
 
-  .modal-actions .spacer {
-    flex: 1;
+  .recovery-row .link:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
 </style>

@@ -27,6 +27,7 @@ import {
   lastPullAt,
   lastPushAt,
   lastSyncError,
+  lastSynced,
   licenseActive,
   syncStatus,
 } from '$lib/stores/syncStore';
@@ -195,6 +196,10 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       }
       connectivity.set('online');
       lastSyncError.set(null);
+      // A clean cycle *is* a successful sync, even when no rows moved — this is
+      // what the "Last synced" indicator reflects. The engine's pull/push only
+      // know whether data moved; "a sync happened" is owned here.
+      lastSynced.record();
       syncStatus.set('idle');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -129,17 +129,35 @@ export async function logoutAndClearLocalData() {
     // Best-effort local cleanup.
   }
 
-  // Defer the IndexedDB wipe to the next boot. Inline `db.delete()` here
-  // cannot complete while the page's module-scoped `liveQuery` subscribers
-  // (outboxCount, profileStore, rawPrescriptions, medicationRows) hold the
-  // database open — the existing 1500 ms timeout would silently win and the
-  // user's data would survive logout. The boot guard in `hooks.client.ts`
-  // runs before any subscriber attaches, so the delete completes cleanly.
+  // Wipe IndexedDB. The local domain tables are plaintext at rest, so they
+  // must be gone before the user can inspect them after logging out. Set the
+  // boot-guard sentinel FIRST so that if the inline wipe below is interrupted
+  // (tab closed mid-logout, or a second PWA tab holds the connection open and
+  // blocks the delete), `hooks.client.ts` still finishes the job on next boot.
   try {
     localStorage.setItem(WIPE_DB_ON_BOOT_KEY, '1');
   } catch {
-    // Best-effort: if this fails we still reload below, but stale rows may
-    // linger until the user signs in again and the next pull overwrites them.
+    // Best-effort: if this fails the inline wipe below is the only line of
+    // defense; stale rows may linger if it's also interrupted.
+  }
+
+  // Force-close the connection first. Module-scoped `liveQuery` subscribers
+  // (outboxCount, profileStore, rawPrescriptions, medicationRows) otherwise
+  // hold the database open and Dexie's blocked-delete timeout silently wins,
+  // leaving the data on disk. `close()` drops those connections so the delete
+  // actually completes here, before we navigate away.
+  try {
+    db.close();
+    await db.delete();
+    // Wiped successfully — the boot guard no longer needs to run.
+    try {
+      localStorage.removeItem(WIPE_DB_ON_BOOT_KEY);
+    } catch {
+      // Non-fatal: a redundant boot wipe is harmless.
+    }
+  } catch {
+    // Delete was blocked or threw (e.g. another tab holds the DB open). Leave
+    // the sentinel set so the boot guard retries on next launch.
   }
 
   if ('caches' in window) {

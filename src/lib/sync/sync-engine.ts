@@ -80,7 +80,6 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
   }
 
   await clearPushedOutboxRows(rows);
-  lastSynced.record();
   return { pushed: rows.length };
 }
 
@@ -234,7 +233,6 @@ export async function pullAndApply(): Promise<PullResult> {
   // Events arrive ordered by `inserted_at` ascending, so the last one is the
   // new high-water mark.
   setPullCursor(events[events.length - 1].insertedAt);
-  lastSynced.record();
   return { fetched: events.length, applied };
 }
 

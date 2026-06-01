@@ -100,7 +100,7 @@ vi.mock('$lib/stores/setupWizardStore', () => ({
   isSetupWizardPending: () => h.wizardPendingImpl(),
 }));
 
-import { connectivity, syncStatus } from '$lib/stores/syncStore';
+import { connectivity, lastSynced, syncStatus } from '$lib/stores/syncStore';
 import {
   SYNC_DEBOUNCE_MS,
   createSyncOrchestrator,
@@ -157,6 +157,33 @@ describe('createSyncOrchestrator — runCycle', () => {
       h.pushImpl.mock.invocationCallOrder[0],
     );
     expect(get(syncStatus)).toBe('idle');
+  });
+
+  it('records "last synced" on a clean cycle even when no rows moved', async () => {
+    // Default mocks return fetched:0 / pushed:0 — the "already up to date"
+    // case. This is the bug the indicator had: a no-op Sync now must still
+    // refresh the timestamp.
+    const spy = vi.spyOn(lastSynced, 'record');
+    try {
+      const orchestrator = createSyncOrchestrator();
+      await orchestrator.syncNow();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not record "last synced" when the cycle fails', async () => {
+    h.pullImpl.mockRejectedValueOnce(new Error('rls-denied'));
+    const spy = vi.spyOn(lastSynced, 'record');
+    try {
+      const orchestrator = createSyncOrchestrator();
+      await orchestrator.syncNow();
+      expect(get(syncStatus)).toBe('error');
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reports `syncing` while a cycle is in flight', async () => {

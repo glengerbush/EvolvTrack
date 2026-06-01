@@ -196,11 +196,22 @@
               aria-label="Magic link / passwordless sign in requires an email."
             >ⓘ</span>
           </span>
-          <input bind:value={identifier} autocomplete="username" />
+          <input
+            id="login-identifier"
+            name="username"
+            bind:value={identifier}
+            autocomplete="username"
+          />
         </label>
         <label>
           Password
-          <input bind:value={password} type="password" autocomplete="current-password" />
+          <input
+            id="login-password"
+            name="password"
+            bind:value={password}
+            type="password"
+            autocomplete="current-password"
+          />
         </label>
         <button class="btn btn-primary" type="submit">Log in with password</button>
         {#if showMagicLinkButton}
@@ -219,6 +230,8 @@
               <label>
                 Email
                 <input
+                  id="reset-email"
+                  name="email"
                   bind:value={resetEmail}
                   type="email"
                   autocomplete="email"
@@ -243,15 +256,32 @@
               aria-label="Magic link / passwordless sign in requires an email."
             >ⓘ</span>
           </span>
-          <input bind:value={identifier} autocomplete="username" />
+          <input
+            id="signup-identifier"
+            name="username"
+            bind:value={identifier}
+            autocomplete="username"
+          />
         </label>
         <label>
           Password
-          <input bind:value={password} type="password" autocomplete="new-password" />
+          <input
+            id="signup-password"
+            name="new-password"
+            bind:value={password}
+            type="password"
+            autocomplete="new-password"
+          />
         </label>
         <label>
           Confirm password
-          <input bind:value={signUpConfirmPassword} type="password" autocomplete="new-password" />
+          <input
+            id="signup-confirm-password"
+            name="confirm-password"
+            bind:value={signUpConfirmPassword}
+            type="password"
+            autocomplete="new-password"
+          />
         </label>
         <button class="btn btn-primary" type="submit">Create account</button>
       </form>

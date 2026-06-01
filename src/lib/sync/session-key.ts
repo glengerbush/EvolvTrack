@@ -1,21 +1,22 @@
 /**
- * In-memory cache of the user's data encryption key (DEK) for the current
- * session.
+ * In-memory cache of the user's data encryption key (DEK), mirrored to
+ * localStorage so the device stays unlocked until the user logs out.
  *
  * Push/pull need the DEK to encrypt outgoing events and decrypt incoming
  * ones, but unwrapping it from the passphrase on every call would mean
  * re-running PBKDF2, and re-prompting on every reload would be unusable. So
  * this module caches the *DEK bytes* — not the passphrase, not the KEK that
- * unwraps it. The passphrase never touches disk in any form. If the user
- * opts in, the DEK itself is persisted to localStorage so a refresh / app
- * reopen unlocks automatically.
+ * unwraps it. The passphrase never touches disk in any form. The DEK is
+ * always persisted to localStorage so a refresh / app reopen unlocks
+ * automatically; logout (`clearSession`) is the only thing that wipes it.
  *
  * The key itself never leaves this module's API; only an "is locked" boolean
  * is published via `sessionLocked` for the UI to observe.
  *
  * Threat model note: EvolvTrack's E2EE guarantee is "the server cannot read
- * your data." It is not "an attacker with your unlocked device cannot read
- * your data." Persisting the DEK in localStorage is intentional.
+ * your data." It is not "an attacker with your unlocked, logged-in device
+ * cannot read your data." Persisting the DEK in localStorage is intentional —
+ * the security boundary is logout, which clears the key and all local data.
  */
 import { writable } from 'svelte/store';
 
@@ -32,20 +33,15 @@ let sessionKey: string | null = null;
 export const sessionLocked = writable<boolean>(true);
 
 /**
- * Set the derived key for this session. If `persist` is true, the key is also
- * written to localStorage so subsequent reloads unlock automatically.
+ * Set the derived key for this session and persist it to localStorage so
+ * subsequent reloads unlock automatically. Persistence is best-effort; a
+ * quota / private-mode failure still leaves an in-memory unlock for this tab.
  */
-export function setSessionKey(keyB64: string, options: { persist?: boolean } = {}): void {
+export function setSessionKey(keyB64: string): void {
   sessionKey = keyB64;
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(LEGACY_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
-  }
-  if (options.persist && typeof localStorage !== 'undefined') {
-    try {
       localStorage.setItem(STORAGE_KEY, keyB64);
     } catch {
       // Quota / private-mode failures are non-fatal; in-memory unlock still works.

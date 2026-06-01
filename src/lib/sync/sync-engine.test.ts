@@ -406,7 +406,10 @@ describe('pushOutbox', () => {
     });
 
     expect(await db.outbox.count()).toBe(0);
-    expect(h.recordMock).toHaveBeenCalledTimes(1);
+    // pushOutbox no longer records "last synced" — that's the orchestrator's
+    // job (a clean cycle is a sync even when no rows move). The engine only
+    // moves data.
+    expect(h.recordMock).not.toHaveBeenCalled();
   });
 
   it('never encrypts or touches sync_changes_encrypted in plain mode', async () => {
@@ -567,7 +570,9 @@ describe('pullAndApply', () => {
     });
     // Cursor advanced to the last row's inserted_at.
     expect(h.state.pullCursor).toBe('2026-05-10T00:01:01.000Z');
-    expect(h.recordMock).toHaveBeenCalledTimes(1);
+    // pullAndApply no longer records "last synced" — the orchestrator owns
+    // that, so a no-op cycle still counts as a sync. The engine only moves data.
+    expect(h.recordMock).not.toHaveBeenCalled();
   });
 
   it('passes the existing cursor as a `gt` filter for incremental pulls', async () => {

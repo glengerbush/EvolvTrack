@@ -1125,6 +1125,16 @@
     display: grid;
     gap: 0.5rem;
     line-height: 1.5;
+    /* The drug-name lists are slash-joined with no spaces (e.g.
+     * "Tirzepatide/Mounjaro/Zepbound"), so they form one long unbreakable token.
+     * As a grid item's min-content that pushed the whole page sideways on a
+     * phone. Let the long tokens wrap and let the nested grid tracks shrink. */
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+
+  .import-help-body > * {
+    min-width: 0;
   }
 
   .import-help-body p {
@@ -1135,6 +1145,10 @@
     margin: 0;
     padding-left: 1.1rem;
     display: grid;
+    /* Override the bare `ul` rule above (a 2-column grid meant for short lists):
+     * these are long prose bullets, unreadable in a 2nd ~140px column on a
+     * phone, so force a single column. */
+    grid-template-columns: 1fr;
     gap: 0.3rem;
   }
 

@@ -264,7 +264,9 @@
   }
   .field {
     display: grid;
-    grid-template-columns: 1.4rem 9rem 1fr 2.2rem 1.6rem;
+    /* minmax(0, 9rem) lets the label column shrink on very narrow phones
+     * (≤320px) instead of forcing the row — and the page — to overflow. */
+    grid-template-columns: 1.4rem minmax(0, 9rem) 1fr 2.2rem 1.6rem;
     align-items: center;
     gap: 0.5rem;
     padding: 0.2rem 0.3rem;

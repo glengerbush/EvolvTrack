@@ -40,6 +40,9 @@
 
   const hiddenGraphSeries = new SvelteSet<GraphSeriesKey>();
 
+  // Desktop offers a range selector; mobile is locked to one week (the selector
+  // is hidden and the range forced regardless of the saved choice) so the narrow
+  // viewport never tries to cram a quarter of a year onto the screen.
   type XRangePreset = '1w' | '4w' | '12w' | 'all';
   const X_RANGE_PRESETS: { key: XRangePreset; label: string; range: ChartXRange }[] = [
     { key: '1w', label: '1W', range: { visibleDays: 7 } },
@@ -47,10 +50,41 @@
     { key: '12w', label: '12W', range: { visibleDays: 84 } },
     { key: 'all', label: 'All', range: 'all' },
   ];
-  let xRangeChoice = $state<XRangePreset>('4w');
+  const ONE_WEEK_RANGE: ChartXRange = { visibleDays: 7 };
+  let xRangeChoice = $state<XRangePreset>('1w');
+
+  // Mirror the ≤640px card breakpoint used elsewhere; drives both hiding the
+  // selector and forcing the one-week range on mobile.
+  let isNarrowView = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 640px)');
+    isNarrowView = mq.matches;
+    const onChange = () => (isNarrowView = mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  });
+
   const xRange = $derived(
-    X_RANGE_PRESETS.find((p) => p.key === xRangeChoice)?.range ?? 'all',
+    isNarrowView
+      ? ONE_WEEK_RANGE
+      : X_RANGE_PRESETS.find((p) => p.key === xRangeChoice)?.range ?? 'all',
   );
+
+  async function selectXRange(next: XRangePreset) {
+    if (next === xRangeChoice) return;
+    const el = dataScrollEl;
+    let anchorDate = null;
+    if (el && chartModel.hasAnyData) {
+      anchorDate = chartModel.dateForCssX(el.scrollLeft + el.clientWidth);
+    }
+    xRangeChoice = next;
+    await tick();
+    if (!el || !anchorDate) return;
+    const targetX = chartModel.cssXForDate(anchorDate);
+    if (Number.isFinite(targetX)) {
+      el.scrollLeft = Math.max(0, targetX - el.clientWidth);
+    }
+  }
 
   // Viewport width of the scrollable plot area in CSS pixels. Tracked so the
   // chart can compute pixels-per-day from the selected x-range preset.
@@ -116,22 +150,6 @@
    * geometry, swap the preset, then use the NEW model's geometry to position
    * scrollLeft so the same date lands at the right edge again.
    */
-  async function selectXRange(next: XRangePreset) {
-    if (next === xRangeChoice) return;
-    const el = dataScrollEl;
-    let anchorDate = null;
-    if (el && chartModel.hasAnyData) {
-      anchorDate = chartModel.dateForCssX(el.scrollLeft + el.clientWidth);
-    }
-    xRangeChoice = next;
-    await tick();
-    if (!el || !anchorDate) return;
-    const targetX = chartModel.cssXForDate(anchorDate);
-    if (Number.isFinite(targetX)) {
-      el.scrollLeft = Math.max(0, targetX - el.clientWidth);
-    }
-  }
-
   $effect(() => {
     if (active) return;
     isEditingLegend = false;
@@ -258,6 +276,29 @@
       ? `${v.toFixed(1)} mg`
       : v.toFixed(1);
   }
+
+  const leftChipLabel = $derived(hoverValueLeft != null ? formatHoverWeight(hoverValueLeft) : '');
+  const rightChipLabel = $derived(hoverValueRight != null ? formatHoverRight(hoverValueRight) : '');
+
+  // Hug the chip background to the rendered label. getComputedTextLength returns
+  // SVG user units, which equal CSS px at the axis SVG's 1:1 viewBox scale, so it
+  // drops straight into the rect width. We re-measure whenever the label changes;
+  // before the first measurement (or a char-width fallback) keeps it close.
+  const CHIP_PAD_X = 5;
+  let leftChipTextEl = $state<SVGTextElement | null>(null);
+  let rightChipTextEl = $state<SVGTextElement | null>(null);
+  let leftChipTextW = $state(0);
+  let rightChipTextW = $state(0);
+  $effect(() => {
+    leftChipLabel;
+    leftChipTextW = leftChipTextEl ? leftChipTextEl.getComputedTextLength() : 0;
+  });
+  $effect(() => {
+    rightChipLabel;
+    rightChipTextW = rightChipTextEl ? rightChipTextEl.getComputedTextLength() : 0;
+  });
+  const leftChipW = $derived((leftChipTextW || leftChipLabel.length * 6.6) + CHIP_PAD_X * 2);
+  const rightChipW = $derived((rightChipTextW || rightChipLabel.length * 6.6) + CHIP_PAD_X * 2);
 
   function doseTooltipText(marker: { amountMg: number; medication: string }): string {
     const mg = `${marker.amountMg} mg`;
@@ -562,19 +603,21 @@
           active={isEditingLegend}
           onclick={() => (isEditingLegend = !isEditingLegend)}
         />
-        <div class="x-range-selector" role="group" aria-label="Graph time range">
-          {#each X_RANGE_PRESETS as preset (preset.key)}
-            <button
-              type="button"
-              class="x-range-btn"
-              class:active={xRangeChoice === preset.key}
-              aria-pressed={xRangeChoice === preset.key}
-              onclick={() => selectXRange(preset.key)}
-            >
-              {preset.label}
-            </button>
-          {/each}
-        </div>
+        {#if !isNarrowView}
+          <div class="x-range-selector" role="group" aria-label="Graph time range">
+            {#each X_RANGE_PRESETS as preset (preset.key)}
+              <button
+                type="button"
+                class="x-range-btn"
+                class:active={xRangeChoice === preset.key}
+                aria-pressed={xRangeChoice === preset.key}
+                onclick={() => selectXRange(preset.key)}
+              >
+                {preset.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
       <div class="graph-legend" aria-label="Graph legend" bind:this={legendRegion}>
         {#each legendItems as item (item.key)}
@@ -619,13 +662,13 @@
           </g>
           <g class="axis-labels">
             {#each effectiveLeftTicks as tick (tick.value)}
-              <text x={CHART.margin.left - 11} y={tick.y + 4} text-anchor="end">{tick.label}</text>
+              <text x={CHART.margin.left - 6} y={tick.y + 4} text-anchor="end">{tick.label}</text>
             {/each}
             <text
               class="axis-title left-title"
-              x={CHART.margin.left - 42}
+              x={16}
               y={(PLOT.top + PLOT.bottom) / 2}
-              transform={`rotate(-90 ${CHART.margin.left - 42} ${(PLOT.top + PLOT.bottom) / 2})`}
+              transform={`rotate(-90 16 ${(PLOT.top + PLOT.bottom) / 2})`}
               text-anchor="middle"
             >
               {effectiveLeftLabel}
@@ -640,23 +683,23 @@
               y1={hoverY}
               y2={hoverY}
             />
-            {@const label = formatHoverWeight(hoverValueLeft)}
             <g class="crosshair-chip left">
               <rect
-                x={1}
+                x={CHART.margin.left - 2 - leftChipW}
                 y={hoverY - 9}
-                width={CHART.margin.left - 4}
+                width={leftChipW}
                 height={18}
                 rx="3"
                 ry="3"
               />
               <text
-                x={CHART.margin.left - 5}
+                bind:this={leftChipTextEl}
+                x={CHART.margin.left - 7}
                 y={hoverY}
                 dy="0.35em"
                 text-anchor="end"
               >
-                {label}
+                {leftChipLabel}
               </text>
             </g>
           {/if}
@@ -909,13 +952,13 @@
             </g>
             <g class="axis-labels">
               {#each effectiveRightTicks as tick (tick.value)}
-                <text x={10} y={tick.y + 4}>{tick.label}</text>
+                <text x={5} y={tick.y + 4}>{tick.label}</text>
               {/each}
               <text
                 class="axis-title right-title"
-                x={52}
+                x={CHART.margin.right - 16}
                 y={(PLOT.top + PLOT.bottom) / 2}
-                transform={`rotate(90 52 ${(PLOT.top + PLOT.bottom) / 2})`}
+                transform={`rotate(90 ${CHART.margin.right - 16} ${(PLOT.top + PLOT.bottom) / 2})`}
                 text-anchor="middle"
               >
                 {effectiveRightLabel}
@@ -930,18 +973,17 @@
                 y1={hoverY}
                 y2={hoverY}
               />
-              {@const label = formatHoverRight(hoverValueRight)}
               <g class="crosshair-chip right">
                 <rect
-                  x={3}
+                  x={2}
                   y={hoverY - 9}
-                  width={CHART.margin.right - 6}
+                  width={rightChipW}
                   height={18}
                   rx="3"
                   ry="3"
                 />
-                <text x={7} y={hoverY} dy="0.35em" text-anchor="start">
-                  {label}
+                <text bind:this={rightChipTextEl} x={7} y={hoverY} dy="0.35em" text-anchor="start">
+                  {rightChipLabel}
                 </text>
               </g>
             {/if}
@@ -1131,16 +1173,18 @@
         >Cancel</button>
       {/if}
     </div>
-    <InputsTable
-      rows={$healthEntries}
-      isEditing={isEditingInputs}
-      isSettingsOpen={inputSettingsOpen}
-      addRowSignal={addInputRowSignal}
-      saveSignal={saveInputSignal}
-      discardSignal={discardInputSignal}
-      onSaveEdits={finishInputEdits}
-      onUnsavedChangesChange={(hasRows) => (hasUnsavedInputRows = hasRows)}
-    />
+    <div class="inputs-panel">
+      <InputsTable
+        rows={$healthEntries}
+        isEditing={isEditingInputs}
+        isSettingsOpen={inputSettingsOpen}
+        addRowSignal={addInputRowSignal}
+        saveSignal={saveInputSignal}
+        discardSignal={discardInputSignal}
+        onSaveEdits={finishInputEdits}
+        onUnsavedChangesChange={(hasRows) => (hasUnsavedInputRows = hasRows)}
+      />
+    </div>
   </article>
 </main>
 
@@ -1151,6 +1195,14 @@
     padding: 1rem 0 1.25rem;
     display: grid;
     gap: 1rem;
+    min-width: 0;
+  }
+
+  /* Grid items default to min-width:auto (min-content); without this the wide
+   * inputs table inside .inputs-card pushes the page past the viewport instead
+   * of scrolling inside its own .table-scroll wrapper. */
+  .content > * {
+    min-width: 0;
   }
 
   .panel-grid {
@@ -1179,6 +1231,14 @@
     align-items: center;
     gap: 0.4rem;
     margin-bottom: 0.35rem;
+  }
+
+  /* The Overview range selector can be wider than the room left on one line at
+   * smaller desktop widths; let it wrap below rather than push the card sideways
+   * (margin-left:auto keeps it right-aligned on its own line). */
+  .chart-card .chip-row {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
   }
 
   .x-range-selector {
@@ -1221,7 +1281,9 @@
 
   .add-row-button {
     border: 0;
-    border-radius: 10px;
+    /* Flat bottom so the action buttons read as tabs alongside the section
+     * chip (see .section-chip). */
+    border-radius: 10px 10px 0 0;
     width: 2rem;
     height: 2rem;
     padding: 0;
@@ -1238,7 +1300,7 @@
 
   .settings-btn {
     border: 0;
-    border-radius: 10px;
+    border-radius: 10px 10px 0 0;
     width: 2rem;
     height: 2rem;
     padding: 0;
@@ -1253,6 +1315,12 @@
 
   .settings-btn.active {
     background: color-mix(in oklab, var(--headerBg) 96%, #f2ca67 4%);
+  }
+
+  /* The EditPencil child component is a pill by default; in every health-tab
+   * chip row it takes the same flat-bottom tab shape as the section chip. */
+  .chip-row :global(.edit-pencil) {
+    border-radius: 10px 10px 0 0;
   }
 
   .discard-btn {
@@ -1389,10 +1457,16 @@
 
   .plot-wrap {
     padding: 0.25rem 0 0;
-    width: 100%;
+    /* Bleed into the card's 0.75rem padding so the axis titles sit ~0.3rem from
+     * the card edge and the freed width goes to the plot. */
+    margin-inline: -0.45rem;
+    width: auto;
     display: flex;
     align-items: flex-start;
-    overflow: hidden;
+    /* visible (not hidden) so the crosshair value chips can spill past the
+     * narrow axis gutters — and the card — to show their full text. The
+     * scrolling plot area is clipped by .data-scroll's own overflow, not this. */
+    overflow: visible;
   }
 
   .axis-svg {
@@ -1400,6 +1474,8 @@
     display: block;
     height: 440px;
     max-width: none;
+    /* Let the crosshair chip render outside the gutter's width. */
+    overflow: visible;
   }
 
   .data-scroll {
@@ -1672,6 +1748,57 @@
 
   .inputs-card {
     padding-top: 0.4rem;
+  }
+
+  /* ── Inputs header chip-strip (mobile card view only) ──
+   * On mobile the inputs table renders as stacked cards; the "Inputs" label and
+   * every action button become rounded-top chips whose background extends a
+   * "skirt" below the line (extra padding-bottom cancelled by an equal negative
+   * margin, so the flex row's height is unchanged) and tucks behind the card
+   * stack (which paints on top via .inputs-panel's z-index), so the chips read
+   * as tabs on the cards. On desktop the table is flat, so that skirt would
+   * instead spill below the chips and past the header — it's left off there and
+   * the chips fall back to the same spaced-above look as the Overview/Progress
+   * chips. */
+  @media (max-width: 640px) {
+    .inputs-card .chip-row {
+      --tab-skirt: 1rem;
+      align-items: stretch;
+      gap: 0.3rem;
+      margin-bottom: 0;
+    }
+
+    .inputs-card .section-chip {
+      display: flex;
+      align-items: center;
+      padding-bottom: calc(0.5rem + var(--tab-skirt));
+      margin-bottom: calc(-1 * var(--tab-skirt));
+    }
+
+    /* Action buttons take the chip shape: rounded-top, same skirt, no pill
+     * shadow. height:auto lets them stretch to the section-chip's height; the
+     * icon stays centred above the skirt (place-items:center in each button).
+     * The :global reaches the EditPencil child component's button. */
+    .inputs-card .add-row-button,
+    .inputs-card .settings-btn,
+    .inputs-card :global(.edit-pencil) {
+      height: auto;
+      border-radius: 12px 12px 0 0;
+      padding: 0 0 var(--tab-skirt);
+      margin-bottom: calc(-1 * var(--tab-skirt));
+      box-shadow: none;
+    }
+  }
+
+  /* Sits above the chip strip so the cards always cover the chips' skirts. */
+  .inputs-panel {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Cancel stays a centred pill above the line, matching Medication's discard. */
+  .inputs-card .discard-btn {
+    align-self: center;
   }
 
   @media (max-width: 1280px) {

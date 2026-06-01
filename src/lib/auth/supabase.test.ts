@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   signOutMock: vi.fn(),
   resetPasswordForEmailMock: vi.fn(),
   dbDeleteMock: vi.fn(),
+  dbCloseMock: vi.fn(),
   createClientMock: vi.fn(),
 }));
 
@@ -25,7 +26,10 @@ vi.mock('@supabase/supabase-js', () => {
 });
 
 vi.mock('$lib/db/schema', () => ({
-  db: { delete: (...args: unknown[]) => h.dbDeleteMock(...args) },
+  db: {
+    delete: (...args: unknown[]) => h.dbDeleteMock(...args),
+    close: (...args: unknown[]) => h.dbCloseMock(...args),
+  },
 }));
 
 import {
@@ -51,6 +55,7 @@ beforeEach(() => {
   h.resetPasswordForEmailMock.mockResolvedValue({ data: {}, error: null });
   h.dbDeleteMock.mockReset();
   h.dbDeleteMock.mockResolvedValue(undefined);
+  h.dbCloseMock.mockReset();
   localStorage.clear();
   sessionStorage.clear();
 });
@@ -160,7 +165,7 @@ describe('requestPasswordReset', () => {
 });
 
 describe('logoutAndClearLocalData', () => {
-  it('signs out locally, sets the wipe-on-boot sentinel, and clears local/session storage', async () => {
+  it('signs out locally, wipes IndexedDB inline, and clears local/session storage', async () => {
     localStorage.setItem('k', 'v');
     sessionStorage.setItem('k', 'v');
 
@@ -170,17 +175,30 @@ describe('logoutAndClearLocalData', () => {
     // would invalidate every other device's refresh token and surprise users
     // who expected the laptop logout to leave the phone PWA alone.
     expect(h.signOutMock).toHaveBeenCalledWith({ scope: 'local' });
-    // db.delete() is deferred to the boot guard (hooks.client.ts) — inline
-    // delete cannot complete while module-scoped liveQuery subscribers hold
-    // the database open, so it must NOT be called here.
-    expect(h.dbDeleteMock).not.toHaveBeenCalled();
+    // The DB is force-closed (to release liveQuery subscribers) then deleted
+    // inline, so the plaintext local tables are gone before the user can
+    // inspect them — not deferred to the next boot.
+    expect(h.dbCloseMock).toHaveBeenCalled();
+    expect(h.dbDeleteMock).toHaveBeenCalled();
     expect(localStorage.getItem('k')).toBeNull();
     expect(sessionStorage.getItem('k')).toBeNull();
-    // The sentinel must survive the storage clear so the next boot can act on it.
+    // On a successful inline wipe the boot-guard sentinel is cleared again —
+    // there's nothing left for the next boot to do.
+    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
+  });
+
+  it('leaves the boot-guard sentinel set when the inline delete is blocked', async () => {
+    // A second PWA tab can hold the connection open and block the delete. The
+    // sentinel must survive so hooks.client.ts retries the wipe on next boot.
+    h.dbDeleteMock.mockRejectedValueOnce(new Error('blocked'));
+
+    await logoutAndClearLocalData();
+
+    expect(h.dbCloseMock).toHaveBeenCalled();
     expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBe('1');
   });
 
-  it('still wipes local storage when the server signOut fails', async () => {
+  it('still wipes local storage and the DB when the server signOut fails', async () => {
     // Regression: if signOut threw (offline, server down, expired token), the
     // original implementation aborted local cleanup and the persisted session
     // key — plus everything else — stayed on disk after the user "logged out".
@@ -192,6 +210,7 @@ describe('logoutAndClearLocalData', () => {
 
     expect(localStorage.getItem('et.session.key')).toBeNull();
     expect(localStorage.getItem('et.salt')).toBeNull();
-    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBe('1');
+    expect(h.dbDeleteMock).toHaveBeenCalled();
+    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
   });
 });

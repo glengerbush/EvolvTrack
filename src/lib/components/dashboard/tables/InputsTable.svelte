@@ -526,77 +526,161 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   // overscan, and emit top/bottom spacer rows to preserve total height. This
   // keeps both entering edit mode and returning to view mode O(visible rows)
   // instead of O(all history).
+  // Variable-height windowing. Rows are not uniform — on mobile they become
+  // cards with empty fields hidden, so heights vary a lot. We keep a measured
+  // height per row (estimate until first seen) and cumulative prefix offsets so
+  // the visible window, spacer heights, and scroll position stay accurate at
+  // 1000+ rows. `prefix[i]` = summed height of rows [0, i); length n+1.
   const ROW_OVERSCAN = 8;
+  const DEFAULT_ROW_HEIGHT = 40;
   let tableEl: HTMLTableElement | undefined = $state();
-  let measuredRowHeight = $state(40);
   let firstVisibleIndex = $state(0);
   let lastVisibleIndex = $state(80);
+  let topSpacerHeight = $state(0);
+  let bottomSpacerHeight = $state(0);
+
+  // Plain (non-reactive) caches mutated imperatively; the $state above is what
+  // drives rendering. `measured[i]` marks rows whose real height we've seen.
+  let rowHeights: number[] = [];
+  let rowMeasured: boolean[] = [];
+  let prefix: number[] = [0];
+  let estimate = DEFAULT_ROW_HEIGHT;
 
   // A stable primitive: re-fires only when the count actually changes, unlike
   // `displayedRows` whose reference shifts on every keystroke.
   const displayedRowsLength = $derived(displayedRows.length);
 
+  function heightAt(i: number): number {
+    return rowMeasured[i] ? rowHeights[i] : estimate;
+  }
+
+  function rebuildPrefix() {
+    const n = rowHeights.length;
+    if (prefix.length !== n + 1) prefix = new Array(n + 1);
+    prefix[0] = 0;
+    for (let i = 0; i < n; i += 1) prefix[i + 1] = prefix[i] + heightAt(i);
+  }
+
+  function ensureLen(n: number) {
+    const old = rowHeights.length;
+    if (old === n) return;
+    rowHeights.length = n;
+    rowMeasured.length = n;
+    for (let i = old; i < n; i += 1) {
+      rowHeights[i] = estimate;
+      rowMeasured[i] = false;
+    }
+    rebuildPrefix();
+  }
+
+  // Largest index i in [0, n] with prefix[i] <= target (the row at that offset).
+  function indexAtOffset(target: number): number {
+    let lo = 0;
+    let hi = rowHeights.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (prefix[mid] <= target) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  function tbodyTop(): number {
+    const tbody = tableEl?.tBodies[0];
+    return (tbody ?? tableEl)?.getBoundingClientRect().top ?? 0;
+  }
+
   function recomputeVisibleRange() {
     if (!tableEl) return;
     const rowCount = displayedRows.length;
+    ensureLen(rowCount);
     if (rowCount === 0) {
       firstVisibleIndex = 0;
       lastVisibleIndex = 0;
+      topSpacerHeight = 0;
+      bottomSpacerHeight = 0;
       return;
     }
-    const rect = tableEl.getBoundingClientRect();
-    const viewportHeight = window.innerHeight;
-    const scrolledPast = Math.max(0, -rect.top);
-    const bottomFromTableTop = viewportHeight - rect.top;
-    const rowH = Math.max(measuredRowHeight, 1);
-    const nextFirst = Math.max(0, Math.floor(scrolledPast / rowH) - ROW_OVERSCAN);
-    const nextLast = Math.min(
-      rowCount - 1,
-      Math.max(nextFirst, Math.ceil(bottomFromTableTop / rowH) + ROW_OVERSCAN),
-    );
-    if (nextFirst !== firstVisibleIndex) firstVisibleIndex = nextFirst;
-    if (nextLast !== lastVisibleIndex) lastVisibleIndex = nextLast;
+    // Offsets are measured from the tbody's content top (= row 0's top), which
+    // already excludes the thead and accounts for the current top spacer.
+    const top = tbodyTop();
+    const scrolledPast = Math.max(0, -top);
+    const bottomFromTop = Math.max(0, window.innerHeight - top);
+
+    let nextFirst = indexAtOffset(scrolledPast) - ROW_OVERSCAN;
+    if (nextFirst < 0) nextFirst = 0;
+    let nextLast = indexAtOffset(bottomFromTop) + ROW_OVERSCAN;
+    if (nextLast > rowCount - 1) nextLast = rowCount - 1;
+    if (nextLast < nextFirst) nextLast = nextFirst;
+
+    firstVisibleIndex = nextFirst;
+    lastVisibleIndex = nextLast;
+    topSpacerHeight = prefix[nextFirst];
+    bottomSpacerHeight = Math.max(0, prefix[rowCount] - prefix[nextLast + 1]);
   }
 
-  // Average across every currently-rendered row (excluding spacers) so an
-  // unusually tall or short row doesn't poison the estimate. When the height
-  // does change, scroll-compensate so visible content stays in the same place.
-  function measureAndAdjustRowHeight() {
+  // Measure the rendered (non-spacer) rows and fold their real heights into the
+  // cache. If rows *above* the viewport top were re-measured (e.g. scrolling up
+  // into not-yet-seen rows, or a card↔table switch), the anchored row would
+  // shift, so we scroll-compensate by the offset delta to keep it put.
+  function measureRenderedRows() {
     if (!tableEl) return;
-    const sampleRows = tableEl.querySelectorAll<HTMLElement>('tbody tr:not(.virtual-spacer)');
-    if (sampleRows.length === 0) return;
+    const tbody = tableEl.tBodies[0];
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll<HTMLElement>('tr:not(.virtual-spacer)');
+    if (rows.length === 0) return;
+
+    const scrolledPast = Math.max(0, -tbody.getBoundingClientRect().top);
+    const anchorIndex = Math.min(indexAtOffset(scrolledPast), prefix.length - 1);
+    const anchorBefore = prefix[anchorIndex];
+
+    let changed = false;
     let total = 0;
     let count = 0;
-    for (const row of sampleRows) {
-      const h = row.getBoundingClientRect().height;
-      if (h > 0) {
-        total += h;
-        count += 1;
+    rows.forEach((el, i) => {
+      const idx = firstVisibleIndex + i;
+      if (idx < 0 || idx >= rowHeights.length) return;
+      const h = el.getBoundingClientRect().height;
+      if (h <= 0) return;
+      total += h;
+      count += 1;
+      if (!rowMeasured[idx] || Math.abs(rowHeights[idx] - h) > 0.5) {
+        rowHeights[idx] = h;
+        rowMeasured[idx] = true;
+        changed = true;
+      }
+    });
+
+    let estimateChanged = false;
+    if (count > 0) {
+      const nextEstimate = total / count;
+      if (Math.abs(nextEstimate - estimate) > 0.5) {
+        estimate = nextEstimate;
+        estimateChanged = true;
       }
     }
-    if (count === 0) return;
-    const nextHeight = total / count;
-    if (Math.abs(nextHeight - measuredRowHeight) < 2) return;
+    if (!changed && !estimateChanged) return;
 
-    const previousHeight = measuredRowHeight;
-    measuredRowHeight = nextHeight;
-
-    if (previousHeight > 0) {
-      const rect = tableEl.getBoundingClientRect();
-      const scrolledPast = Math.max(0, -rect.top);
-      if (scrolledPast > 0) {
-        const delta = scrolledPast * (nextHeight / previousHeight - 1);
-        if (Math.abs(delta) > 1) {
-          window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
-        }
-      }
-    }
+    rebuildPrefix();
+    const anchorAfter = prefix[anchorIndex];
+    const delta = anchorAfter - anchorBefore;
+    if (Math.abs(delta) > 0.5) window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+    recomputeVisibleRange();
   }
+
+  // Resize the cache and recompute when rows are added/removed.
+  $effect(() => {
+    displayedRowsLength;
+    if (!tableEl) return;
+    ensureLen(displayedRowsLength);
+    recomputeVisibleRange();
+  });
 
   $effect(() => {
     if (!tableEl) return;
     let scrollRaf = 0;
     let resizeRaf = 0;
+    let lastWidth = tableEl.getBoundingClientRect().width;
     const onScroll = () => {
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
@@ -608,12 +692,19 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
       if (resizeRaf) return;
       resizeRaf = requestAnimationFrame(() => {
         resizeRaf = 0;
-        measureAndAdjustRowHeight();
+        // A width change (viewport resize, card↔table switch) invalidates every
+        // cached height; drop them so rows re-measure as they scroll into view.
+        const width = tableEl?.getBoundingClientRect().width ?? lastWidth;
+        if (Math.abs(width - lastWidth) > 1) {
+          lastWidth = width;
+          rowMeasured.fill(false);
+          rebuildPrefix();
+        }
+        measureRenderedRows();
         recomputeVisibleRange();
       });
     };
-    // Fires when the table goes 0 → real size (hidden tab becomes active) so
-    // measurements taken while hidden don't leave the visible range stale.
+    // Also fires when the table goes 0 → real size (hidden tab becomes active).
     const tableObserver = new ResizeObserver(onResize);
     tableObserver.observe(tableEl);
     recomputeVisibleRange();
@@ -628,24 +719,18 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     };
   });
 
-  // Re-measure only on structural changes: mode toggle or row add/remove.
-  // Keystrokes inside a row do NOT trigger this, so typing won't cause the
-  // spacer heights to jump and yank focus away.
+  // Measure after the rendered window changes (range/mode/count). Keystrokes do
+  // NOT change these, so typing won't re-measure and yank focus/scroll.
   $effect(() => {
-    isEditing;
+    firstVisibleIndex;
+    lastVisibleIndex;
     displayedRowsLength;
+    isEditing;
     if (!tableEl) return;
-    queueMicrotask(() => {
-      measureAndAdjustRowHeight();
-      recomputeVisibleRange();
-    });
+    queueMicrotask(measureRenderedRows);
   });
 
   const visibleRows = $derived(displayedRows.slice(firstVisibleIndex, lastVisibleIndex + 1));
-  const topSpacerHeight = $derived(firstVisibleIndex * measuredRowHeight);
-  const bottomSpacerHeight = $derived(
-    Math.max(0, (displayedRows.length - 1 - lastVisibleIndex) * measuredRowHeight),
-  );
 
   function nextDraftRowDate(): IsoDate {
     const latestDraftDate = maxDateKey(tableRows.filter(isDraftRow).map((row) => row.date));
@@ -946,6 +1031,24 @@ function markRowsAsBaseline() {
 
   function isRowEditable(row: EditableInputRow): boolean {
     return isEditing || isDraftRow(row);
+  }
+
+  // For the ≤640px card layout: a read-only row hides its empty fields so sparse
+  // days collapse to just what was logged. `day`/`date` always show (they're the
+  // card's identity). Editable rows never hide cells — every input stays
+  // reachable. Mirrors the empty checks used by each column's render branch.
+  function isCellEmpty(row: HealthInputRow, key: ColumnKey): boolean {
+    switch (key) {
+      case 'day':
+      case 'date':
+        return false;
+      case 'symptoms':
+        return row.symptoms.length === 0;
+      case 'system':
+        return row.systemAmounts.length === 0 && row.system.trim() === '';
+      default:
+        return (row[key] ?? '').toString().trim() === '';
+    }
   }
 
   function requestSaveRows() {
@@ -1437,6 +1540,8 @@ function markRowsAsBaseline() {
             {#each activeColumns as column, colIndex (column.key)}
               <td
                 class={column.key}
+                data-label={column.label}
+                class:empty-cell={!isRowEditable(row) && isCellEmpty(row, column.key)}
                 class:col-indicator-left={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'left'}
                 class:col-indicator-right={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'right'}
               >
@@ -1859,6 +1964,8 @@ function markRowsAsBaseline() {
 
   .table-scroll {
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
   }
 
@@ -2052,9 +2159,9 @@ function markRowsAsBaseline() {
   }
 
   .due-action-btn {
-    border: 2px solid var(--cardBorder);
+    border: 2px solid var(--warning);
     background: color-mix(in oklab, var(--headerBg) 18%, white 82%);
-    color: var(--headerBg);
+    color: var(--warning);
     font-weight: 800;
     font-size: 0.9rem;
     line-height: 1;
@@ -2072,6 +2179,7 @@ function markRowsAsBaseline() {
   .due-action-btn.expanded {
     background: var(--headerBg);
     color: var(--headerText);
+    border: 2px solid var(--headerBg);
   }
 
   .due-action-panel {
@@ -2116,6 +2224,49 @@ function markRowsAsBaseline() {
     background: color-mix(in oklab, var(--danger) 10%, transparent 90%);
   }
 
+  /* ── Desktop (≥641px): the due-confirm badge sits against the card border ──
+   * On mobile each row is a card and this button floats in the card corner (see
+   * the ≤640px block); the dedicated column + zero-width header exist only to
+   * support that layout. On desktop the table is flat, so the column reserves no
+   * width — the badge is pushed left until it meets the card's border and lifted
+   * above everything (overlapping the leading cell's content is fine). The badge
+   * lands in the card padding, outside the table's content box, so the scroll
+   * viewport would normally clip it; the .table-scroll rule below extends the
+   * clip region left to cover it without moving the table or adding a gutter. */
+  @media (min-width: 641px) {
+    /* Extend the scroll viewport left into the card padding so the badge isn't
+     * clipped by overflow: the negative margin pulls the box left, the matching
+     * padding restores the table's position, and the width/​max-width reclaim
+     * keeps the right edge. Horizontal scrolling for wide tables still works. */
+    .table-scroll {
+      margin-left: -1rem;
+      padding-left: 1rem;
+      width: calc(100% + 1rem);
+      max-width: none;
+    }
+
+    .inputs-table col.col-due-action {
+      width: 0;
+    }
+
+    .inputs-table th.due-action-header,
+    .inputs-table td.due-action-cell {
+      width: 0;
+      padding: 0;
+      overflow: visible;
+    }
+
+    .inputs-table td.due-action-cell .due-action-wrap {
+      position: absolute;
+      /* Left of the table's content edge (one padding-width, plus the table's
+       * leading cell-spacing) so the badge sits flush against the card border. */
+      left: -0.9rem;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 10;
+    }
+  }
+
   tbody tr.row-skipped td:not(.due-action-cell) {
     color: var(--danger);
     text-decoration: line-through;
@@ -2157,6 +2308,184 @@ function markRowsAsBaseline() {
   @media (max-width: 1280px) {
     .inputs-table td {
       font-size: 0.95rem;
+    }
+  }
+
+  /* ── ≤640px: the inputs table becomes one card per day ──
+   * Same responsive-table CSS trick used in MedicationTab: keep the single
+   * <table> (so editing / virtualization / column logic are untouched) and
+   * re-flow it to blocks. `data-label` on each <td> supplies the field name via
+   * ::before; `.empty-cell` (set only on read-only rows) hides unlogged fields
+   * so sparse days collapse. The per-row height windowing already drops its
+   * cached heights on the width change, so it re-measures these taller cards. */
+  @media (max-width: 640px) {
+    .table-scroll {
+      overflow-x: visible;
+      max-width: none;
+    }
+
+    .inputs-table {
+      min-width: 0;
+    }
+
+    .inputs-table,
+    .inputs-table tbody {
+      display: block;
+    }
+
+    /* Column widths are meaningless once cells are block-level. */
+    .inputs-table colgroup {
+      display: none;
+    }
+
+    /* Keep the header in the DOM for screen readers, hide it visually. */
+    .inputs-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .inputs-table tbody tr {
+      /* Flex column (not block) so cells can be re-ordered: the date becomes the
+       * card's top line via `order`, which frees its empty right side for the
+       * due-confirm button (see td.date / td.due-action-cell below). */
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+      border-radius: 12px;
+      padding: 0.4rem 0.7rem 0.55rem;
+      margin-bottom: 0.6rem;
+      /* Opaque base: the row tint is semi-transparent (rgba ~0.14), so paint it
+       * over --surface like MedicationTab does, ready for a chip-strip skirt. */
+      background: var(--surface);
+    }
+
+    .inputs-table tbody tr.row-alt {
+      background: linear-gradient(var(--rowAlt), var(--rowAlt)), var(--surface);
+    }
+
+    .inputs-table tbody tr:last-child {
+      margin-bottom: 0;
+    }
+
+    /* Virtualization spacers stay pure height — no card chrome, no label. */
+    .inputs-table tbody tr.virtual-spacer {
+      display: block;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      background: none;
+    }
+
+    .inputs-table tbody tr.virtual-spacer td {
+      display: block;
+    }
+
+    .inputs-table tbody tr.virtual-spacer td::before {
+      content: none;
+    }
+
+    .inputs-table td {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.25rem 0.75rem;
+      text-align: right;
+      border: none;
+      border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 22%, transparent);
+      padding: 0.34rem 0;
+      overflow: visible;
+      white-space: normal;
+    }
+
+    .inputs-table td:last-child {
+      border-bottom: none;
+    }
+
+    .inputs-table td::before {
+      content: attr(data-label);
+      flex: 0 0 auto;
+      text-align: left;
+      font-weight: 600;
+      font-variant: small-caps;
+      color: color-mix(in oklab, currentColor 60%, transparent);
+    }
+
+    /* Sparse days collapse: read-only rows hide their unlogged fields. */
+    .inputs-table td.empty-cell {
+      display: none;
+    }
+
+    /* The date is the card's top line / title. order:-1 lifts it above the Day
+     * row so its empty right side hosts the due-confirm button; padding-right
+     * reserves room so a long locale date never runs under that button. */
+    .inputs-table td.date {
+      order: -1;
+      justify-content: flex-start;
+      border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
+      padding-top: 0.1rem;
+      padding-right: 2.2rem;
+      margin-bottom: 0.15rem;
+      font-weight: 700;
+      font-size: 1.05rem;
+    }
+
+    .inputs-table td.date::before {
+      content: none;
+    }
+
+    /* Due-confirm action floats in the card's top-right; absent ones vanish. */
+    .inputs-table td.due-action-cell {
+      position: absolute;
+      top: 0.4rem;
+      right: 0.7rem;
+      width: auto;
+      padding: 0;
+      border: none;
+    }
+
+    .inputs-table td.due-action-cell:not(:has(.due-action-wrap)) {
+      display: none;
+    }
+
+    .inputs-table td.due-action-cell::before {
+      content: none;
+    }
+
+    /* Anchor the Taken/Skip popover to the card edge, not off-screen right. */
+    .inputs-table td.due-action-cell .due-action-panel {
+      left: auto;
+      right: 0;
+    }
+
+    /* Inputs/pickers share the row with their label rather than filling it. */
+    .inputs-table td :global(input),
+    .inputs-table td :global(select) {
+      width: auto;
+      flex: 1 1 0;
+      min-width: 0;
+      max-width: 62%;
+    }
+
+    /* Richer value blocks wrap to full width under their label. */
+    .inputs-table td .dose-entry,
+    .inputs-table td .system-stack,
+    .inputs-table td .symptoms-cell {
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+
+    .inputs-table td .system-stack,
+    .inputs-table td .symptoms-cell {
+      align-items: flex-end;
     }
   }
 </style>

@@ -4,6 +4,7 @@
   import { formatRelativeTime } from '$lib/stores/syncStore';
   import { syncNow } from '$lib/sync/sync-orchestrator';
   import { displayUserIdentifier } from '$lib/auth/supabase';
+  import { APP_VERSION } from '$lib/version';
   import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
 
   let open = $state(false);
@@ -114,7 +115,13 @@
 
         {#if indicator.encryption === 'e2ee'}
           <dt>Session</dt>
-          <dd>{indicator.kind === 'locked' ? 'Locked' : 'Unlocked for this session'}</dd>
+          <dd>
+            {#if indicator.kind === 'locked'}
+              Locked
+            {:else}
+              Unlocked
+            {/if}
+          </dd>
         {/if}
 
         {#if indicator.kind === 'no-license'}
@@ -164,6 +171,8 @@
           {busy ? 'Syncing…' : 'Sync now'}
         </button>
       </footer>
+
+      <p class="version">EvolvTrack v{APP_VERSION}</p>
     </div>
   {/if}
 </div>
@@ -274,4 +283,40 @@
   }
   .sync-btn:disabled { opacity: 0.5; cursor: default; }
   .sync-btn:hover:not(:disabled) { background: color-mix(in oklab, currentColor 6%, transparent); }
+
+  .version {
+    margin: 0.6rem 0 0;
+    text-align: center;
+    font-size: 0.72rem;
+    color: color-mix(in oklab, currentColor 45%, transparent);
+  }
+
+  /* On phones the pill sits mid-bar (the action button is to its right), so the
+   * right-anchored popover hung off the left edge of the screen. Pin it to the
+   * viewport instead — fixed, full width minus a small margin, just below the
+   * sticky top bar — so it's always fully on-screen. */
+  @media (max-width: 480px) {
+    .popover {
+      position: fixed;
+      top: 3.9rem;
+      left: 0.75rem;
+      right: 0.75rem;
+      width: auto;
+      max-width: none;
+    }
+  }
+
+  /* Very narrow phones (≤400px): trim the pill so the top bar's logo, pill and
+   * action button all fit on one row down to a 320px iPhone SE. */
+  @media (max-width: 400px) {
+    .pill {
+      font-size: 0.7rem;
+      padding: 0.2rem 0.5rem 0.2rem 0.45rem;
+      gap: 0.32rem;
+    }
+    .dot {
+      width: 0.5rem;
+      height: 0.5rem;
+    }
+  }
 </style>
