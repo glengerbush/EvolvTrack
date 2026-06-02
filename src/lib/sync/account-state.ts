@@ -53,16 +53,55 @@ export async function getAuthenticatedUserId(): Promise<string | null> {
  * whether to bail out of the cycle.
  */
 export async function fetchRemoteSyncMode(): Promise<SyncMode | null> {
+  const account = await fetchRemoteSyncAccount();
+  return account?.syncMode ?? null;
+}
+
+export type RemoteSyncAccount = {
+  syncMode: SyncMode;
+  /** Present only while a migration is in flight (any `migrating_*` /
+   * `rotating_*` mode). Reconstructed from the `sync_accounts` columns so a
+   * device that logs in mid-migration learns one is underway and who owns it. */
+  migration?: E2EEMigrationState;
+};
+
+/**
+ * Read the server's canonical sync state for the current user — the mode plus
+ * the in-flight migration record, if any. Returns null when there's no
+ * `sync_accounts` row yet. Throws on transport/auth errors.
+ */
+export async function fetchRemoteSyncAccount(): Promise<RemoteSyncAccount | null> {
   const user = await requireAuthenticatedUser();
   const { data, error } = await supabase
     .from('sync_accounts')
-    .select('sync_mode')
+    .select(
+      'sync_mode, e2ee_migration_id, e2ee_migration_direction, migration_owner_device_id, migration_started_at, migration_updated_at, migration_completed_at, plaintext_high_water_mark, migration_records_total, migration_records_converted',
+    )
     .eq('user_id', user.id)
     .maybeSingle();
   if (error) throw error;
   if (!data) return null;
+
   const mode = data.sync_mode as string;
-  return SYNC_MODES.has(mode as SyncMode) ? (mode as SyncMode) : null;
+  if (!SYNC_MODES.has(mode as SyncMode)) return null;
+
+  const startedAt = (data.migration_started_at as string | null) ?? undefined;
+  const updatedAt = (data.migration_updated_at as string | null) ?? undefined;
+  const migration: E2EEMigrationState | undefined = data.e2ee_migration_id
+    ? {
+        id: data.e2ee_migration_id as string,
+        direction: (data.e2ee_migration_direction as E2EEMigrationState['direction']) ?? undefined,
+        ownerDeviceId: (data.migration_owner_device_id as string | null) ?? '',
+        startedAt: startedAt ?? updatedAt ?? nowIso(),
+        updatedAt: updatedAt ?? startedAt ?? nowIso(),
+        completedAt: (data.migration_completed_at as string | null) ?? undefined,
+        plaintextHighWaterMark: (data.plaintext_high_water_mark as string | null) ?? undefined,
+        recordsTotal: (data.migration_records_total as number | null) ?? undefined,
+        recordsConverted: (data.migration_records_converted as number | null) ?? undefined,
+      }
+    : undefined;
+
+  return { syncMode: mode as SyncMode, migration };
 }
 
 export async function upsertRemoteSyncAccount(
@@ -82,6 +121,8 @@ export async function upsertRemoteSyncAccount(
     migration_updated_at: migration?.updatedAt ?? null,
     migration_completed_at: migration?.completedAt ?? null,
     plaintext_high_water_mark: migration?.plaintextHighWaterMark ?? null,
+    migration_records_total: migration?.recordsTotal ?? null,
+    migration_records_converted: migration?.recordsConverted ?? null,
     updated_at: timestamp,
   }, { onConflict: 'user_id' });
 

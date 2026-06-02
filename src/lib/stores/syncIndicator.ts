@@ -67,8 +67,19 @@ export type SyncIndicator = {
     error?: string;
     encryptedCount?: number;
     plaintextCount?: number;
+    /** Live backfill progress: records converted / total, and the rounded
+     * percent (null when no total has been reported yet). */
+    recordsConverted?: number;
+    recordsTotal?: number;
+    percent: number | null;
   };
 };
+
+/** Rounded percent for a converted/total pair, or null when not yet known. */
+function progressPercent(converted?: number, total?: number): number | null {
+  if (!total || total <= 0 || converted == null) return null;
+  return Math.min(100, Math.round((converted / total) * 100));
+}
 
 function encryptionOf(syncMode: SyncMode): SyncIndicator['encryption'] {
   switch (syncMode) {
@@ -114,7 +125,7 @@ function pickKind(args: {
   return 'synced';
 }
 
-function describe(kind: SyncKind, outbox: number, syncMode: SyncMode): { label: string; description: string; tone: SyncIndicator['tone'] } {
+function describe(kind: SyncKind, outbox: number, syncMode: SyncMode, percent: number | null = null): { label: string; description: string; tone: SyncIndicator['tone'] } {
   switch (kind) {
     case 'auth-loading':
       return { label: 'Loading', description: 'Checking your sign-in…', tone: 'neutral' };
@@ -134,8 +145,9 @@ function describe(kind: SyncKind, outbox: number, syncMode: SyncMode): { label: 
       return { label: 'Migration paused', description: 'An encryption migration was interrupted. Enter your passphrase to resume.', tone: 'warn' };
     case 'migrating': {
       const enabling = syncMode === 'migrating_to_e2ee';
+      const pct = percent != null ? ` ${percent}%` : '';
       return {
-        label: enabling ? 'Encrypting' : 'Decrypting',
+        label: `${enabling ? 'Encrypting' : 'Decrypting'}${pct}`,
         description: enabling ? 'Encrypting your data for end-to-end encryption…' : 'Switching back to plaintext sync…',
         tone: 'progress',
       };
@@ -186,6 +198,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
     const migrationState = $profile?.e2eeMigration;
     const isMigrating = syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain';
     const migrationPaused = isMigrating && !!migrationState?.lastError;
+    const percent = progressPercent(migrationState?.recordsConverted, migrationState?.recordsTotal);
 
     const kind = pickKind({
       auth: $auth,
@@ -199,7 +212,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
       licenseActive: $licenseActive,
     });
 
-    const { label, description, tone } = describe(kind, $outboxCount, syncMode);
+    const { label, description, tone } = describe(kind, $outboxCount, syncMode, percent);
 
     return {
       kind,
@@ -222,6 +235,9 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
             error: migrationState.lastError,
             encryptedCount: migrationState.encryptedEventCount,
             plaintextCount: migrationState.plaintextEventCount,
+            recordsConverted: migrationState.recordsConverted,
+            recordsTotal: migrationState.recordsTotal,
+            percent,
           }
         : undefined,
     } satisfies SyncIndicator;

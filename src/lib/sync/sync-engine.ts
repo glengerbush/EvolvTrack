@@ -390,6 +390,61 @@ export async function deleteRemoteEncryptedChanges(ids?: string[]) {
   return { deleted };
 }
 
+/**
+ * Delete plaintext sync rows for the current user. Mirrors
+ * `deleteRemoteEncryptedChanges`: with `ids` it deletes only those rows, with
+ * no argument it clears the whole `sync_changes_plain` table for the user.
+ *
+ * Called when an enable migration completes — once the encrypted copies are
+ * safely on the server, the plaintext originals must go, or "E2EE on" would
+ * still leave readable PHI server-side.
+ */
+export async function deleteRemotePlainChanges(ids?: string[]) {
+  const user = await requireAuthenticatedUser();
+  const deleted = ids?.length ?? 0;
+  let query = supabase.from('sync_changes_plain').delete().eq('user_id', user.id);
+
+  if (ids?.length) {
+    query = query.in('id', ids);
+  }
+
+  const { error } = await query;
+  if (error) throw error;
+  lastSynced.record();
+  return { deleted };
+}
+
+/**
+ * Pull *every* remote row (plain, plus encrypted when a key is available) and
+ * apply it locally last-writer-wins, ignoring the cursor.
+ *
+ * This is the recovery primitive for an interrupted enable migration: before
+ * we re-encrypt local records and then delete the plaintext table, we must
+ * absorb anything that exists only on the server — e.g. rows another device
+ * pushed to `sync_changes_plain`, or encrypted rows a prior partial run of
+ * this migration already pushed. Without this, finishing the migration (which
+ * deletes the plaintext rows) could drop server-only data.
+ *
+ * Deliberately ungated: the steady-state `pullAndApply` pauses during a
+ * migration, but this is invoked *by* the migration to drive it forward.
+ */
+export async function pullSnapshotForMigration(
+  sessionKey: string | null,
+): Promise<{ fetched: number; applied: number }> {
+  const user = await requireAuthenticatedUser();
+
+  const events = await pullPlain(user.id, null);
+  if (sessionKey) {
+    events.push(...(await pullEncrypted(user.id, null, sessionKey)));
+  }
+
+  let applied = 0;
+  for (const event of events) {
+    if (await applyRemoteChange(event)) applied += 1;
+  }
+  return { fetched: events.length, applied };
+}
+
 export async function fetchRemoteEncryptedChanges(): Promise<EncryptedSyncChange[]> {
   const user = await requireAuthenticatedUser();
   const { data, error } = await supabase

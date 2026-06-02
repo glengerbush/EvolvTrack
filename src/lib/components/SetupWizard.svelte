@@ -27,6 +27,10 @@
 
   // Import step
   let importStatus = $state('');
+  // Set when the E2EE enable above didn't finish (paused). Importing while a
+  // migration is mid-flight would queue rows that can't sync until it
+  // completes, so the import step is gated until the user resumes from Settings.
+  let migrationPaused = $state(false);
   let injectionsMissingMed = $state<string[]>([]);
   let prescriptionsMissingMed = $state<string[]>([]);
   let pickedMedication = $state<Medication | ''>('');
@@ -107,6 +111,7 @@
     try {
       const result = await startE2EEMigration(passphrase);
       if (result.recoveryCode) recoveryCode = result.recoveryCode;
+      migrationPaused = !result.completed;
       if (result.completed) {
         e2eeStatus = `Encryption enabled. ${result.encryptedEventCount} local record${result.encryptedEventCount === 1 ? '' : 's'} encrypted.`;
       } else {
@@ -346,16 +351,26 @@
           file (CSV, JSON, ODS, or XLSX).
         </p>
 
-        <label class="file-picker">
+        <label
+          class="file-picker"
+          title={migrationPaused
+            ? 'Import is paused until encryption setup finishes. Resume it in Settings first.'
+            : undefined}
+        >
           <input
             type="file"
             accept=".json,.csv,.tsv,.txt,.ods,.xlsx,application/json,text/csv,application/vnd.oasis.opendocument.spreadsheet,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            disabled={busy}
+            disabled={busy || migrationPaused}
             onchange={handleImportFile}
           />
           <span>{busy ? 'Importing…' : 'Choose file'}</span>
         </label>
 
+        {#if migrationPaused}
+          <p class="status" role="status">
+            Import is paused until encryption setup finishes. You can resume it from Settings.
+          </p>
+        {/if}
         {#if importStatus}<p class="status" role="status">{importStatus}</p>{/if}
       </div>
       <footer class="wizard-footer">

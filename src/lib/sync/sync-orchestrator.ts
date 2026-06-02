@@ -13,7 +13,8 @@
  */
 import { get } from 'svelte/store';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
-import { fetchRemoteSyncMode, getAuthenticatedUserId } from '$lib/sync/account-state';
+import { autoResumeMigration } from '$lib/sync/e2ee-migration';
+import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
 import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
 import { fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
@@ -29,6 +30,8 @@ import {
   lastSyncError,
   lastSynced,
   licenseActive,
+  migrationResumePending,
+  migrationTakeoverAvailable,
   syncStatus,
 } from '$lib/stores/syncStore';
 
@@ -88,22 +91,44 @@ function isEncryptedMode(mode: SyncMode): boolean {
  * If the server's `sync_accounts.sync_mode` disagrees with this device's
  * local profile in the privacy-sensitive direction (server: encrypted,
  * local: plain), flip the device to match. Also caches the remote wrapped-
- * key bundle so the unlock modal has something to work with. The pull cursor
- * is reset because it points into the old table's `inserted_at` sequence.
+ * key bundle so the unlock modal has something to work with, and carries over
+ * the in-flight migration record (so a fresh device knows a migration is
+ * underway and who owns it — the input to the take-over banner). The pull
+ * cursor is reset because it points into the old table's `inserted_at`
+ * sequence.
  *
- * Deliberately one-way for now: the encrypted→plain transition is gated by
- * the explicit `startE2EEDisableMigration` flow on the device that owns the
- * change, and forcing a remote downgrade here would risk losing in-flight
- * encrypted local edits.
+ * The plain→encrypted flip is one-way: the encrypted→plain transition is gated
+ * by the explicit `startE2EEDisableMigration` flow on the owning device, and
+ * forcing a remote downgrade here would risk losing in-flight encrypted edits.
  */
 async function reconcileSyncMode(): Promise<void> {
-  const remoteMode = await fetchRemoteSyncMode();
-  if (!remoteMode) return;
-  if (!isEncryptedMode(remoteMode)) return;
+  const remote = await fetchRemoteSyncAccount();
+  if (!remote) return;
+  if (!isEncryptedMode(remote.syncMode)) return;
 
   const profile = await getProfile();
   const localMode = getProfileSyncMode(profile);
-  if (isEncryptedMode(localMode)) return;
+  const localMigration = profile?.e2eeMigration;
+
+  if (isEncryptedMode(localMode)) {
+    // Already encrypted/migrating locally — the bundle is cached and the mode
+    // is right. Only keep migration *ownership* convergent: if another device
+    // has taken the migration over (different owner, at least as recent), adopt
+    // that here so this device stops believing it still owns it. Avoids two
+    // devices both trying to drive the same migration forward.
+    if (
+      remote.migration &&
+      remote.migration.ownerDeviceId !== localMigration?.ownerDeviceId &&
+      (!localMigration || remote.migration.updatedAt >= localMigration.updatedAt)
+    ) {
+      await setLocalProfileSyncState({
+        syncMode: remote.syncMode,
+        passphraseEnabled: true,
+        e2eeMigration: remote.migration,
+      });
+    }
+    return;
+  }
 
   // Make sure the wrapped-key bundle is available locally so UnlockSessionModal
   // can derive the DEK from the user's passphrase. Best-effort: if the fetch
@@ -120,8 +145,75 @@ async function reconcileSyncMode(): Promise<void> {
     }
   }
 
-  await setLocalProfileSyncState({ syncMode: remoteMode, passphraseEnabled: true });
+  await setLocalProfileSyncState({
+    syncMode: remote.syncMode,
+    passphraseEnabled: true,
+    e2eeMigration: remote.migration,
+  });
   clearPullCursor();
+}
+
+/**
+ * Drive an interrupted E2EE migration on this device toward completion before
+ * the steady-state pull/push (which is paused for the duration of a migration).
+ *
+ * Returns `'halt'` when this cycle should stop early — either the migration is
+ * waiting on the user's passphrase, or a resume attempt failed and there's
+ * nothing more to do until the next trigger. Returns `'continue'` when there's
+ * no migration to resume, or one just finished and the cycle can proceed to a
+ * normal sync.
+ */
+async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
+  const resume = await autoResumeMigration();
+
+  if (resume.status === 'awaiting-takeover') {
+    // A migration owned by another device. Don't drive it; offer the user a
+    // "take over on this device" banner instead. Pull/push are gated during a
+    // migration anyway, so there's nothing else to do this cycle.
+    migrationTakeoverAvailable.set({
+      direction: resume.direction,
+      ownerDeviceId: resume.ownerDeviceId,
+      recordsConverted: resume.recordsConverted,
+      recordsTotal: resume.recordsTotal,
+      updatedAt: resume.updatedAt,
+    });
+    migrationResumePending.set(null);
+    syncStatus.set('idle');
+    return 'halt';
+  }
+
+  migrationTakeoverAvailable.set(null);
+
+  if (resume.status === 'needs-passphrase') {
+    // Locked mid-migration: the orchestrator can't finish it unattended. Flag
+    // the UI to collect the passphrase; pull/push are gated during a migration
+    // anyway, so there's nothing else to do this cycle.
+    migrationResumePending.set(resume.direction);
+    syncStatus.set('idle');
+    return 'halt';
+  }
+
+  migrationResumePending.set(null);
+
+  if (resume.status === 'paused') {
+    // Resume ran with the cached key but didn't complete (e.g. a network blip
+    // during the push). Surface it; the next trigger retries from where it
+    // left off. Still mid-migration, so don't fall through to normal sync.
+    const message = resume.result.error ?? 'Encryption migration could not be resumed.';
+    lastSyncError.set(message);
+    if (looksLikeNetworkError(message) || browserSaysOffline()) {
+      connectivity.set('offline');
+      syncStatus.set('idle');
+    } else {
+      connectivity.set('online');
+      syncStatus.set('error');
+    }
+    return 'halt';
+  }
+
+  // 'idle' (nothing to resume) or 'resumed' (now in a steady-state mode): let
+  // the cycle continue into the normal pull/push.
+  return 'continue';
 }
 
 export function createSyncOrchestrator(): SyncOrchestrator {
@@ -181,6 +273,11 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // elsewhere. If reconciliation throws, we surface the failure rather
       // than proceed on stale assumptions.
       await reconcileSyncMode();
+
+      // Finish (or hand off) an interrupted migration before steady-state sync.
+      // A crash/quit mid-migration leaves this device paused in a `migrating_*`
+      // mode; this is what un-sticks it.
+      if ((await resumeMigrationIfNeeded()) === 'halt') return;
 
       syncStatus.set('syncing');
       // Pull first so local LWW-merges remote state (and reconciles the

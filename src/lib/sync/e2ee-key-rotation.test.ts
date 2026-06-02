@@ -115,7 +115,9 @@ vi.mock('$lib/sync/sync-engine', () => ({
   pushEncryptedChanges: (...args: unknown[]) => pushEncryptedChangesMock(...args),
   pushPlainChanges: vi.fn(async () => ({ pushed: 0 })),
   deleteRemoteEncryptedChanges: (...args: unknown[]) => deleteRemoteEncryptedChangesMock(...args),
+  deleteRemotePlainChanges: vi.fn(async () => ({ deleted: 0 })),
   fetchRemoteEncryptedChanges: vi.fn(async () => []),
+  pullSnapshotForMigration: vi.fn(async () => ({ fetched: 0, applied: 0 })),
 }));
 
 import {

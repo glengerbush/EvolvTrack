@@ -113,21 +113,27 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
 const pushEncryptedChangesMock = vi.fn(async (..._args: unknown[]) => ({ pushed: 0 }));
 const pushPlainChangesMock = vi.fn(async (..._args: unknown[]) => ({ pushed: 0 }));
 const deleteRemoteEncryptedChangesMock = vi.fn(async (..._args: unknown[]) => ({ deleted: 0 }));
+const deleteRemotePlainChangesMock = vi.fn(async (..._args: unknown[]) => ({ deleted: 0 }));
 const fetchRemoteEncryptedChangesMock = vi.fn(async (..._args: unknown[]): Promise<unknown[]> => []);
+const pullSnapshotForMigrationMock = vi.fn(async (..._args: unknown[]) => ({ fetched: 0, applied: 0 }));
 
 vi.mock('$lib/sync/sync-engine', () => ({
   pushEncryptedChanges: (...args: unknown[]) => pushEncryptedChangesMock(...args),
   pushPlainChanges: (...args: unknown[]) => pushPlainChangesMock(...args),
   deleteRemoteEncryptedChanges: (...args: unknown[]) => deleteRemoteEncryptedChangesMock(...args),
+  deleteRemotePlainChanges: (...args: unknown[]) => deleteRemotePlainChangesMock(...args),
   fetchRemoteEncryptedChanges: (...args: unknown[]) => fetchRemoteEncryptedChangesMock(...args),
+  pullSnapshotForMigration: (...args: unknown[]) => pullSnapshotForMigrationMock(...args),
 }));
 
 // Imports MUST come after vi.mock so the mocks are applied.
 import {
+  autoResumeMigration,
   resumeE2EEDisableMigration,
   resumeE2EEMigration,
   startE2EEDisableMigration,
   startE2EEMigration,
+  takeOverMigration,
 } from './e2ee-migration';
 import { db } from '$lib/db/schema';
 import {
@@ -182,8 +188,12 @@ beforeEach(() => {
   pushPlainChangesMock.mockResolvedValue({ pushed: 0 });
   deleteRemoteEncryptedChangesMock.mockClear();
   deleteRemoteEncryptedChangesMock.mockResolvedValue({ deleted: 0 });
+  deleteRemotePlainChangesMock.mockClear();
+  deleteRemotePlainChangesMock.mockResolvedValue({ deleted: 0 });
   fetchRemoteEncryptedChangesMock.mockClear();
   fetchRemoteEncryptedChangesMock.mockResolvedValue([]);
+  pullSnapshotForMigrationMock.mockClear();
+  pullSnapshotForMigrationMock.mockResolvedValue({ fetched: 0, applied: 0 });
   vi.mocked(encryptRecord).mockClear();
   vi.mocked(decryptRecord).mockClear();
   vi.mocked(generateDek).mockClear();
@@ -288,6 +298,33 @@ describe('startE2EEMigration — happy path from plain', () => {
     const modes = state.upsertAccountCalls.map((c) => c.mode);
     expect(modes[0]).toBe('migrating_to_e2ee');
     expect(modes[modes.length - 1]).toBe('e2ee');
+  });
+
+  it('pulls a remote snapshot under the DEK before re-encrypting', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    await startE2EEMigration('pw');
+    // The snapshot pull absorbs server-only rows so the plaintext teardown
+    // below can't lose data. It must run under the minted DEK.
+    expect(pullSnapshotForMigrationMock).toHaveBeenCalledWith('DEK_BYTES');
+  });
+
+  it('deletes the remote plaintext rows once the encrypted copies are pushed', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    await startE2EEMigration('pw');
+    // Enabling E2EE must not leave readable PHI in sync_changes_plain.
+    expect(deleteRemotePlainChangesMock).toHaveBeenCalled();
+  });
+
+  it('does not delete plaintext when the encrypted push fails (stays paused)', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    pushEncryptedChangesMock.mockRejectedValueOnce(new Error('network down'));
+
+    const result = await startE2EEMigration('pw');
+
+    expect(result.completed).toBe(false);
+    // Deleting plaintext before the encrypted copies are safely on the server
+    // would be data loss — finish() is never reached on a failed push.
+    expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
   });
 
   it('wipes any residual encrypted state from a prior interrupted attempt before minting', async () => {
@@ -511,5 +548,148 @@ describe('resumeE2EEDisableMigration', () => {
   it('throws when no disable-migration is active', async () => {
     state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
     await expect(resumeE2EEDisableMigration('pw')).rejects.toThrow(/No E2EE disable migration/i);
+  });
+});
+
+describe('autoResumeMigration — crash recovery', () => {
+  const ownedMigration = (direction: 'enable' | 'disable' | 'rotate') => ({
+    id: 'mig-x',
+    direction,
+    ownerDeviceId: 'device-1', // matches the getDeviceId mock
+    startedAt: '2026-05-01T00:00:00.000Z',
+    updatedAt: '2026-05-01T00:00:00.000Z',
+  });
+
+  it('is idle in a steady-state mode (nothing to resume)', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    expect(await autoResumeMigration()).toEqual({ status: 'idle' });
+  });
+
+  it('offers a take-over when the migration is owned by another device', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: { ...ownedMigration('enable'), ownerDeviceId: 'some-other-device' },
+    } as ProfileSettings;
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+    expect(await autoResumeMigration()).toMatchObject({
+      status: 'awaiting-takeover',
+      direction: 'enable',
+      ownerDeviceId: 'some-other-device',
+    });
+  });
+
+  it('reports progress + heartbeat with the take-over offer', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        ...ownedMigration('enable'),
+        ownerDeviceId: 'some-other-device',
+        recordsConverted: 3,
+        recordsTotal: 10,
+        updatedAt: '2026-05-01T00:00:05.000Z',
+      },
+    } as ProfileSettings;
+
+    expect(await autoResumeMigration()).toMatchObject({
+      status: 'awaiting-takeover',
+      recordsConverted: 3,
+      recordsTotal: 10,
+      updatedAt: '2026-05-01T00:00:05.000Z',
+    });
+  });
+
+  it('needs the passphrase when the session is locked mid-migration', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: ownedMigration('enable'),
+    } as ProfileSettings;
+    vi.mocked(getSessionKey).mockReturnValue(null);
+
+    expect(await autoResumeMigration()).toEqual({
+      status: 'needs-passphrase',
+      direction: 'enable',
+    });
+  });
+
+  it('resumes an enable migration to completion with the cached DEK', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: ownedMigration('enable'),
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+
+    const outcome = await autoResumeMigration();
+
+    expect(outcome.status).toBe('resumed');
+    expect(outcome).toMatchObject({ result: { completed: true, syncMode: 'e2ee' } });
+    // Recovery completed the privacy-critical teardown.
+    expect(deleteRemotePlainChangesMock).toHaveBeenCalled();
+    // No fresh key/code minted on a resume.
+    expect(generateDek).not.toHaveBeenCalled();
+  });
+
+  it('resumes a disable migration to plain with the cached DEK', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_plain',
+      e2eeMigration: ownedMigration('disable'),
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+
+    const outcome = await autoResumeMigration();
+
+    expect(outcome.status).toBe('resumed');
+    expect(outcome).toMatchObject({ result: { completed: true, syncMode: 'plain' } });
+  });
+
+  it('reports paused (not resumed) when the resume attempt fails', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: ownedMigration('enable'),
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+    pushEncryptedChangesMock.mockRejectedValueOnce(new Error('network down'));
+
+    const outcome = await autoResumeMigration();
+
+    expect(outcome.status).toBe('paused');
+    expect(outcome).toMatchObject({ result: { completed: false, error: 'network down' } });
+  });
+});
+
+describe('takeOverMigration', () => {
+  it('stamps this device as owner locally and on the server', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        id: 'mig-x',
+        direction: 'enable',
+        ownerDeviceId: 'some-other-device',
+        startedAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    } as ProfileSettings;
+
+    await takeOverMigration();
+
+    const saved = state.saveProfileCalls.at(-1);
+    expect(saved?.e2eeMigration?.ownerDeviceId).toBe('device-1'); // the getDeviceId mock
+    const account = state.upsertAccountCalls.at(-1);
+    expect(account?.mode).toBe('migrating_to_e2ee');
+    expect(account?.migration?.ownerDeviceId).toBe('device-1');
+  });
+
+  it('throws when there is no in-progress migration to take over', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    await expect(takeOverMigration()).rejects.toThrow(/no in-progress migration/i);
   });
 });

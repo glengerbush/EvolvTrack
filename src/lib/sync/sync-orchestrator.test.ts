@@ -7,7 +7,8 @@ const h = vi.hoisted(() => {
   const pushImpl = vi.fn();
   const getUserIdImpl = vi.fn();
   const wizardPendingImpl = vi.fn();
-  const fetchRemoteSyncModeImpl = vi.fn();
+  const fetchRemoteSyncAccountImpl = vi.fn();
+  const autoResumeMigrationImpl = vi.fn();
   const getProfileImpl = vi.fn();
   const setLocalSyncStateImpl = vi.fn();
   const getLocalWrappedKeysImpl = vi.fn();
@@ -31,7 +32,8 @@ const h = vi.hoisted(() => {
     pushImpl,
     getUserIdImpl,
     wizardPendingImpl,
-    fetchRemoteSyncModeImpl,
+    fetchRemoteSyncAccountImpl,
+    autoResumeMigrationImpl,
     getProfileImpl,
     setLocalSyncStateImpl,
     getLocalWrappedKeysImpl,
@@ -57,7 +59,11 @@ vi.mock('$lib/sync/sync-engine', () => ({
 
 vi.mock('$lib/sync/account-state', () => ({
   getAuthenticatedUserId: () => h.getUserIdImpl(),
-  fetchRemoteSyncMode: () => h.fetchRemoteSyncModeImpl(),
+  fetchRemoteSyncAccount: () => h.fetchRemoteSyncAccountImpl(),
+}));
+
+vi.mock('$lib/sync/e2ee-migration', () => ({
+  autoResumeMigration: () => h.autoResumeMigrationImpl(),
 }));
 
 vi.mock('$lib/domain/repo', () => ({
@@ -100,16 +106,24 @@ vi.mock('$lib/stores/setupWizardStore', () => ({
   isSetupWizardPending: () => h.wizardPendingImpl(),
 }));
 
-import { connectivity, lastSynced, syncStatus } from '$lib/stores/syncStore';
+import {
+  connectivity,
+  lastSyncError,
+  lastSynced,
+  migrationResumePending,
+  migrationTakeoverAvailable,
+  syncStatus,
+} from '$lib/stores/syncStore';
 import {
   SYNC_DEBOUNCE_MS,
   createSyncOrchestrator,
   startSyncOrchestrator,
 } from './sync-orchestrator';
 
-/** Flush a handful of microtask turns (the cycle awaits a couple of promises). */
+/** Flush a handful of microtask turns (the cycle awaits several promises:
+ *  auth, license, reconcile, the migration-resume check, then pull). */
 async function flush() {
-  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
 }
 
 function setOnline(online: boolean) {
@@ -122,7 +136,8 @@ beforeEach(() => {
   h.pushImpl.mockReset().mockResolvedValue({ pushed: 0 });
   h.getUserIdImpl.mockReset().mockResolvedValue('user-1');
   h.wizardPendingImpl.mockReset().mockReturnValue(false);
-  h.fetchRemoteSyncModeImpl.mockReset().mockResolvedValue(null);
+  h.fetchRemoteSyncAccountImpl.mockReset().mockResolvedValue(null);
+  h.autoResumeMigrationImpl.mockReset().mockResolvedValue({ status: 'idle' });
   h.getProfileImpl.mockReset().mockResolvedValue(undefined);
   h.setLocalSyncStateImpl.mockReset().mockResolvedValue(undefined);
   h.getLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
@@ -140,6 +155,9 @@ beforeEach(() => {
   setOnline(true);
   syncStatus.set('idle');
   connectivity.set('connecting');
+  lastSyncError.set(null);
+  migrationResumePending.set(null);
+  migrationTakeoverAvailable.set(null);
 });
 
 afterEach(() => {
@@ -243,7 +261,7 @@ describe('createSyncOrchestrator — runCycle', () => {
   });
 
   it('reconciles to e2ee when the server says e2ee but local is plain — fetching the wrapped bundle and clearing the cursor', async () => {
-    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee' });
     h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
     h.getLocalWrappedKeysImpl.mockResolvedValue(undefined);
     h.fetchRemoteWrappedKeysImpl.mockResolvedValue({
@@ -266,8 +284,29 @@ describe('createSyncOrchestrator — runCycle', () => {
     expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('carries the in-flight migration record onto a fresh device', async () => {
+    const migration = {
+      id: 'mig-1',
+      direction: 'enable',
+      ownerDeviceId: 'other-device',
+      startedAt: '2026-06-01T00:00:00Z',
+      updatedAt: '2026-06-01T00:00:00Z',
+    };
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'migrating_to_e2ee', migration });
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
+    h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    // Without the migration record a fresh device couldn't offer to take over.
+    expect(h.setLocalSyncStateImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ syncMode: 'migrating_to_e2ee', e2eeMigration: migration }),
+    );
+  });
+
   it('does not reconcile when the server has no sync_accounts row (brand-new user)', async () => {
-    h.fetchRemoteSyncModeImpl.mockResolvedValue(null);
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue(null);
     h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
 
     const orchestrator = createSyncOrchestrator();
@@ -278,7 +317,7 @@ describe('createSyncOrchestrator — runCycle', () => {
   });
 
   it('does not reconcile when local is already encrypted (no-op when in sync)', async () => {
-    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee' });
     h.getProfileImpl.mockResolvedValue({ syncMode: 'e2ee' });
 
     const orchestrator = createSyncOrchestrator();
@@ -290,7 +329,7 @@ describe('createSyncOrchestrator — runCycle', () => {
   });
 
   it('skips the bundle fetch when one is already cached locally', async () => {
-    h.fetchRemoteSyncModeImpl.mockResolvedValue('e2ee');
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee' });
     h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
     h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self' });
 
@@ -305,7 +344,7 @@ describe('createSyncOrchestrator — runCycle', () => {
   });
 
   it('fails the cycle into `error` when the sync_mode probe throws', async () => {
-    h.fetchRemoteSyncModeImpl.mockRejectedValueOnce(new Error('rpc-failed'));
+    h.fetchRemoteSyncAccountImpl.mockRejectedValueOnce(new Error('rpc-failed'));
 
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
@@ -430,5 +469,86 @@ describe('startSyncOrchestrator — glue', () => {
     window.dispatchEvent(new Event('focus'));
     await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS);
     expect(h.pullImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('createSyncOrchestrator — migration auto-resume', () => {
+  it('offers a take-over (and halts) when the migration is owned by another device', async () => {
+    h.autoResumeMigrationImpl.mockResolvedValue({
+      status: 'awaiting-takeover',
+      direction: 'enable',
+      ownerDeviceId: 'other-device',
+    });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(get(migrationTakeoverAvailable)).toEqual({
+      direction: 'enable',
+      ownerDeviceId: 'other-device',
+    });
+    // Don't drive someone else's migration, and don't prompt for a passphrase.
+    expect(get(migrationResumePending)).toBeNull();
+    expect(h.pullImpl).not.toHaveBeenCalled();
+    expect(h.pushImpl).not.toHaveBeenCalled();
+    expect(get(syncStatus)).toBe('idle');
+  });
+
+  it('clears a stale take-over offer once the migration is no longer foreign', async () => {
+    migrationTakeoverAvailable.set({ direction: 'enable', ownerDeviceId: 'other-device' });
+    h.autoResumeMigrationImpl.mockResolvedValue({ status: 'idle' });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+    expect(get(migrationTakeoverAvailable)).toBeNull();
+  });
+
+  it('halts the cycle and flags the passphrase prompt when locked mid-migration', async () => {
+    h.autoResumeMigrationImpl.mockResolvedValue({
+      status: 'needs-passphrase',
+      direction: 'enable',
+    });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(get(migrationResumePending)).toBe('enable');
+    // Steady-state sync stays paused while waiting on the user's passphrase.
+    expect(h.pullImpl).not.toHaveBeenCalled();
+    expect(h.pushImpl).not.toHaveBeenCalled();
+    expect(get(syncStatus)).toBe('idle');
+  });
+
+  it('clears the flag and runs a normal sync once a resume completes', async () => {
+    h.autoResumeMigrationImpl.mockResolvedValue({
+      status: 'resumed',
+      result: { completed: true },
+    });
+    migrationResumePending.set('enable');
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(get(migrationResumePending)).toBeNull();
+    // Back in a steady-state mode, the cycle proceeds to pull + push.
+    expect(h.pullImpl).toHaveBeenCalledTimes(1);
+    expect(h.pushImpl).toHaveBeenCalledTimes(1);
+    expect(get(syncStatus)).toBe('idle');
+  });
+
+  it('surfaces the error and skips sync when a resume attempt fails (paused)', async () => {
+    h.autoResumeMigrationImpl.mockResolvedValue({
+      status: 'paused',
+      result: { completed: false, error: 'boom' },
+    });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(get(lastSyncError)).toBe('boom');
+    expect(get(syncStatus)).toBe('error');
+    expect(h.pullImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not attempt a resume when signed out', async () => {
+    h.getUserIdImpl.mockResolvedValue(null);
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+    expect(h.autoResumeMigrationImpl).not.toHaveBeenCalled();
   });
 });

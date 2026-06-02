@@ -35,7 +35,9 @@ import { clearSession, getSessionKey, setSessionKey } from '$lib/sync/session-ke
 import { clearPullCursor } from '$lib/sync/pull-cursor';
 import {
   deleteRemoteEncryptedChanges,
+  deleteRemotePlainChanges,
   fetchRemoteEncryptedChanges,
+  pullSnapshotForMigration,
   pushEncryptedChanges,
   pushPlainChanges,
   type EncryptedSyncChange,
@@ -57,6 +59,17 @@ type BackfillItem = {
   payload: unknown;
 };
 
+/** How often the owning device heartbeats progress to the server during a
+ * backfill. Other devices read `migration_updated_at` freshness against this to
+ * tell a running migration from a stalled one. */
+export const MIGRATION_HEARTBEAT_MS = 2000;
+/** No heartbeat for this long ⇒ the owning device is treated as stalled/offline
+ * and the take-over affordance is emphasised. Several missed heartbeats. */
+export const MIGRATION_STALE_MS = 25000;
+
+/** Reports backfill progress as `(converted, total)`; may be throttled. */
+type ProgressReporter = (converted: number, total: number) => Promise<void>;
+
 export type E2EEMigrationRunResult = {
   syncMode: SyncMode;
   migration: E2EEMigrationState;
@@ -74,6 +87,30 @@ export type E2EEMigrationRunResult = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Build a throttled progress reporter for a backfill. Each tick stamps the
+ * latest `recordsConverted`/`recordsTotal` and a fresh `updatedAt` onto the
+ * local profile (so this device's own UI shows live progress) and the server
+ * (so other devices see progress + a liveness heartbeat). Throttled to one
+ * write per `MIGRATION_HEARTBEAT_MS`, but the final (`converted === total`)
+ * tick always flushes. The server write is best-effort: a transient network
+ * failure must not abort the local, CPU-bound encrypt loop — the push at the
+ * end of the migration surfaces a real outage.
+ */
+function createProgressReporter(mode: SyncMode, base: E2EEMigrationState): ProgressReporter {
+  let lastWriteAt = 0;
+  let latest = base;
+  return async (converted, total) => {
+    const done = total > 0 && converted >= total;
+    const now = Date.now();
+    if (!done && now - lastWriteAt < MIGRATION_HEARTBEAT_MS) return;
+    lastWriteAt = now;
+    latest = { ...latest, recordsConverted: converted, recordsTotal: total, updatedAt: nowIso() };
+    await saveProfile({ e2eeMigration: latest });
+    await upsertRemoteSyncAccount(mode, latest).catch(() => undefined);
+  };
 }
 
 type EncryptedSyncPayload = {
@@ -151,10 +188,20 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
   return items;
 }
 
-async function backfillEncryptedRecords(dek: string, migrationId: string): Promise<number> {
+async function backfillEncryptedRecords(
+  dek: string,
+  migrationId: string,
+  onProgress?: ProgressReporter,
+): Promise<number> {
   const items = await collectBackfillItems();
   const encryptedRecords: EncryptedRecord[] = [];
   const backfillEntries: MigrationBackfillEntry[] = [];
+  const total = items.length;
+  let converted = 0;
+
+  // Report a zero-progress tick up front so watchers learn the total (and that
+  // work has started) before the first record finishes encrypting.
+  if (onProgress) await onProgress(0, total);
 
   for (const item of items) {
     const encrypted = await encryptRecord(dek, {
@@ -184,6 +231,9 @@ async function backfillEncryptedRecords(dek: string, migrationId: string): Promi
       schemaVersion: DB_SCHEMA_VERSION,
       createdAt: nowIso(),
     });
+
+    converted += 1;
+    if (onProgress) await onProgress(converted, total);
   }
 
   await db.transaction('rw', db.encrypted, db.migrationBackfill, async () => {
@@ -317,6 +367,13 @@ async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEM
     lastError: undefined,
   };
 
+  // The encrypted copies are on the server (the caller pushed them before
+  // calling finish). Now drop the plaintext originals — leaving them would
+  // mean "E2EE enabled" still left readable PHI in `sync_changes_plain`. If
+  // this throws, the caller's catch keeps us in `migrating_to_e2ee` and the
+  // next resume retries (re-deleting already-gone rows is a no-op). On a key
+  // rotation there are no plaintext rows, so this is a harmless no-op.
+  await deleteRemotePlainChanges();
   await upsertRemoteSyncAccount('e2ee', completedMigration);
   await saveProfile({
     passphraseEnabled: true,
@@ -353,10 +410,21 @@ async function continueE2EEMigration(
       setSessionKey(dek);
     }
 
-    const encryptedEventCount = await backfillEncryptedRecords(dek, migration.id);
+    // Absorb anything that lives only on the server before we re-encrypt and
+    // (in finish) delete the plaintext table. Covers a migration interrupted
+    // by a crash/quit: another device may have pushed plaintext rows, or a
+    // prior partial run of this migration already pushed encrypted rows, that
+    // this device never pulled. Idempotent (LWW), so re-running on resume is
+    // safe.
+    await pullSnapshotForMigration(dek);
+
+    const report = createProgressReporter('migrating_to_e2ee', migration);
+    const encryptedEventCount = await backfillEncryptedRecords(dek, migration.id, report);
     const updatedMigration: E2EEMigrationState = {
       ...migration,
       encryptedEventCount,
+      recordsTotal: encryptedEventCount,
+      recordsConverted: encryptedEventCount,
       updatedAt: nowIso(),
       lastError: undefined,
     };
@@ -649,10 +717,13 @@ async function continueE2EEKeyRotation(
       setSessionKey(dek);
     }
 
-    const encryptedEventCount = await backfillEncryptedRecords(dek, migration.id);
+    const report = createProgressReporter('rotating_e2ee_key', migration);
+    const encryptedEventCount = await backfillEncryptedRecords(dek, migration.id, report);
     const updatedMigration: E2EEMigrationState = {
       ...migration,
       encryptedEventCount,
+      recordsTotal: encryptedEventCount,
+      recordsConverted: encryptedEventCount,
       updatedAt: nowIso(),
       lastError: undefined,
     };
@@ -856,4 +927,143 @@ export async function recoverWithCode(
   }
 
   return startKeyRotationAfterAuth(newPassphrase);
+}
+
+// ── Crash recovery ─────────────────────────────────────────────────────────
+//
+// A migration is a multi-step push that can be interrupted by a crash, a
+// backgrounded PWA, or a user quitting a too-slow run. The mode flag is
+// persisted up-front, so on the next launch the device is still in a
+// `migrating_*` / `rotating_*` state with steady-state sync paused. This is the
+// hook the sync orchestrator calls to drive that stuck state to completion.
+
+export type MigrationProgress = {
+  /** Records re-encrypted so far / total to convert, when reported. */
+  recordsConverted?: number;
+  recordsTotal?: number;
+  /** The owning device's last heartbeat — freshness reveals a stall. */
+  updatedAt?: string;
+};
+
+export type AutoResumeResult =
+  | { status: 'idle' }
+  | ({ status: 'awaiting-takeover'; direction: E2EEMigrationDirection; ownerDeviceId: string } & MigrationProgress)
+  | { status: 'needs-passphrase'; direction: E2EEMigrationDirection }
+  | { status: 'resumed'; result: E2EEMigrationRunResult }
+  | { status: 'paused'; result: E2EEMigrationRunResult };
+
+function directionFor(
+  migration: E2EEMigrationState,
+  mode: SyncMode,
+): E2EEMigrationDirection {
+  return (
+    migration.direction ??
+    (mode === 'migrating_to_plain'
+      ? 'disable'
+      : mode === 'rotating_e2ee_key'
+        ? 'rotate'
+        : 'enable')
+  );
+}
+
+/**
+ * Resume an interrupted migration owned by this device, using the cached DEK.
+ *
+ *  - `idle`             — no migration to resume here (steady state, or a
+ *                         migrating device with no migration record yet).
+ *  - `awaiting-takeover`— a migration is in progress but owned by *another*
+ *                         device. This device can adopt it (see
+ *                         `takeOverMigration`) once the user opts in; until
+ *                         then it does nothing so two devices don't race.
+ *  - `needs-passphrase` — a migration owned by this device is in progress but
+ *                         the session is locked (no cached DEK); the UI must
+ *                         collect the passphrase and call `resume*`.
+ *  - `resumed`          — the migration finished; the device is now in its
+ *                         steady-state mode.
+ *  - `paused`           — resume attempted but failed (e.g. network); the
+ *                         device stays migrating and the next cycle retries.
+ */
+export async function autoResumeMigration(): Promise<AutoResumeResult> {
+  const profile = await getProfile();
+  const mode = getProfileSyncMode(profile);
+  const migration = profile?.e2eeMigration;
+
+  if (
+    mode !== 'migrating_to_e2ee' &&
+    mode !== 'migrating_to_plain' &&
+    mode !== 'rotating_e2ee_key'
+  ) {
+    return { status: 'idle' };
+  }
+
+  // Nothing local to resume — e.g. a device whose reconcile hasn't populated
+  // the migration record yet. It'll pick it up on the next cycle.
+  if (!migration) return { status: 'idle' };
+
+  // A migration owned by another device: surface a take-over offer rather than
+  // silently driving it, so the user decides which device finishes it.
+  if (migration.ownerDeviceId !== getDeviceId()) {
+    return {
+      status: 'awaiting-takeover',
+      direction: directionFor(migration, mode),
+      ownerDeviceId: migration.ownerDeviceId,
+      recordsConverted: migration.recordsConverted,
+      recordsTotal: migration.recordsTotal,
+      updatedAt: migration.updatedAt,
+    };
+  }
+
+  // The DEK is normally still in localStorage after a crash (the session key is
+  // persisted), so this resumes silently. When it isn't (logout wiped it, or
+  // persistence failed, or this device just took the migration over), ask the
+  // UI to collect the passphrase instead.
+  if (!getSessionKey()) {
+    return { status: 'needs-passphrase', direction: directionFor(migration, mode) };
+  }
+
+  // Session key present, so the continue* helpers use the cached DEK and the
+  // empty passphrase argument is never consulted.
+  const result =
+    mode === 'migrating_to_plain'
+      ? await continueE2EEDisableMigration('')
+      : mode === 'rotating_e2ee_key'
+        ? await continueE2EEKeyRotation('')
+        : await continueE2EEMigration('');
+
+  return { status: result.completed ? 'resumed' : 'paused', result };
+}
+
+/**
+ * Claim an in-progress migration for this device. Stamps this device as the
+ * owner both locally and on the server, so the next sync cycle's
+ * `autoResumeMigration` will drive it (prompting for the passphrase, then
+ * pulling both the plaintext and encrypted server rows before re-encrypting
+ * the union and finishing).
+ *
+ * Intended for the "take over on this device" affordance shown when a device
+ * logs in to find a migration another device started but never finished.
+ */
+export async function takeOverMigration(): Promise<void> {
+  const profile = await getProfile();
+  const mode = getProfileSyncMode(profile);
+  const migration = profile?.e2eeMigration;
+
+  if (
+    !migration ||
+    (mode !== 'migrating_to_e2ee' &&
+      mode !== 'migrating_to_plain' &&
+      mode !== 'rotating_e2ee_key')
+  ) {
+    throw new Error('No in-progress migration is available to take over.');
+  }
+
+  const claimed: E2EEMigrationState = {
+    ...migration,
+    ownerDeviceId: getDeviceId(),
+    updatedAt: nowIso(),
+    lastError: undefined,
+  };
+
+  await saveProfile({ e2eeMigration: claimed });
+  await upsertRemoteSyncAccount(mode, claimed);
 }

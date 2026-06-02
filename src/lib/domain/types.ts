@@ -54,6 +54,12 @@ export interface E2EEMigrationState {
   encryptedEventCount?: number;
   plaintextEventCount?: number;
   deletedEncryptedEventCount?: number;
+  /** Live progress of the current backfill, heartbeated by the owning device:
+   * `recordsConverted` of `recordsTotal` re-encrypted so far. Other devices use
+   * these (plus `updatedAt` freshness) to show a progress bar and detect a
+   * stall. */
+  recordsTotal?: number;
+  recordsConverted?: number;
   lastError?: string;
 }
 

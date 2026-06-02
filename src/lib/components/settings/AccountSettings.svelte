@@ -18,6 +18,7 @@
     type E2EEMigrationRunResult,
   } from '$lib/sync/e2ee-migration';
   import { rotateRecoveryCode } from '$lib/sync/recovery-code-rotation';
+  import { migrationResumePending } from '$lib/stores/syncStore';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
@@ -86,6 +87,18 @@
   const e2eeEnableMigrating = $derived(syncMode === 'migrating_to_e2ee');
   const e2eeDisableMigrating = $derived(syncMode === 'migrating_to_plain');
   const e2eeKeyRotating = $derived(syncMode === 'rotating_e2ee_key');
+  // Any migration mid-flight. Import is gated on this: bulk-importing while a
+  // migration is paused would pile rows into an outbox that can't drain (sync
+  // is paused for the migration's duration), and in the enable case races the
+  // plaintext-table teardown.
+  const migrationInProgress = $derived(
+    e2eeEnableMigrating || e2eeDisableMigrating || e2eeKeyRotating,
+  );
+  const importBlockedReason = $derived(
+    migrationInProgress
+      ? 'Import is paused until encryption setup finishes. Resume it in the Encryption section first.'
+      : '',
+  );
   const e2eeToggleChecked = $derived(syncMode !== 'plain' || e2eeRequested);
   // Locked only while a migration is mid-flight. In steady-state 'e2ee' the
   // checkbox is unlock-able — unchecking opens the confirm-disable modal.
@@ -215,6 +228,9 @@
     syncMode = result.syncMode;
     e2eeMigration = result.migration;
     e2eeRequested = result.syncMode !== 'plain';
+    // A completed run clears any "resume needs your passphrase" prompt the
+    // orchestrator raised; otherwise the next sync cycle reconciles it.
+    if (result.completed) migrationResumePending.set(null);
     if (result.recoveryCode) showRecoveryCode(result.recoveryCode);
     if (result.syncMode === 'plain') codeToShow = null;
     passphrase = '';
@@ -588,11 +604,15 @@
             >Replace</button>
           </div>
           <div class="import-row">
-            <label class="file-picker">
+            <label
+              class="file-picker"
+              class:file-picker--disabled={migrationInProgress}
+              title={importBlockedReason || undefined}
+            >
               <input
                 type="file"
                 accept=".json,.csv,.tsv,.txt,.ods,.xlsx,application/json,text/csv,application/vnd.oasis.opendocument.spreadsheet,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                disabled={importBusy}
+                disabled={importBusy || migrationInProgress}
                 onchange={handleImportFile}
               />
               <span>{importBusy ? 'Importing...' : 'Choose file'}</span>
@@ -605,6 +625,9 @@
               >{importStatus.message}</span>
             {/if}
           </div>
+          {#if migrationInProgress}
+            <p class="import-blocked-hint" role="status">{importBlockedReason}</p>
+          {/if}
           <p class="toggle-hint">
             We can import data from most tracking apps that export common formats like CSV, JSON, ODS, or XLSX.
           </p>
@@ -1100,6 +1123,17 @@
     margin: 0.35rem 0 0;
     font-size: 0.88rem;
     color: #666;
+  }
+
+  .file-picker--disabled {
+    cursor: not-allowed;
+  }
+
+  .import-blocked-hint {
+    margin: 0.4rem 0 0;
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: color-mix(in oklab, var(--danger, #b91c1c) 70%, var(--text) 30%);
   }
 
   .import-help {

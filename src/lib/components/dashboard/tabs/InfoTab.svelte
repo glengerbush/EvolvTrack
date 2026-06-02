@@ -5,8 +5,48 @@
   copying an <details class="faq-item"> block. The "amount in system" answer
   is sourced from the model in src/lib/utils/pharmacokinetics.ts — keep the
   two in sync if the PK parameters change.
+
+  Same-page links (href="#faq-...") are intercepted so they expand the target
+  <details> question and scroll to it — native anchors scroll but won't open a
+  collapsed accordion. See revealTarget below.
 -->
-<main class="content">
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { canInstall, promptInstall } from '$lib/stores/pwaInstallStore';
+
+  // Reveal the element a same-page link points at: expand its <details> (when
+  // the target is, or sits inside, a collapsed question) and scroll it in.
+  // Targets may be a <details> question or a <section> heading.
+  function revealTarget(hash: string) {
+    if (!hash.startsWith('#')) return;
+    const el = document.getElementById(hash.slice(1));
+    if (!el) return;
+    const details = el.closest('details');
+    if (details) details.open = true;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  let root: HTMLElement;
+
+  function handleClick(event: MouseEvent) {
+    const link = (event.target as HTMLElement | null)?.closest('a[href^="#"]');
+    if (!link) return;
+    // Take over from the browser/router so we can open the accordion too.
+    event.preventDefault();
+    revealTarget(link.getAttribute('href') ?? '');
+  }
+
+  onMount(() => {
+    // Delegate clicks here (rather than an inline onclick on a non-interactive
+    // <main>) so the real interactive targets stay the anchors themselves.
+    root.addEventListener('click', handleClick);
+    // Honor a fragment present on load (e.g. a deep link into a question).
+    if (location.hash) revealTarget(location.hash);
+    return () => root.removeEventListener('click', handleClick);
+  });
+</script>
+
+<main class="content" bind:this={root}>
   <header class="faq-header">
     <h1 class="faq-title">Frequently Asked Questions</h1>
     <p class="faq-intro">
@@ -44,7 +84,7 @@
           is private. We understand that this data is sensitive and personal, so
           we built it from the ground up with one principle in mind: you should
           always have control over your data. And since it is a PWA, you can
-          install it on any platform (<a href="#faq-install">how to install</a>).
+          install it on any platform (<a href="#faq-install">How to install?</a>).
         </p>
       </div>
     </details>
@@ -83,6 +123,72 @@
           <li>Create a username and password</li>
           <li>Use your email and sign in with your password or via magic link (passwordless sign-on)</li>
         </ul>
+      </div>
+    </details>
+
+    <details class="faq-item" id="faq-install">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>How do I install EvolvTrack?</summary>
+      <div class="faq-answer">
+        <p>
+          EvolvTrack is a Progressive Web App (PWA), so you install it straight
+          from your browser — there's no app store, and no separate download.
+          Once installed it opens in its own window, works offline, and behaves
+          like any other app on your device. The exact steps depend on your
+          device and browser:
+        </p>
+
+        {#if $canInstall}
+          <p class="install-cta">
+            <button type="button" class="btn btn-primary" onclick={() => promptInstall()}>
+              Install EvolvTrack
+            </button>
+            <span class="install-cta-note">Your browser can install it directly — one tap.</span>
+          </p>
+        {/if}
+
+        <h3 class="faq-subhead">iPhone &amp; iPad</h3>
+        <p>
+          Open EvolvTrack in <strong>Safari</strong> (this only works in Safari,
+          not Chrome or Firefox on iOS). Tap the <strong>Share</strong> button
+          (the square with an upward arrow), scroll down, and tap
+          <strong>Add to Home Screen</strong>, then <strong>Add</strong>. The
+          EvolvTrack icon will appear on your home screen.
+        </p>
+
+        <h3 class="faq-subhead">Android</h3>
+        <p>
+          Open EvolvTrack in <strong>Chrome</strong> (or another Chromium
+          browser like Edge or Samsung Internet). Tap the <strong>⋮</strong>
+          menu in the top-right corner and choose <strong>Install app</strong>
+          or <strong>Add to Home screen</strong>. You may also see an
+          &ldquo;Install&rdquo; prompt appear at the bottom of the screen that
+          you can tap directly.
+        </p>
+
+        <h3 class="faq-subhead">Windows, Mac &amp; Linux (Chrome or Edge)</h3>
+        <p>
+          Look for the <strong>install icon</strong> at the right-hand end of
+          the address bar — a small screen with a downward arrow. Click it and
+          confirm <strong>Install</strong>. If you don't see it, open the
+          <strong>⋮</strong> (Chrome) or <strong>…</strong> (Edge) menu and
+          choose <strong>Install EvolvTrack…</strong>
+        </p>
+
+        <h3 class="faq-subhead">Mac (Safari)</h3>
+        <p>
+          On macOS Sonoma or later, open EvolvTrack in Safari, then choose
+          <strong>File → Add to Dock</strong>. It will run as its own app from
+          the Dock.
+        </p>
+
+        <h3 class="faq-subhead">Don't see an install option?</h3>
+        <p>
+          Some browsers — Firefox on the desktop, for example — don't support
+          installing PWAs. EvolvTrack still works fully in the browser tab; to
+          install it, switch to Chrome, Edge, or Safari. You also only need to
+          install once per device, and you can install on as many devices as
+          you like.
+        </p>
       </div>
     </details>
   </section>
@@ -137,21 +243,69 @@
   <section id="faq-charts" class="faq-section">
     <h2 class="faq-section-title">Charts &amp; Tracking</h2>
 
-    <details class="faq-item">
+    <details class="faq-item" id="faq-amount-calc">
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>How is &ldquo;amount in system&rdquo; calculated?</summary>
       <div class="faq-answer">
-
+        <h2 class="faq-subhead">TLDR</h2>
         <p>
-          EvolvTrack estimates how much of each medication is still in your body
-          using a pharmacokinetic (PK) model — the same kind of math used in
-          clinical drug research. Depedning on the medication, we use a combination of dose, bioavailability, absorption rate, eliminiation rate, and half life. A much more detailed explaination is below, but note:
+          With every injection, the drug seeps in from the injection site,
+          spreads through your body, and your body slowly clears it out.
         </p>
+        <p>
+          We use one of two models, depending on the drug.
+        </p>
+
+        <h3 class="faq-subhead">One-compartment model</h3>
+        <p>
+          Treats your body as a single bucket. The drug flows in, then drains
+          out at a steady rate.
+        </p>
+
+        <h3 class="faq-subhead">Two-compartment model</h3>
+        <p>
+          Treats your body as two connected buckets: your bloodstream (fast) and
+          your deeper tissues (slow). The drug exchanges back and forth between
+          them while also draining out. This captures something real — a sharper
+          peak and a steeper drop in the first day or two after a dose — that the
+          simple curve smooths over. EvolvTrack plots the amount estimated to be
+          in the bloodstream, which is the part that actually drives how the drug
+          makes you feel. This is the more accurate of the two, and it's lifted
+          straight from published medical studies.
+        </p>
+
+        <h3 class="faq-subhead">Which drug uses which</h3>
+        <p>Two-compartment (more accurate, accounts for your weight):</p>
+        <ul>
+          <li>Semaglutide (Ozempic / Wegovy)</li>
+          <li>Tirzepatide (Mounjaro / Zepbound)</li>
+          <li>Dulaglutide (Trulicity)</li>
+        </ul>
+        <p>One-compartment (simpler curve, not weight-adjusted):</p>
+        <ul>
+          <li>
+            Liraglutide (Victoza / Saxenda)
+            <ul><li>taken daily, so it rises and falls in a single day.</li></ul>
+          </li>
+          <li>
+            Retatrutide
+            <ul><li>we don't have the data yet</li></ul>
+          </li>
+        </ul>
+        <p>If new data becomes available, we will update the models we use.</p>
 
         <p class="faq-note">
           Treat the &ldquo;amount in system&rdquo; figure as a well-grounded
           estimate for spotting trends and comparing days, not as a clinical
           measurement. It is not medical advice; dosing decisions belong with
           your prescriber.
+        </p>
+
+
+        <h2 class="faq-subhead">The Long Version</h2>
+        <p>
+          EvolvTrack estimates how much of each medication is still in your body
+          using a pharmacokinetic (PK) model — the same kind of math used in
+          clinical drug research. Depending on the medication, we use a combination of dose, bioavailability, absorption rate, eliminiation rate, and half life. A much more detailed explaination is below, but note:
         </p>
 
         <h3 class="faq-subhead">The model</h3>
@@ -306,6 +460,37 @@
           <li><strong>Liraglutide</strong> — PMC4875959; StatPearls NBK608007</li>
           <li><strong>Retatrutide</strong> — NEJM (NEJMoa2301972); PMC12190491</li>
         </ul>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>Why is the amount in system so low?</summary>
+      <div class="faq-answer">
+        <p>
+          It's a common surprise: you inject, say, 11&nbsp;mg of tirzepatide and
+          the chart peaks around a quarter of that. That's expected, not a bug.
+        </p>
+        <p>
+          For semaglutide, tirzepatide and dulaglutide, the line is an
+          <strong>estimate of how much drug is in your blood plasma</strong> —
+          the level that actually drives the drug's effect — not the total
+          amount of drug sitting in your body. At any moment, a large share of
+          what you injected is either still being absorbed from the injection
+          site or has moved out into your tissues, and only ~80&nbsp;% of the
+          dose is absorbed at all. So the plasma figure naturally peaks well
+          below the milligrams you injected.
+        </p>
+        <p>
+          Because of this, the number is most useful as a
+          <strong>day-to-day trend within one drug</strong> — for lining up how
+          you feel against your levels — rather than as a literal count of
+          milligrams in your body or a way to compare one drug against another.
+        </p>
+        <p>
+          For a deeper understanding of the calculation, see
+          <a href="#faq-amount-calc">How is &ldquo;amount in system&rdquo;
+          calculated?</a>
+        </p>
       </div>
     </details>
 
@@ -566,6 +751,9 @@
     border-radius: 12px;
     background: color-mix(in oklab, var(--surface) 86%, transparent);
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.12);
+    /* Match .faq-section: clear the sticky .tabbar when a question is the
+     * scroll target of a same-page link. */
+    scroll-margin-top: 3.5rem;
   }
 
   .faq-item summary {
@@ -626,6 +814,24 @@
     font-weight: 700;
     font-variant: small-caps;
     color: var(--headerText);
+  }
+
+  h2.faq-subhead {
+    font-size: 1.25rem;
+  }
+
+  /* Shown only in browsers that support direct PWA install (see
+   * pwaInstallStore); elsewhere the per-device instructions below apply. */
+  .install-cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+  }
+
+  .install-cta-note {
+    font-size: 0.9rem;
+    color: var(--muted);
   }
 
   .faq-formula {

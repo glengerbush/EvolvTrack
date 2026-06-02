@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
@@ -570,42 +570,64 @@ describe('applyRemoteChange — weight per-field LWW', () => {
   });
 
   it('end-to-end: addWeight then updateWeight produces complete per-field stamps', async () => {
-    const created = await addWeight({ weightLbs: 180, wellness: 5 });
-    expect(created.fieldUpdatedAt).toMatchObject({
-      weightLbs: created.updatedAt,
-      wellness: created.updatedAt,
-    });
+    // Pin the clock so the create and update land on distinct, ordered
+    // timestamps. `repo.now()` is `new Date().toISOString()`; faking only Date
+    // (not timers/microtasks) keeps fake-indexeddb working. Without this the
+    // two writes can collide in the same millisecond and the "wellness stamp
+    // moved" assertions flake.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-05-10T00:00:00.000Z'));
+      const created = await addWeight({ weightLbs: 180, wellness: 5 });
+      expect(created.fieldUpdatedAt).toMatchObject({
+        weightLbs: created.updatedAt,
+        wellness: created.updatedAt,
+      });
 
-    await updateWeight(created.id, { wellness: 7 });
-    const after = (await db.weights.get(created.id))!;
-    // Only wellness's stamp moved; weightLbs stays at the original creation
-    // time so a remote that edits weightLbs later wins it cleanly.
-    expect(after.fieldUpdatedAt!.weightLbs).toBe(created.fieldUpdatedAt!.weightLbs);
-    expect(after.fieldUpdatedAt!.wellness).not.toBe(created.fieldUpdatedAt!.wellness);
-    expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
-      .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
+      vi.setSystemTime(new Date('2026-05-10T00:00:01.000Z'));
+      await updateWeight(created.id, { wellness: 7 });
+      const after = (await db.weights.get(created.id))!;
+      // Only wellness's stamp moved; weightLbs stays at the original creation
+      // time so a remote that edits weightLbs later wins it cleanly.
+      expect(after.fieldUpdatedAt!.weightLbs).toBe(created.fieldUpdatedAt!.weightLbs);
+      expect(after.fieldUpdatedAt!.wellness).not.toBe(created.fieldUpdatedAt!.wellness);
+      expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
+        .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
 describe('field-clear tombstones', () => {
   it('updateWeight with an `undefined` value removes the field locally and stamps it', async () => {
-    const created = await addWeight({ weightLbs: 180, wellness: 5 });
-    await updateWeight(created.id, { wellness: undefined });
+    // Pin the clock so the clear's stamp is provably newer than creation's
+    // (same-millisecond collisions otherwise flake the ordering assertion).
+    // Fake only Date — not timers/microtasks — so fake-indexeddb keeps working.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-05-10T00:00:00.000Z'));
+      const created = await addWeight({ weightLbs: 180, wellness: 5 });
+      vi.setSystemTime(new Date('2026-05-10T00:00:01.000Z'));
+      await updateWeight(created.id, { wellness: undefined });
 
-    const after = (await db.weights.get(created.id))!;
-    // Field is gone from the row (not lingering as `undefined`).
-    expect('wellness' in after).toBe(false);
-    // But the field-clock entry survives — that's what tells receivers the
-    // absence is intentional and newer than their value.
-    expect(after.fieldUpdatedAt!.wellness).toBeDefined();
-    expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
-      .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
+      const after = (await db.weights.get(created.id))!;
+      // Field is gone from the row (not lingering as `undefined`).
+      expect('wellness' in after).toBe(false);
+      // But the field-clock entry survives — that's what tells receivers the
+      // absence is intentional and newer than their value.
+      expect(after.fieldUpdatedAt!.wellness).toBeDefined();
+      expect(new Date(after.fieldUpdatedAt!.wellness).getTime())
+        .toBeGreaterThan(new Date(created.fieldUpdatedAt!.wellness).getTime());
 
-    // The outbox payload (what will be pushed) matches: key absent, stamp present.
-    const outbox = await db.outbox.get(`weight:${created.id}`);
-    const payload = outbox!.payload as WeightEntry;
-    expect('wellness' in payload).toBe(false);
-    expect(payload.fieldUpdatedAt!.wellness).toBe(after.fieldUpdatedAt!.wellness);
+      // The outbox payload (what will be pushed) matches: key absent, stamp present.
+      const outbox = await db.outbox.get(`weight:${created.id}`);
+      const payload = outbox!.payload as WeightEntry;
+      expect('wellness' in payload).toBe(false);
+      expect(payload.fieldUpdatedAt!.wellness).toBe(after.fieldUpdatedAt!.wellness);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a remote tombstone (stamp present, value absent) drops the local field', async () => {

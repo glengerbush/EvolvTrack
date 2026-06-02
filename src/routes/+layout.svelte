@@ -4,8 +4,10 @@
   import type { Snippet } from 'svelte';
   import { page } from '$app/state';
   import { registerServiceWorker } from '$lib/utils/pwa';
+  import { initInstallPrompt } from '$lib/stores/pwaInstallStore';
   import { startSyncOrchestrator } from '$lib/sync/sync-orchestrator';
   import SyncBanner from '$lib/components/sync/SyncBanner.svelte';
+  import InstallBanner from '$lib/components/InstallBanner.svelte';
   import { activeColorMode } from '$lib/stores/themeStore';
   import { authState } from '$lib/stores/authStore';
 
@@ -38,6 +40,7 @@
 
   onMount(() => {
     registerServiceWorker();
+    initInstallPrompt();
     // Returns a teardown fn that onMount runs on unmount.
     return startSyncOrchestrator();
   });
@@ -50,4 +53,5 @@
 {#if showSyncBanner}
   <SyncBanner />
 {/if}
+<InstallBanner />
 {@render children?.()}
