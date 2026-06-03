@@ -5,6 +5,7 @@
   import { bulkUpdateInjections, bulkUpdatePrescriptions, getProfileSyncMode } from '$lib/domain/repo';
   import { db } from '$lib/db/schema';
   import { fromLiveQuery } from '$lib/db/liveQuery';
+  import { errorMessage } from '$lib/utils/errorMessage';
   import type { InjectionEntry, Medication, Prescription } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
@@ -163,7 +164,7 @@
       passphrase = '';
       status = 'Recovery code rotated. Save the new one — the old one no longer works.';
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       e2eeBusy = false;
     }
@@ -183,7 +184,7 @@
     try {
       applyMigrationResult(await startE2EEKeyRotation(passphrase));
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       e2eeBusy = false;
     }
@@ -221,7 +222,7 @@
       // UI moves into the migration-status branch and the user can resume there.
       disableModalOpen = false;
     } catch (error) {
-      disableError = (error as Error).message;
+      disableError = errorMessage(error);
       status = disableError;
     } finally {
       e2eeBusy = false;
@@ -271,7 +272,7 @@
     try {
       applyMigrationResult(await startE2EEMigration(passphrase));
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       e2eeBusy = false;
     }
@@ -294,7 +295,7 @@
       newPassphraseConfirm = '';
       passphrase = '';
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       e2eeBusy = false;
     }
@@ -311,7 +312,7 @@
       await downloadBackup();
       status = 'Backup downloaded.';
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       exportBusy = false;
     }
@@ -324,7 +325,7 @@
       await downloadOdsSpreadsheet();
       status = 'ODS spreadsheet downloaded.';
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       exportBusy = false;
     }
@@ -350,7 +351,7 @@
       pendingMedFixup = result.data.injections.filter((injection) => !injection.medication);
       pendingVialFixup = result.data.prescriptions.filter((prescription) => !prescription.type);
     } catch (error) {
-      importStatus = { kind: 'error', message: (error as Error).message };
+      importStatus = { kind: 'error', message: errorMessage(error) };
     } finally {
       importBusy = false;
       input.value = '';
@@ -408,7 +409,7 @@
       status = 'Local data cleared.';
       await goto(resolve('/'));
     } catch (error) {
-      status = (error as Error).message;
+      status = errorMessage(error);
     } finally {
       dangerBusy = false;
     }
@@ -449,7 +450,7 @@
       // The cleanup wipes local state; navigate to the landing page.
       window.location.href = '/';
     } catch (error) {
-      status = `Could not delete account: ${(error as Error).message}`;
+      status = `Could not delete account: ${errorMessage(error)}`;
     } finally {
       dangerBusy = false;
     }

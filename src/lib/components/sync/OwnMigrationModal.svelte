@@ -19,6 +19,7 @@
   import { migrationResumePending } from '$lib/stores/syncStore';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { db } from '$lib/db/schema';
+  import { errorMessage } from '$lib/utils/errorMessage';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
 
   type Direction = 'enable' | 'disable' | 'rotate';
@@ -115,7 +116,7 @@
         localError = result.error ?? 'Could not resume. Please try again.';
       }
     } catch (cause) {
-      localError = (cause as Error).message ?? 'Could not resume. Please try again.';
+      localError = errorMessage(cause) ??'Could not resume. Please try again.';
     } finally {
       busy = false;
     }
@@ -144,7 +145,7 @@
       migrationResumePending.set(null);
       requestSync();
     } catch (cause) {
-      localError = (cause as Error).message ?? 'Could not reset. Please try again.';
+      localError = errorMessage(cause) ??'Could not reset. Please try again.';
     } finally {
       resetting = false;
     }
@@ -177,7 +178,7 @@
       migrationResumePending.set(null);
       requestSync();
     } catch (cause) {
-      localError = (cause as Error).message ?? 'Could not start fresh. Please try again.';
+      localError = errorMessage(cause) ??'Could not start fresh. Please try again.';
     } finally {
       resetting = false;
     }

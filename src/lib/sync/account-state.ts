@@ -126,6 +126,53 @@ export type DekVersionUpdate = {
   pendingDekVersion?: number | null;
 };
 
+/** Raised when another device has already moved the account out of the mode this
+ * transition required to start (the cross-device mutual-exclusion signal). */
+export class SyncTransitionConflictError extends Error {
+  constructor() {
+    super('Another device is already changing encryption settings. Wait for it to finish, or use “Take over”.');
+    this.name = 'SyncTransitionConflictError';
+  }
+}
+
+/**
+ * Atomically claim an E2EE sync-mode transition on the server (see the
+ * `begin_sync_transition` RPC). This is the authoritative cross-device guard:
+ * only one device can move the account into a migrating/rotating state at a
+ * time, and the next DEK version is allocated here so concurrent rotations can't
+ * collide. Throws `SyncTransitionConflictError` if another device got there
+ * first; the caller must abort its operation.
+ */
+export async function beginSyncTransition(params: {
+  from: SyncMode[];
+  to: SyncMode;
+  migration: E2EEMigrationState;
+  allocateNewDek: boolean;
+}): Promise<{ activeDekVersion: number | null; pendingDekVersion: number | null }> {
+  await requireAuthenticatedUser();
+  const { data, error } = await supabase.rpc('begin_sync_transition', {
+    p_from: params.from,
+    p_to: params.to,
+    p_migration_id: params.migration.id,
+    p_direction: params.migration.direction ?? null,
+    p_owner_device_id: params.migration.ownerDeviceId,
+    p_allocate_new_dek: params.allocateNewDek,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new SyncTransitionConflictError();
+    }
+    throw error;
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { active_version: number | null; pending_version: number | null }
+    | undefined;
+  return {
+    activeDekVersion: row?.active_version ?? null,
+    pendingDekVersion: row?.pending_version ?? null,
+  };
+}
+
 export async function upsertRemoteSyncAccount(
   syncMode: SyncMode,
   migration?: E2EEMigrationState,

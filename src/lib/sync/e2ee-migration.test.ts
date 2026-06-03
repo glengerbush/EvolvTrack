@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   mockProfile: undefined as ProfileSettings | undefined,
   saveProfileCalls: [] as Array<Partial<ProfileSettings>>,
   upsertAccountCalls: [] as Array<{ mode: SyncMode; migration?: E2EEMigrationState }>,
+  beginTransitionCalls: [] as Array<{ from: SyncMode[]; to: SyncMode }>,
   localBundle: undefined as WrappedKeyBundle | undefined,
   remoteBundle: undefined as WrappedKeyBundle | undefined,
   saveLocalBundleCalls: [] as Array<Omit<WrappedKeyBundle, 'id'>>,
@@ -85,6 +86,19 @@ vi.mock('$lib/sync/account-state', () => ({
   upsertRemoteSyncAccount: vi.fn(async (mode: SyncMode, migration?: E2EEMigrationState) => {
     state.upsertAccountCalls.push({ mode, migration });
   }),
+  beginSyncTransition: vi.fn(
+    async (t: { from: SyncMode[]; to: SyncMode; allocateNewDek: boolean }) => {
+      state.beginTransitionCalls.push({ from: t.from, to: t.to });
+      // Server allocates next version off the local bundle's (the test's stand-in
+      // for the server's active version).
+      const active = state.localBundle?.dekVersion ?? null;
+      return {
+        activeDekVersion: active,
+        pendingDekVersion: t.allocateNewDek ? (active ?? 0) + 1 : null,
+      };
+    },
+  ),
+  SyncTransitionConflictError: class extends Error {},
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({
@@ -139,6 +153,7 @@ import {
   takeOverMigration,
 } from './e2ee-migration';
 import { db } from '$lib/db/schema';
+import { beginSyncTransition } from '$lib/sync/account-state';
 import { getAllWeights, getAllInjections } from '$lib/domain/repo';
 import {
   decryptRecord,
@@ -180,6 +195,7 @@ beforeEach(() => {
   state.mockProfile = undefined;
   state.saveProfileCalls.length = 0;
   state.upsertAccountCalls.length = 0;
+  state.beginTransitionCalls.length = 0;
   state.localBundle = undefined;
   state.remoteBundle = undefined;
   state.saveLocalBundleCalls.length = 0;
@@ -364,6 +380,29 @@ describe('startE2EEMigration — refuses while a migration is in progress', () =
 
     await expect(startE2EEMigration('pw')).rejects.toThrow(/already in progress|finish or reset/i);
     expect(generateDek).not.toHaveBeenCalled();
+  });
+});
+
+describe('cross-device mutual exclusion (begin_sync_transition conflict)', () => {
+  it('enable aborts — no DEK minted — when another device already claimed the transition', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    vi.mocked(beginSyncTransition).mockRejectedValueOnce(
+      new Error('Another device is already changing encryption settings.'),
+    );
+
+    await expect(startE2EEMigration('pw')).rejects.toThrow(/another device/i);
+    expect(generateDek).not.toHaveBeenCalled();
+  });
+
+  it('disable aborts when another device already claimed the transition', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(beginSyncTransition).mockRejectedValueOnce(
+      new Error('Another device is already changing encryption settings.'),
+    );
+
+    await expect(startE2EEDisableMigration('pw')).rejects.toThrow(/another device/i);
+    expect(pushPlainChangesMock).not.toHaveBeenCalled();
   });
 });
 

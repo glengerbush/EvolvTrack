@@ -84,6 +84,16 @@ vi.mock('$lib/sync/account-state', () => ({
   upsertRemoteSyncAccount: vi.fn(async (mode: SyncMode, migration?: E2EEMigrationState) => {
     state.upsertAccountCalls.push({ mode, migration });
   }),
+  beginSyncTransition: vi.fn(async (t: { from: SyncMode[]; to: SyncMode; allocateNewDek: boolean }) => {
+    // Recovery rotates: server allocates the next version off the bundle that the
+    // recovery code unlocked (cached locally by then).
+    const active = state.localBundle?.dekVersion ?? null;
+    return {
+      activeDekVersion: active,
+      pendingDekVersion: t.allocateNewDek ? (active ?? 0) + 1 : null,
+    };
+  }),
+  SyncTransitionConflictError: class extends Error {},
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({

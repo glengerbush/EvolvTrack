@@ -31,7 +31,8 @@ import {
 } from '$lib/crypto/e2ee';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { lastSynced } from '$lib/stores/syncStore';
-import { getDeviceId, upsertRemoteSyncAccount } from '$lib/sync/account-state';
+import { errorMessage } from '$lib/utils/errorMessage';
+import { beginSyncTransition, getDeviceId, upsertRemoteSyncAccount } from '$lib/sync/account-state';
 import { clearSession, getSessionKey, setSessionKey } from '$lib/sync/session-key';
 import { clearPullCursor } from '$lib/sync/pull-cursor';
 import {
@@ -491,7 +492,7 @@ async function continueE2EEMigration(
       completed: true,
     };
   } catch (error) {
-    const message = (error as Error).message;
+    const message = errorMessage(error);
     const failedMigration: E2EEMigrationState = {
       ...migration,
       updatedAt: nowIso(),
@@ -541,12 +542,25 @@ export async function startE2EEMigration(passphrase: string): Promise<E2EEMigrat
     throw new Error('Finish the current encryption migration before re-enabling E2EE.');
   }
 
-  // Wipe any residual encrypted state before starting a fresh migration: rows in
-  // db.migrationBackfill, on sync_changes_encrypted, or a stale bundle in
-  // wrappedKeys, all under a key we no longer hold. This must SUCCEED before we
-  // mint a new DEK — otherwise old-DEK rows survive alongside the new key and
-  // every later sync chokes. So these are awaited and allowed to throw (which
-  // aborts the enable) rather than best-effort.
+  const migration = createMigration('enable');
+
+  // Atomically claim the transition on the server (plain → migrating_to_e2ee)
+  // and allocate the new DEK version. This is the authoritative cross-device
+  // guard: if another device already moved the account out of plain, this throws
+  // and we abort before touching anything. Done BEFORE the wipe below so we never
+  // destroy another device's encrypted state on a stale-local race.
+  const { pendingDekVersion } = await beginSyncTransition({
+    from: ['plain'],
+    to: 'migrating_to_e2ee',
+    migration,
+    allocateNewDek: true,
+  });
+  const dekVersion = pendingDekVersion ?? 1;
+
+  // Now that we own the transition, wipe any residual encrypted state before
+  // minting: rows in db.migrationBackfill, on sync_changes_encrypted, or a stale
+  // bundle in wrappedKeys. Do-or-abort (not best-effort) so old-DEK rows can't
+  // survive alongside the new key.
   await db.transaction('rw', db.encrypted, db.migrationBackfill, db.wrappedKeys, async () => {
     await db.encrypted.clear();
     await db.migrationBackfill.clear();
@@ -557,16 +571,14 @@ export async function startE2EEMigration(passphrase: string): Promise<E2EEMigrat
     await deleteRemoteWrappedKeys();
   } catch (cause) {
     throw new Error(
-      `Couldn't clear the previous encrypted data before enabling (${(cause as Error).message}). ` +
-        'Nothing was changed — check your connection and try again.',
+      `Couldn't clear the previous encrypted data before enabling (${errorMessage(cause)}). ` +
+        'Check your connection and try again.',
     );
   }
 
-  const migration = createMigration('enable');
-  const { dek, recoveryCode } = await mintBundle(passphrase, { dekVersion: 1 });
+  const { dek, recoveryCode } = await mintBundle(passphrase, { dekVersion });
   setSessionKey(dek);
 
-  await upsertRemoteSyncAccount('migrating_to_e2ee', migration);
   await saveProfile({
     passphraseEnabled: true,
     syncMode: 'migrating_to_e2ee',
@@ -685,7 +697,7 @@ async function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMig
       completed: true,
     };
   } catch (error) {
-    const message = (error as Error).message;
+    const message = errorMessage(error);
     const failedMigration: E2EEMigrationState = {
       ...migration,
       updatedAt: nowIso(),
@@ -735,7 +747,9 @@ export async function startE2EEDisableMigration(passphrase: string): Promise<E2E
   }
 
   const migration = createMigration('disable');
-  await upsertRemoteSyncAccount('migrating_to_plain', migration);
+  // Atomically claim e2ee → migrating_to_plain (cross-device mutual exclusion);
+  // throws if another device already moved the account.
+  await beginSyncTransition({ from: ['e2ee'], to: 'migrating_to_plain', migration, allocateNewDek: false });
   await saveProfile({
     passphraseEnabled: true,
     syncMode: 'migrating_to_plain',
@@ -814,7 +828,7 @@ async function driveRotation(
       completed: true,
     };
   } catch (error) {
-    const message = (error as Error).message;
+    const message = errorMessage(error);
     const failedMigration: E2EEMigrationState = { ...migration, updatedAt: nowIso(), lastError: message };
     await saveProfile({ passphraseEnabled: true, syncMode: 'rotating_e2ee_key', e2eeMigration: failedMigration });
     await upsertRemoteSyncAccount('rotating_e2ee_key', failedMigration).catch(() => undefined);
@@ -832,22 +846,26 @@ async function driveRotation(
 
 /**
  * Begin a rotation once the caller has proven possession of the old DEK (the
- * current passphrase unwrapped it, or a recovery code did). Mints the new
- * bundle ALONGSIDE the old one (so both survive the rotation), marks the
- * account rotating with active/pending versions, then drives the re-encrypt.
+ * current passphrase unwrapped it, or a recovery code did). Atomically claims
+ * the e2ee → rotating transition (cross-device mutual exclusion) and gets the
+ * server-allocated old/new DEK versions — so two concurrent rotations can't pick
+ * the same version. Mints the new bundle ALONGSIDE the old one, then drives the
+ * re-encrypt.
  */
 async function beginKeyRotation(
   oldDek: string,
-  oldVersion: number,
   newPassphrase: string,
 ): Promise<E2EEMigrationRunResult> {
-  const newVersion = oldVersion + 1;
-  const { dek: newDek, recoveryCode } = await mintBundle(newPassphrase, { dekVersion: newVersion });
   const migration = createMigration('rotate');
-  await upsertRemoteSyncAccount('rotating_e2ee_key', migration, {
-    activeDekVersion: oldVersion,
-    pendingDekVersion: newVersion,
+  const { activeDekVersion, pendingDekVersion } = await beginSyncTransition({
+    from: ['e2ee'],
+    to: 'rotating_e2ee_key',
+    migration,
+    allocateNewDek: true,
   });
+  const oldVersion = activeDekVersion ?? 1;
+  const newVersion = pendingDekVersion ?? oldVersion + 1;
+  const { dek: newDek, recoveryCode } = await mintBundle(newPassphrase, { dekVersion: newVersion });
   await saveProfile({ passphraseEnabled: true, syncMode: 'rotating_e2ee_key', e2eeMigration: migration });
   return driveRotation(oldDek, oldVersion, newDek, newVersion, migration, recoveryCode);
 }
@@ -885,7 +903,7 @@ export async function startE2EEKeyRotation(
   // Proof of possession AND the old DEK: only proceed if the supplied passphrase
   // actually unwraps the current bundle.
   const oldDek = await deriveDekFromBundle(oldBundle, currentPassphrase);
-  return beginKeyRotation(oldDek, oldBundle.dekVersion, newPassphrase ?? currentPassphrase);
+  return beginKeyRotation(oldDek, newPassphrase ?? currentPassphrase);
 }
 
 /**
@@ -939,7 +957,7 @@ export async function resumeE2EEKeyRotation(
     oldVersion = oldBundle.dekVersion;
     oldDek = await deriveDekFromBundle(oldBundle, oldPassphrase);
   } catch (error) {
-    const message = (error as Error).message;
+    const message = errorMessage(error);
     const failedMigration: E2EEMigrationState = { ...migration, updatedAt: nowIso(), lastError: message };
     await saveProfile({ passphraseEnabled: true, syncMode: 'rotating_e2ee_key', e2eeMigration: failedMigration });
     await upsertRemoteSyncAccount('rotating_e2ee_key', failedMigration).catch(() => undefined);
@@ -1147,7 +1165,7 @@ export async function recoverWithCode(
   // Rotate: re-encrypt the server's rows from the recovered DEK to a fresh one
   // wrapped under the new passphrase. Works with no local data — it re-encrypts
   // the server ciphertext directly.
-  return beginKeyRotation(oldDek, bundle.dekVersion, newPassphrase);
+  return beginKeyRotation(oldDek, newPassphrase);
 }
 
 // ── Crash recovery ─────────────────────────────────────────────────────────

@@ -14,6 +14,8 @@ const h = vi.hoisted(() => {
   const getLocalWrappedKeysImpl = vi.fn();
   const fetchRemoteWrappedKeysImpl = vi.fn();
   const saveLocalWrappedKeysImpl = vi.fn();
+  const clearLocalWrappedKeysImpl = vi.fn();
+  const clearSessionImpl = vi.fn();
   const clearPullCursorImpl = vi.fn();
   const channelOn = vi.fn();
   const channelSubscribe = vi.fn();
@@ -39,6 +41,8 @@ const h = vi.hoisted(() => {
     getLocalWrappedKeysImpl,
     fetchRemoteWrappedKeysImpl,
     saveLocalWrappedKeysImpl,
+    clearLocalWrappedKeysImpl,
+    clearSessionImpl,
     clearPullCursorImpl,
     channelOn,
     channelSubscribe,
@@ -81,6 +85,7 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
   getLocalWrappedKeys: () => h.getLocalWrappedKeysImpl(),
   fetchRemoteWrappedKeys: () => h.fetchRemoteWrappedKeysImpl(),
   saveLocalWrappedKeys: (bundle: unknown) => h.saveLocalWrappedKeysImpl(bundle),
+  clearLocalWrappedKeys: () => h.clearLocalWrappedKeysImpl(),
 }));
 
 vi.mock('$lib/sync/pull-cursor', () => ({
@@ -89,6 +94,7 @@ vi.mock('$lib/sync/pull-cursor', () => ({
 
 vi.mock('$lib/sync/session-key', () => ({
   rehydrateSession: () => undefined,
+  clearSession: () => h.clearSessionImpl(),
 }));
 
 vi.mock('$lib/auth/supabase', () => ({
@@ -143,6 +149,8 @@ beforeEach(() => {
   h.getLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
   h.fetchRemoteWrappedKeysImpl.mockReset().mockResolvedValue(null);
   h.saveLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
+  h.clearLocalWrappedKeysImpl.mockReset().mockResolvedValue(undefined);
+  h.clearSessionImpl.mockReset();
   h.clearPullCursorImpl.mockReset();
   h.channelOn.mockReset().mockReturnValue(h.channelObj);
   h.channelSubscribe.mockReset().mockReturnValue(h.channelObj);
@@ -282,6 +290,63 @@ describe('createSyncOrchestrator — runCycle', () => {
     );
     expect(h.saveLocalWrappedKeysImpl).toHaveBeenCalledTimes(1);
     expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('downgrades to plain when the server says plain but local is still e2ee', async () => {
+    // The account owner disabled E2EE on another device; this device must follow
+    // it down to plain, dropping its key material — otherwise its encrypted
+    // writes get rejected by the server's RLS.
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'plain' });
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'e2ee' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.clearLocalWrappedKeysImpl).toHaveBeenCalledTimes(1);
+    expect(h.clearSessionImpl).toHaveBeenCalledTimes(1);
+    expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
+    expect(h.setLocalSyncStateImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ syncMode: 'plain', passphraseEnabled: false }),
+    );
+  });
+
+  it('does not downgrade when both server and local are already plain', async () => {
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'plain' });
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.clearLocalWrappedKeysImpl).not.toHaveBeenCalled();
+    expect(h.setLocalSyncStateImpl).not.toHaveBeenCalled();
+  });
+
+  it('drops the stale key and re-locks when a rotation advanced the DEK version elsewhere', async () => {
+    // Server finished a rotation (active version 2); this device still holds v1.
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee', activeDekVersion: 2 });
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'e2ee' });
+    h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self', dekVersion: 1 });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.clearLocalWrappedKeysImpl).toHaveBeenCalledTimes(1);
+    expect(h.clearSessionImpl).toHaveBeenCalledTimes(1);
+    expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
+    // Stays e2ee locally (so the unlock gate fires) — no mode flip written.
+    expect(h.setLocalSyncStateImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not re-lock when the active DEK version matches the local bundle', async () => {
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee', activeDekVersion: 1 });
+    h.getProfileImpl.mockResolvedValue({ syncMode: 'e2ee' });
+    h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self', dekVersion: 1 });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.clearLocalWrappedKeysImpl).not.toHaveBeenCalled();
+    expect(h.clearSessionImpl).not.toHaveBeenCalled();
   });
 
   it('carries the in-flight migration record onto a fresh device', async () => {

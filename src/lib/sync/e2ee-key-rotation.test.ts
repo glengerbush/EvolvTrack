@@ -90,6 +90,15 @@ vi.mock('$lib/sync/account-state', () => ({
       state.upsertAccountCalls.push({ mode, migration, dekVersions });
     },
   ),
+  beginSyncTransition: vi.fn(async (t: { from: SyncMode[]; to: SyncMode; allocateNewDek: boolean }) => {
+    // Server allocates the next version off the current (old) bundle version.
+    const active = state.localBundle?.dekVersion ?? null;
+    return {
+      activeDekVersion: active,
+      pendingDekVersion: t.allocateNewDek ? (active ?? 0) + 1 : null,
+    };
+  }),
+  SyncTransitionConflictError: class extends Error {},
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({

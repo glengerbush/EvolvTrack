@@ -17,11 +17,12 @@ import { autoResumeMigration } from '$lib/sync/e2ee-migration';
 import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
 import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
-import { fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
+import { clearLocalWrappedKeys, fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import { clearPullCursor } from '$lib/sync/pull-cursor';
 import { supabase, supabaseUrl } from '$lib/auth/supabase';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
-import { rehydrateSession } from '$lib/sync/session-key';
+import { clearSession, rehydrateSession } from '$lib/sync/session-key';
+import { errorMessage } from '$lib/utils/errorMessage';
 import type { SyncMode } from '$lib/domain/types';
 import {
   connectivity,
@@ -53,8 +54,7 @@ function browserSaysOffline(): boolean {
 
 function looksLikeNetworkError(error: unknown): boolean {
   if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  return /network|fetch|ECONN|timeout|offline|reach/i.test(message);
+  return /network|fetch|ECONN|timeout|offline|reach/i.test(errorMessage(error));
 }
 
 /**
@@ -83,9 +83,6 @@ async function probeReachable(): Promise<boolean> {
   }
 }
 
-function isEncryptedMode(mode: SyncMode): boolean {
-  return mode === 'e2ee' || mode === 'migrating_to_e2ee' || mode === 'rotating_e2ee_key';
-}
 
 /**
  * If the server's `sync_accounts.sync_mode` disagrees with this device's
@@ -104,18 +101,60 @@ function isEncryptedMode(mode: SyncMode): boolean {
 async function reconcileSyncMode(): Promise<void> {
   const remote = await fetchRemoteSyncAccount();
   if (!remote) return;
-  if (!isEncryptedMode(remote.syncMode)) return;
 
   const profile = await getProfile();
   const localMode = getProfileSyncMode(profile);
   const localMigration = profile?.e2eeMigration;
 
-  if (isEncryptedMode(localMode)) {
-    // Already encrypted/migrating locally — the bundle is cached and the mode
-    // is right. Only keep migration *ownership* convergent: if another device
-    // has taken the migration over (different owner, at least as recent), adopt
-    // that here so this device stops believing it still owns it. Avoids two
-    // devices both trying to drive the same migration forward.
+  if (remote.syncMode === 'plain') {
+    // Server is plain. If this device is still encrypted/mid-migration, the
+    // account owner turned E2EE off elsewhere — follow it down to plain: drop
+    // the key material and switch modes. Local data and the outbox (which holds
+    // plaintext payloads — encryption happens at push time) are untouched, so
+    // the next push just goes to the plaintext table and nothing is lost.
+    // Without this the device keeps trying encrypted writes that the server's
+    // RLS now rejects (the "[object Object]" sync error).
+    if (localMode !== 'plain') {
+      await clearLocalWrappedKeys();
+      clearSession();
+      clearPullCursor();
+      await setLocalProfileSyncState({
+        syncMode: 'plain',
+        passphraseEnabled: false,
+        e2eeMigration: undefined,
+      });
+    }
+    return;
+  }
+
+  // Server is in a non-plain mode: e2ee, migrating_to_e2ee, ROTATING, or
+  // migrating_to_plain. All of these must be adopted onto the device. The
+  // migrating_to_plain case matters especially: if a disable got interrupted,
+  // the data still lives in the encrypted table — a device that defaulted to
+  // plain here would read the empty plaintext table and show NO data while the
+  // real data sits encrypted. Adopting the mode lets the device resume / take
+  // over the disable (which decrypts and re-publishes as plaintext) instead.
+  if (localMode !== 'plain') {
+    // A key rotation finished on another device: the active DEK version has
+    // advanced past the key this device holds, so our cached DEK can no longer
+    // read (or write) the server's rows. Drop the stale key and fall back to the
+    // locked state — the unlock screen fetches the new bundle and the user
+    // re-enters the (possibly changed) passphrase to derive the new DEK. Without
+    // this the device keeps the dead key, pulls 0 rows (filtered to its old
+    // version), and silently pushes orphaned old-version rows.
+    if (remote.syncMode === 'e2ee' && remote.activeDekVersion != null) {
+      const localBundle = await getLocalWrappedKeys();
+      if (localBundle && remote.activeDekVersion > localBundle.dekVersion) {
+        await clearLocalWrappedKeys();
+        clearSession();
+        clearPullCursor();
+        return; // stays e2ee → 'locked' → UnlockSessionModal pulls the new bundle
+      }
+    }
+
+    // Already in a non-plain mode locally. Keep migration *ownership*
+    // convergent: if another device took the migration over (different owner,
+    // at least as recent), adopt that so two devices don't both drive it.
     if (
       remote.migration &&
       remote.migration.ownerDeviceId !== localMigration?.ownerDeviceId &&
@@ -130,9 +169,9 @@ async function reconcileSyncMode(): Promise<void> {
     return;
   }
 
-  // Make sure the wrapped-key bundle is available locally so UnlockSessionModal
-  // can derive the DEK from the user's passphrase. Best-effort: if the fetch
-  // fails (network blip), the unlock screen will retry on its own path.
+  // Local is plain but the server isn't. Cache the wrapped-key bundle so the
+  // unlock / resume paths can derive the DEK from the passphrase. Best-effort:
+  // if the fetch fails (network blip), those screens retry on their own path.
   if (!(await getLocalWrappedKeys())) {
     try {
       const remoteBundle = await fetchRemoteWrappedKeys();
@@ -299,7 +338,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       lastSynced.record();
       syncStatus.set('idle');
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       lastSyncError.set(message);
       if (looksLikeNetworkError(error) || browserSaysOffline()) {
         connectivity.set('offline');
