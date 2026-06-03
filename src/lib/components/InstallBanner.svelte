@@ -25,7 +25,7 @@
 {/if}
 
 <style>
-  /* Mirrors .banner in SyncBanner.svelte, tinted with the brand accent. */
+  /* App-wide info banner, tinted with the brand accent. */
   .install-banner {
     display: flex;
     align-items: center;

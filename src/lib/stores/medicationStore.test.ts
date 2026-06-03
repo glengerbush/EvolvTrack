@@ -25,6 +25,7 @@ vi.mock('$lib/db/liveQuery', () => ({
 let prescriptionsForRepo: Prescription[] = [];
 vi.mock('$lib/domain/repo', () => ({
   getAllPrescriptions: async () => prescriptionsForRepo,
+  getAllInjections: async () => [],
 }));
 
 function rx(partial: Partial<Prescription> & { id: string }): Prescription {
@@ -69,6 +70,7 @@ describe('medicationStore — medicationRows mapping', () => {
       prescribedDosage: 0,
       dosesLeft: 0,
       status: 'neutral',
+      archived: false,
     });
   });
 
@@ -96,9 +98,20 @@ describe('medicationStore — medicationRows mapping', () => {
       additive: 'B12',
       mlInVial: 3,
       prescribedDosage: 0.5,
-      dosesLeft: 6,
+      // dosesLeft is now computed (capacity ÷ dose = 2.5×3 ÷ 0.5 = 15), not the
+      // stored value (6) — no doses are logged in this fixture, so the vial reads full.
+      dosesLeft: 15,
       status: 'active',
     });
+  });
+
+  it('threads the archived flag through, defaulting to false', async () => {
+    const { medicationRows } = await loadModule([
+      rx({ id: 'p1' }),
+      rx({ id: 'p2', archived: true }),
+    ]);
+    const rows = get(medicationRows);
+    expect(rows.map((r) => r.archived)).toEqual([false, true]);
   });
 
   it('assigns 1-based display ids in source order', async () => {

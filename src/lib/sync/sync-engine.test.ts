@@ -230,7 +230,10 @@ describe('pushEncryptedChanges — happy path', () => {
     const wireRow = (rows as Array<Record<string, unknown>>)[0];
     expect(wireRow).not.toHaveProperty('aggregate');
     expect(wireRow).not.toHaveProperty('op');
-    expect(h.recordMock).toHaveBeenCalledTimes(1);
+    // A single migration push step is not a completed sync: "Last synced" is
+    // stamped only when the migration finishes (finishE2EE*Migration) or a
+    // steady-state cycle completes (the orchestrator), never per push step.
+    expect(h.recordMock).not.toHaveBeenCalled();
   });
 
   it('allows push during migrating_to_e2ee when allowMigrating=true', async () => {
@@ -276,11 +279,16 @@ describe('pushPlainChanges', () => {
       id: 'p-1',
       user_id: 'user-1',
       aggregate: 'weight',
-      payload: { weightLbs: 180 },
+      // Wrapped in the same `{ aggregate, op, record }` envelope steady-state
+      // uses, so `pullPlain` can recover the record (the bare-record shape was
+      // the disable-migration bug that decoded back to a null upsert).
+      payload: { aggregate: 'weight', op: 'upsert', record: { weightLbs: 180 } },
       protocol_version: SYNC_PROTOCOL_VERSION,
       schema_version: DB_SCHEMA_VERSION,
     });
-    expect(h.recordMock).toHaveBeenCalledTimes(1);
+    // Not a completed sync — recording is owned by migration completion / the
+    // orchestrator cycle, not this per-step push.
+    expect(h.recordMock).not.toHaveBeenCalled();
   });
 });
 
@@ -299,7 +307,8 @@ describe('deleteRemoteEncryptedChanges', () => {
     expect(result).toEqual({ deleted: 3 });
     const [, filters] = h.deleteImpl.mock.calls[0];
     expect(filters).toEqual({ user_id: 'user-1', id: { in: ['a', 'b', 'c'] } });
-    expect(h.recordMock).toHaveBeenCalled();
+    // A delete step within a migration is not itself a completed sync.
+    expect(h.recordMock).not.toHaveBeenCalled();
   });
 
   it('throws and skips lastSynced when supabase reports an error', async () => {

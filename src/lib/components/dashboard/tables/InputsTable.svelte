@@ -1693,6 +1693,10 @@ function markRowsAsBaseline() {
     border-radius: 12px;
     padding: 0.7rem;
     margin-bottom: 0.75rem;
+    /* Solid fill: this panel sits above the chip strip (via .inputs-panel's
+     * z-index), so a transparent background would let the tab skirts show
+     * through it. Opaque --surface paints them out cleanly. */
+    background: var(--surface);
   }
 
   .th-edit {

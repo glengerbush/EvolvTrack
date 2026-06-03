@@ -853,3 +853,61 @@ describe('applyRemoteChange — profile per-field LWW', () => {
     expect(after.goalWeight).toBe(140);   // local wins goalWeight
   });
 });
+
+describe('applyRemoteChange — malformed null-record upserts', () => {
+  // Regression for the "null is not an object (evaluating 'e[t]')" migration
+  // crash: an older E2EE *disable* migration wrote plaintext rows without the
+  // `{aggregate, op, record}` envelope, so `pullPlain` decodes their record as
+  // null. Applying such a row used to `db.<table>.put(null)` and throw inside
+  // Dexie's key-path extraction, aborting the whole pull / enable migration.
+  it('skips a null-record weight upsert without throwing or writing', async () => {
+    let applied: boolean | undefined;
+    await expect(
+      (async () => {
+        applied = await applyRemoteChange({
+          aggregate: 'weight',
+          entityId: 'plain:weight:w1',
+          op: 'upsert',
+          record: null,
+          remoteUpdatedAt: MID,
+        });
+      })(),
+    ).resolves.toBeUndefined();
+    expect(applied).toBe(false);
+    expect(await db.weights.count()).toBe(0);
+  });
+
+  it('skips a null-record profile upsert without throwing', async () => {
+    const applied = await applyRemoteChange({
+      aggregate: 'profile',
+      entityId: 'profile',
+      op: 'upsert',
+      record: undefined,
+      remoteUpdatedAt: MID,
+    });
+    expect(applied).toBe(false);
+  });
+
+  it('still applies a well-formed upsert after a malformed one (one bad row does not poison the pull)', async () => {
+    await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'bad',
+      op: 'upsert',
+      record: null,
+      remoteUpdatedAt: MID,
+    });
+    const good = stampAllFields(
+      { id: 'good', date: iso('2026-05-10'), weightLbs: 200, createdAt: MID, updatedAt: MID },
+      MID,
+    ) as WeightEntry;
+    const applied = await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'good',
+      op: 'upsert',
+      record: good,
+      remoteUpdatedAt: MID,
+    });
+    expect(applied).toBe(true);
+    expect((await db.weights.get('good'))!.weightLbs).toBe(200);
+  });
+});

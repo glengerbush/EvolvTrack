@@ -39,9 +39,11 @@ import {
 import type {
   DosageColKey,
   HealthColKey,
+  InjectionEntry,
   Prescription,
   ProfileSettings,
   VialColKey,
+  WeightEntry,
   WeightUnit,
 } from '$lib/domain/types';
 import type { ThemeName } from '$lib/theme/dashboardTheme';
@@ -474,7 +476,110 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
   };
 }
 
+/** Day + recorded weight identify a weight reading. Weight-less rows
+ * (wellness/symptom-only) collapse by day alone so re-imports of them also
+ * dedupe. Rounded to 0.1 lb so trivial float noise doesn't defeat the match. */
+function weightDedupeKey(w: Pick<WeightEntry, 'date' | 'weightLbs'>): string {
+  const lbs = w.weightLbs != null ? Math.round(w.weightLbs * 10) / 10 : 'none';
+  return `${w.date}#${lbs}`;
+}
+
+function doseDedupeKey(date: string, amountMg: number): string {
+  return `${date}#${amountMg.toFixed(3)}`;
+}
+
+export type DedupeResult = {
+  data: ImportData;
+  skippedWeights: number;
+  skippedInjections: number;
+};
+
+/**
+ * Drop imported rows that duplicate data already present (in the DB, or earlier
+ * in the same import batch) so a merge import doesn't pile on copies.
+ *
+ *  - Weights: same day + same recorded weight ⇒ duplicate.
+ *  - Injections: same day + same dose amount, where the medications match OR
+ *    either side has no medication. The "no medication" case implements the
+ *    rule "if the dose matches but the drug is blank, assume it's the same drug
+ *    logged that day." Two *different* known drugs at the same dose on the same
+ *    day are kept (legitimately distinct).
+ *
+ * Prescriptions are left untouched — they aren't day-scoped, and a backup
+ * re-import overwrites them by id anyway.
+ */
+export function dedupeAgainstExisting(
+  data: ImportData,
+  existing: { weights: Pick<WeightEntry, 'date' | 'weightLbs'>[]; injections: Pick<InjectionEntry, 'date' | 'amountMg' | 'medication'>[] },
+): DedupeResult {
+  const seenWeights = new Set(existing.weights.map(weightDedupeKey));
+  const weights: WeightEntry[] = [];
+  let skippedWeights = 0;
+  for (const w of data.weights) {
+    const key = weightDedupeKey(w);
+    if (seenWeights.has(key)) {
+      skippedWeights += 1;
+      continue;
+    }
+    seenWeights.add(key);
+    weights.push(w);
+  }
+
+  // Per (day, dose), the set of medications already seen ('' = unknown drug).
+  const dayDoseMeds = new Map<string, Set<string>>();
+  const note = (date: string, amountMg: number, med: string) => {
+    const key = doseDedupeKey(date, amountMg);
+    const set = dayDoseMeds.get(key) ?? new Set<string>();
+    set.add(med);
+    dayDoseMeds.set(key, set);
+  };
+  const isDuplicateDose = (date: string, amountMg: number, med: string): boolean => {
+    const set = dayDoseMeds.get(doseDedupeKey(date, amountMg));
+    if (!set || set.size === 0) return false;
+    // Blank drug on either side ⇒ assume the same drug logged that day.
+    return med === '' || set.has('') || set.has(med);
+  };
+  for (const i of existing.injections) note(i.date, i.amountMg, i.medication ?? '');
+
+  const injections: InjectionEntry[] = [];
+  let skippedInjections = 0;
+  for (const i of data.injections) {
+    const med = i.medication ?? '';
+    if (isDuplicateDose(i.date, i.amountMg, med)) {
+      skippedInjections += 1;
+      continue;
+    }
+    note(i.date, i.amountMg, med);
+    injections.push(i);
+  }
+
+  return { data: { ...data, weights, injections }, skippedWeights, skippedInjections };
+}
+
 async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): Promise<void> {
+  // Merge mode: drop rows that duplicate data already on this device (or earlier
+  // in the same file) so re-importing doesn't create copies. Replace mode wipes
+  // first, so there's nothing to dedupe against.
+  if (mode === 'merge') {
+    const [existingWeights, existingInjections] = await Promise.all([
+      db.weights.toArray(),
+      db.injections.toArray(),
+    ]);
+    const deduped = dedupeAgainstExisting(parsed.data, {
+      weights: existingWeights,
+      injections: existingInjections,
+    });
+    parsed.data.weights = deduped.data.weights;
+    parsed.data.injections = deduped.data.injections;
+    const skipped = deduped.skippedWeights + deduped.skippedInjections;
+    if (skipped > 0) {
+      parsed.warnings = [
+        ...parsed.warnings,
+        `Skipped ${skipped} duplicate row${skipped === 1 ? '' : 's'} already present for those days.`,
+      ];
+    }
+  }
+
   const replaceProfile = parsed.source === 'EvolvTrack backup' || parsed.source === 'EvolvTrack spreadsheet' || Boolean(parsed.data.profile);
 
   // Collect every symptom referenced by the imported rows up-front. Folded

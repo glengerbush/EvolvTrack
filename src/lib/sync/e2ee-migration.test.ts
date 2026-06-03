@@ -131,6 +131,7 @@ import {
   autoResumeMigration,
   resumeE2EEDisableMigration,
   resumeE2EEMigration,
+  resumeMigrationByDirection,
   startE2EEDisableMigration,
   startE2EEMigration,
   takeOverMigration,
@@ -465,6 +466,53 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     expect(eventsArg[0].aggregate).toBe('weight');
   });
 
+  it('emits canonical `${aggregate}:${entityId}` ids and the record as payload (so pullPlain can read it back)', async () => {
+    // Regression for the disable→re-enable crash: plain rows must carry the
+    // entity's canonical id and the bare record (pushPlainChanges wraps it in
+    // the envelope). The old code used `${migrationId}:plain:...` ids and a
+    // shape that pullPlain decoded to a null record.
+    fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
+      {
+        id: 'mig-abc:weight:w99',
+        aggregate: 'weight',
+        op: 'upsert',
+        ciphertext:
+          'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99","weightLbs":180,"updatedAt":"2026-04-02T00:00:00.000Z"}}',
+        iv: 'iv',
+        protocolVersion: 1,
+        encryptionVersion: 1,
+        schemaVersion: 2,
+        createdAt: '2026-05-01T00:00:00.000Z',
+      },
+    ]);
+    pushPlainChangesMock.mockResolvedValueOnce({ pushed: 1 });
+    deleteRemoteEncryptedChangesMock.mockResolvedValueOnce({ deleted: 1 });
+
+    await startE2EEDisableMigration('pw');
+
+    const change = (pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>)[0];
+    expect(change.id).toBe('weight:w99'); // canonical, not migrationId-prefixed
+    expect(change.aggregate).toBe('weight');
+    expect(change.op).toBe('upsert');
+    expect(change.payload).toMatchObject({ id: 'w99', weightLbs: 180 }); // raw record
+    expect(change.createdAt).toBe('2026-04-02T00:00:00.000Z'); // the record's own LWW clock
+  });
+
+  it('builds canonical ids from local records on the fallback path', async () => {
+    fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([]);
+    pushPlainChangesMock.mockResolvedValueOnce({ pushed: 3 });
+
+    await startE2EEDisableMigration('pw');
+
+    const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
+    const ids = changes.map((c) => c.id);
+    // weights(w1) + injections(i1) + profile come from the repo mock.
+    expect(ids).toContain('weight:w1');
+    expect(ids).toContain('injection:i1');
+    expect(ids).toContain('profile:profile');
+    expect(ids.every((id) => !String(id).includes(':plain:'))).toBe(true);
+  });
+
   it('resets the pull cursor when E2EE is disabled', async () => {
     setPullCursor('2026-05-01T00:00:00.000Z');
     await startE2EEDisableMigration('pw');
@@ -662,6 +710,36 @@ describe('autoResumeMigration — crash recovery', () => {
 
     expect(outcome.status).toBe('paused');
     expect(outcome).toMatchObject({ result: { completed: false, error: 'network down' } });
+  });
+});
+
+describe('resumeMigrationByDirection', () => {
+  // Routes to the right resume function per direction. We assert routing via
+  // each resume path's distinctive "nothing in progress" rejection, with a
+  // steady-state profile so none of them actually run a migration.
+  it('routes enable → resumeE2EEMigration', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    await expect(resumeMigrationByDirection('enable', 'pw')).rejects.toThrow(
+      /No E2EE migration is in progress/i,
+    );
+  });
+
+  it('routes disable → resumeE2EEDisableMigration', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    await expect(resumeMigrationByDirection('disable', 'pw')).rejects.toThrow(
+      /No E2EE disable migration is in progress/i,
+    );
+  });
+
+  it('routes rotate → resumeE2EEKeyRotation', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
+    await expect(resumeMigrationByDirection('rotate', 'pw')).rejects.toThrow(
+      /No key rotation is in progress/i,
+    );
+  });
+
+  it('requires a passphrase regardless of direction', async () => {
+    await expect(resumeMigrationByDirection('enable', '')).rejects.toThrow(/passphrase is required/i);
   });
 });
 

@@ -62,7 +62,7 @@ export type SyncIndicator = {
   lastError: string | null;
   /** Migration progress, when applicable. */
   migration?: {
-    direction: 'enable' | 'disable';
+    direction: 'enable' | 'disable' | 'rotate';
     paused: boolean;
     error?: string;
     encryptedCount?: number;
@@ -144,13 +144,20 @@ function describe(kind: SyncKind, outbox: number, syncMode: SyncMode, percent: n
     case 'migration-paused':
       return { label: 'Migration paused', description: 'An encryption migration was interrupted. Enter your passphrase to resume.', tone: 'warn' };
     case 'migrating': {
-      const enabling = syncMode === 'migrating_to_e2ee';
       const pct = percent != null ? ` ${percent}%` : '';
-      return {
-        label: `${enabling ? 'Encrypting' : 'Decrypting'}${pct}`,
-        description: enabling ? 'Encrypting your data for end-to-end encryption…' : 'Switching back to plaintext sync…',
-        tone: 'progress',
-      };
+      const word =
+        syncMode === 'migrating_to_e2ee'
+          ? 'Encrypting'
+          : syncMode === 'rotating_e2ee_key'
+            ? 'Rotating key'
+            : 'Decrypting';
+      const desc =
+        syncMode === 'migrating_to_e2ee'
+          ? 'Encrypting your data for end-to-end encryption…'
+          : syncMode === 'rotating_e2ee_key'
+            ? 'Re-encrypting your data under a new key…'
+            : 'Switching back to plaintext sync…';
+      return { label: `${word}${pct}`, description: desc, tone: 'progress' };
     }
     case 'syncing':
       return { label: 'Syncing', description: 'Uploading and downloading changes…', tone: 'progress' };
@@ -196,7 +203,10 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
   ]) => {
     const syncMode = getProfileSyncMode($profile);
     const migrationState = $profile?.e2eeMigration;
-    const isMigrating = syncMode === 'migrating_to_e2ee' || syncMode === 'migrating_to_plain';
+    const isMigrating =
+      syncMode === 'migrating_to_e2ee' ||
+      syncMode === 'migrating_to_plain' ||
+      syncMode === 'rotating_e2ee_key';
     const migrationPaused = isMigrating && !!migrationState?.lastError;
     const percent = progressPercent(migrationState?.recordsConverted, migrationState?.recordsTotal);
 
@@ -230,7 +240,12 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
       lastError: $lastError,
       migration: isMigrating && migrationState
         ? {
-            direction: (migrationState.direction ?? 'enable') as 'enable' | 'disable',
+            direction: (migrationState.direction ??
+              (syncMode === 'migrating_to_plain'
+                ? 'disable'
+                : syncMode === 'rotating_e2ee_key'
+                  ? 'rotate'
+                  : 'enable')) as 'enable' | 'disable' | 'rotate',
             paused: migrationPaused,
             error: migrationState.lastError,
             encryptedCount: migrationState.encryptedEventCount,

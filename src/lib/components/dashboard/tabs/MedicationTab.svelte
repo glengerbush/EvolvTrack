@@ -5,7 +5,9 @@
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
   import { columnDecimals, fmtNum } from '$lib/utils/format';
   import type { MedicationInputRow } from '$lib/stores/medicationStore';
-  import { rawPrescriptions } from '$lib/stores/medicationStore';
+  import { rawPrescriptions, rawInjections, isConsumingDose, vialLevels } from '$lib/stores/medicationStore';
+  import { computeVialLevels, manualMgUsedForDesiredLeft, type VialLevel } from '$lib/utils/vialLevels';
+  import { vialUnit } from '$lib/stores/vialUnitStore';
   import { dismissedReminders } from '$lib/stores/dismissedRemindersStore';
   import { weightUnit, displayWeight } from '$lib/stores/unitStore';
   import { currentWeight, startWeight } from '$lib/stores/progressStore';
@@ -62,6 +64,7 @@
   let editable = $state(false);
   let settingsOpen = $state(false);
   let activeMedTab = $state<'dosage' | 'vial'>('dosage');
+  let showArchivedVials = $state(false);
 
   let medTableCardRegion: HTMLElement | undefined = $state();
 
@@ -146,8 +149,124 @@
   let vialTrackingRows = $state<VialTrackingRow[]>([]);
   let savedVialTrackingRows = $state<VialTrackingRow[]>([]);
   let draftBaseVialTrackingRows = $state<VialTrackingRow[]>([]);
-  const displayedMedicationInputRows = $derived(editable ? medicationInputRows : savedMedicationInputRows);
-  const displayedVialTrackingRows = $derived(editable ? vialTrackingRows : savedVialTrackingRows);
+  // The full draft/saved arrays stay the source of truth for editing and
+  // saving (commitVialOrder treats a missing dbId as a delete, so archived
+  // rows must never be filtered *out* of them). We only filter the rendered
+  // view: archived vials are hidden unless the user opts to show them.
+  const sourceMedicationInputRows = $derived(editable ? medicationInputRows : savedMedicationInputRows);
+  const sourceVialTrackingRows = $derived(editable ? vialTrackingRows : savedVialTrackingRows);
+  const archivedRowIds = $derived(
+    new Set(sourceMedicationInputRows.filter((r) => r.archived).map((r) => r.id)),
+  );
+  const displayedMedicationInputRows = $derived(
+    showArchivedVials ? sourceMedicationInputRows : sourceMedicationInputRows.filter((r) => !r.archived),
+  );
+  const displayedVialTrackingRows = $derived(
+    showArchivedVials ? sourceVialTrackingRows : sourceVialTrackingRows.filter((r) => !archivedRowIds.has(r.vialId)),
+  );
+  const archivedVialCount = $derived(archivedRowIds.size);
+
+  // ── Computed vial levels (doses / mg left) ────────────────────────────────
+  // The remaining column is derived, not stored: capacity (concentration × mL)
+  // minus what's been drawn, attributed compound-date FIFO across a medication's
+  // vials, with a per-vial manual correction. Computed from the *current* rows
+  // (so editing concentration/mL/dose updates it live) plus the logged doses.
+  const doseEvents = $derived(
+    $rawInjections.filter(isConsumingDose).map((i) => ({
+      medication: i.medication || '',
+      amountMg: i.amountMg,
+      date: i.date,
+      createdAt: i.createdAt,
+    })),
+  );
+  const compoundDateByVialId = $derived(
+    new Map(sourceVialTrackingRows.map((v) => [v.vialId, v.compoundDate || undefined])),
+  );
+  const computedVialLevels = $derived(
+    computeVialLevels(
+      sourceMedicationInputRows.map((row, index) => ({
+        id: String(row.id),
+        medication: row.type || '',
+        concentrationMgMl: row.concentrationMg,
+        vialMl: row.mlInVial,
+        prescribedDoseMg: row.prescribedDosage,
+        compoundDate: compoundDateByVialId.get(row.id),
+        sortOrder: index,
+        createdAt: '',
+        manualMgUsed: row.manualMgUsed,
+      })),
+      doseEvents,
+    ),
+  );
+  function levelOf(row: MedicationInputRow): VialLevel | undefined {
+    return computedVialLevels.get(String(row.id));
+  }
+  /** Remaining in the active unit, or null when specs are incomplete. */
+  function remainingValue(row: MedicationInputRow): number | null {
+    const lvl = levelOf(row);
+    if (!lvl || lvl.mgCapacity == null) return null;
+    if ($vialUnit === 'mg') return lvl.mgLeftClamped ?? 0;
+    return lvl.dosesLeft; // null when no prescribed dose size
+  }
+  function remainingDisplay(row: MedicationInputRow): string {
+    const v = remainingValue(row);
+    if (v == null) return '—';
+    return $vialUnit === 'mg' ? fmtNum(v, 1) : formatDoses(v);
+  }
+  function isVialEmpty(row: MedicationInputRow): boolean {
+    const lvl = levelOf(row);
+    return !!lvl && lvl.mgCapacity != null && (lvl.mgLeftClamped ?? 0) <= 0;
+  }
+  function isVialOver(row: MedicationInputRow): boolean {
+    return !!levelOf(row)?.over;
+  }
+  /** Commit a typed "remaining" as a manual correction (back-solved to mg used). */
+  function setRemainingOverride(row: MedicationInputRow, raw: string) {
+    // Clearing the cell removes the manual correction and reverts to auto-calc.
+    if (raw.trim() === '') {
+      medicationInputRows = medicationInputRows.map((r) =>
+        r.id === row.id ? { ...r, manualMgUsed: undefined } : r,
+      );
+      return;
+    }
+    const lvl = levelOf(row);
+    const capacity = row.concentrationMg * row.mlInVial;
+    if (!(capacity > 0)) return;
+    const entered = Number(raw);
+    if (!Number.isFinite(entered)) return;
+    const desiredMg =
+      $vialUnit === 'mg'
+        ? entered
+        : row.prescribedDosage > 0
+          ? entered * row.prescribedDosage
+          : NaN;
+    if (!Number.isFinite(desiredMg)) return; // doses entry needs a dose size
+    const manual = manualMgUsedForDesiredLeft(capacity, lvl?.mgUsedFromDoses ?? 0, desiredMg);
+    medicationInputRows = medicationInputRows.map((r) =>
+      r.id === row.id ? { ...r, manualMgUsed: manual } : r,
+    );
+  }
+  /**
+   * Editing a vial's concentration / mL / dose changes what the vial *is*, so a
+   * manual remaining-override set against the old specs is stale — drop it and
+   * fall back to the auto-calculation (the user can re-enter one if needed).
+   * Without this, the stored mg offset would silently shift the remaining when
+   * capacity changes.
+   */
+  function clearOverrideOnSpecEdit(row: MedicationInputRow) {
+    if (row.manualMgUsed !== undefined) {
+      medicationInputRows = medicationInputRows.map((r) =>
+        r.id === row.id ? { ...r, manualMgUsed: undefined } : r,
+      );
+    }
+  }
+
+  /** Computed doses-left for a saved prescription (store map), with a fallback. */
+  function dosesLeftForPrescription(p: Prescription): number {
+    const lvl = $vialLevels.get(p.id);
+    if (lvl && lvl.dosesLeft != null) return lvl.dosesLeft;
+    return p.dosesLeft ?? 0;
+  }
   let syncedPrescriptions = $state.raw<Prescription[] | null>(null);
   let colSettingsLoaded = $state(false);
   let lastNotifiedUnsavedChanges = false;
@@ -158,6 +277,7 @@
   const draftBaseHiddenVialCols = new SvelteSet<VialColKey>();
   let localDosageColumnSettingsChanged = false;
   let localVialColumnSettingsChanged = false;
+  let localShowArchivedChanged = false;
 
   function cloneMedicationRow(row: MedicationInputRow): MedicationInputRow {
     return { ...row };
@@ -259,6 +379,7 @@
       mlInVial: row.mlInVial,
       prescribedDosage: row.prescribedDosage,
       dosesLeft: row.dosesLeft,
+      manualMgUsed: row.manualMgUsed,
       status: row.status,
     }));
   }
@@ -326,6 +447,10 @@
         copySet(hiddenVialCols, nextHiddenVialCols);
         markVialColumnsAsBaseline();
       }
+
+      if (!localShowArchivedChanged) {
+        showArchivedVials = profile?.showArchivedVials ?? false;
+      }
     });
   });
 
@@ -341,7 +466,9 @@
       mlInVial: p.vialMl ?? 0,
       prescribedDosage: p.prescribedDoseMg ?? 0,
       dosesLeft: p.dosesLeft ?? 0,
+      manualMgUsed: p.manualMgUsed,
       status: p.status ?? 'neutral',
+      archived: p.archived ?? false,
     }));
   }
 
@@ -432,7 +559,7 @@
   const budReminders = $derived.by<BudReminder[]>(() =>
     $rawPrescriptions
       .map((p, i) => ({ p, vialNumber: i + 1 }))
-      .filter(({ p }) => (p.dosesLeft ?? 0) > 0 && !!p.bud && p.bud > todayKey && p.bud <= addDays(todayKey, BUD_WARNING_DAYS))
+      .filter(({ p }) => dosesLeftForPrescription(p) > 0 && !!p.bud && p.bud > todayKey && p.bud <= addDays(todayKey, BUD_WARNING_DAYS))
       .map(({ p, vialNumber }) => ({
         dbId: p.id,
         vialNumber,
@@ -447,7 +574,7 @@
     const supplyByType = new Map<string, number>();
     for (const p of $rawPrescriptions) {
       if (!p.type) continue;
-      const doses = p.dosesLeft ?? 0;
+      const doses = dosesLeftForPrescription(p);
       if (doses <= 0) continue;
       if (p.bud && p.bud <= todayKey) continue;
       supplyByType.set(p.type, (supplyByType.get(p.type) ?? 0) + doses);
@@ -485,7 +612,7 @@
     const m = new Map<string, number>();
     for (const p of $rawPrescriptions) {
       if (!p.type) continue;
-      const doses = p.dosesLeft ?? 0;
+      const doses = dosesLeftForPrescription(p);
       if (doses <= 0) continue;
       if (p.bud && p.bud <= todayKey) continue;
       m.set(p.type, (m.get(p.type) ?? 0) + doses);
@@ -517,7 +644,7 @@
   }
 
   const activeVialId = $derived(
-    displayedMedicationInputRows.filter((r) => r.dosesLeft > 0).sort((a, b) => a.id - b.id)[0]?.id ?? null
+    displayedMedicationInputRows.filter((r) => !isVialEmpty(r)).sort((a, b) => a.id - b.id)[0]?.id ?? null
   );
 
   const concentrationDecimals = $derived(
@@ -529,7 +656,7 @@
 
   function vialStatusClass(row: MedicationInputRow) {
     if (row.id === activeVialId) return 'vial-status-active';
-    if (row.dosesLeft <= 0) return 'vial-status-warning';
+    if (isVialEmpty(row)) return 'vial-status-warning';
     return 'vial-status-neutral';
   }
 
@@ -555,7 +682,7 @@
     const newId = Math.max(...medicationInputRows.map((r) => r.id), 0) + 1;
     medicationInputRows = [
       ...medicationInputRows,
-      { id: newId, dbId: '', type: '', cost: 0, pharmacy: '', concentrationMg: 0, additive: '', mlInVial: 0, prescribedDosage: 0, dosesLeft: 0, status: 'neutral' },
+      { id: newId, dbId: '', type: '', cost: 0, pharmacy: '', concentrationMg: 0, additive: '', mlInVial: 0, prescribedDosage: 0, dosesLeft: 0, status: 'neutral', archived: false },
     ];
     syncTrackingRowsToInputOrder();
   }
@@ -653,7 +780,9 @@
         additive: row.additive,
         vialMl: row.mlInVial,
         prescribedDoseMg: row.prescribedDosage,
-        dosesLeft: row.dosesLeft,
+        // `dosesLeft` is now derived (see vialLevels); persist only the manual
+        // correction the user typed into the remaining cell, if any.
+        manualMgUsed: row.manualMgUsed,
         status: row.status,
         compoundDate: vial?.compoundDate || undefined,
         bud: vial?.bud || undefined,
@@ -772,6 +901,39 @@
     hiddenVialCols.delete(column);
     persistVialColumnSettings();
     void announce(`${vialColumnLabel(column)} column restored.`);
+  }
+
+  function toggleShowArchivedVials() {
+    showArchivedVials = !showArchivedVials;
+    localShowArchivedChanged = true;
+    void saveProfile({ showArchivedVials }).catch((err) =>
+      console.error('Failed to save show-archived setting:', err),
+    );
+  }
+
+  // Archiving is a standalone side-action, not part of the dosage/vial draft:
+  // it persists immediately and isn't tracked by the unsaved-change detector
+  // (archived is absent from the comparable-row projections). We mirror the
+  // flag into every in-memory copy so it survives a pending draft (the
+  // prescription $effect won't rebuild medicationInputRows while edits are
+  // outstanding) and stays consistent once the live query echoes it back.
+  function setVialArchived(id: number, archived: boolean) {
+    const row =
+      medicationInputRows.find((r) => r.id === id) ??
+      savedMedicationInputRows.find((r) => r.id === id);
+    if (!row) return;
+    const apply = (rows: MedicationInputRow[]) =>
+      rows.map((r) => (r.id === id ? { ...r, archived } : r));
+    medicationInputRows = apply(medicationInputRows);
+    savedMedicationInputRows = apply(savedMedicationInputRows);
+    draftBaseMedicationInputRows = apply(draftBaseMedicationInputRows);
+    void announce(`Vial ${id} ${archived ? 'archived' : 'restored'}.`);
+
+    if (row.dbId) {
+      void updatePrescription(row.dbId, { archived }).catch((err) =>
+        console.error('Failed to update vial archived state:', err),
+      );
+    }
   }
 
   function syncTrackingRowsToInputOrder() {
@@ -1067,6 +1229,10 @@
               {/each}
             </div>
           </fieldset>
+          <label class="archived-toggle">
+            <input type="checkbox" checked={showArchivedVials} onchange={toggleShowArchivedVials} />
+            <span>Show archived vials{#if archivedVialCount > 0} ({archivedVialCount}){/if}</span>
+          </label>
         </section>
       {/if}
       <div class="table-scroll">
@@ -1108,6 +1274,13 @@
                         onclick={() => hideDosageColumn(col.key)}
                       >×</button>
                     </div>
+                  {:else if col.key === 'dosesLeft'}
+                    <button
+                      type="button"
+                      class="vial-unit-toggle"
+                      title="Switch between doses left and mg left"
+                      onclick={(e) => { e.stopPropagation(); vialUnit.toggle(); }}
+                    >{$vialUnit === 'mg' ? 'mg Left' : 'Doses Left'} ⇄</button>
                   {:else}
                     {col.label}
                   {/if}
@@ -1116,9 +1289,11 @@
             </tr>
           </thead>
           <tbody>
-            {#each displayedMedicationInputRows as row, index (row.id)}
+            {#each displayedMedicationInputRows as row, displayIndex (row.id)}
+              {@const index = sourceMedicationInputRows.findIndex((r) => r.id === row.id)}
               <tr
                 class={vialStatusClass(row)}
+                class:row-archived={row.archived}
                 class:row-dragging={editable && (dosageDragIndex === index || dosageKbIndex === index)}
                 class:row-dragover={editable && dosageDragoverIndex === index && dosageDragIndex !== index}
                 draggable={editable}
@@ -1144,6 +1319,17 @@
                     {/if}
                     <span>{row.id}</span>
                     {#if editable}
+                      {#if row.archived || isVialEmpty(row)}
+                        <button
+                          type="button"
+                          class="archive-btn"
+                          class:active={row.archived}
+                          aria-label={row.archived ? `Restore vial ${row.id}` : `Archive vial ${row.id}`}
+                          aria-pressed={row.archived}
+                          title={row.archived ? 'Restore vial' : 'Archive spent vial'}
+                          onclick={() => setVialArchived(row.id, !row.archived)}
+                        >{row.archived ? '⤒' : '⤓'}</button>
+                      {/if}
                       <button
                         type="button"
                         class="delete-btn"
@@ -1175,7 +1361,7 @@
                       {/if}
                     {:else if col.key === 'concentration'}
                       {#if editable}
-                        <input type="number" bind:value={row.concentrationMg} />
+                        <input type="number" bind:value={row.concentrationMg} onchange={() => clearOverrideOnSpecEdit(row)} />
                       {:else}
                         {fmtNum(row.concentrationMg, concentrationDecimals)}
                       {/if}
@@ -1187,21 +1373,27 @@
                       {/if}
                     {:else if col.key === 'mlInVial'}
                       {#if editable}
-                        <input type="number" bind:value={row.mlInVial} step="0.1" />
+                        <input type="number" bind:value={row.mlInVial} step="0.1" onchange={() => clearOverrideOnSpecEdit(row)} />
                       {:else}
                         {row.mlInVial}
                       {/if}
                     {:else if col.key === 'prescribedDosage'}
                       {#if editable}
-                        <input type="number" bind:value={row.prescribedDosage} step="0.1" />
+                        <input type="number" bind:value={row.prescribedDosage} step="0.1" onchange={() => clearOverrideOnSpecEdit(row)} />
                       {:else}
                         {fmtNum(row.prescribedDosage, prescribedDosageDecimals)}
                       {/if}
                     {:else if col.key === 'dosesLeft'}
                       {#if editable}
-                        <input type="number" bind:value={row.dosesLeft} step="0.1" />
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={remainingValue(row) ?? ''}
+                          onchange={(e) => setRemainingOverride(row, e.currentTarget.value)}
+                        />
+                        {#if isVialOver(row)}<span class="vial-over" title="Used past the labeled fill (overfill)">over</span>{/if}
                       {:else}
-                        {row.dosesLeft.toFixed(1)}
+                        {remainingDisplay(row)}{#if isVialOver(row)}<span class="vial-over" title="Used past the labeled fill (overfill)"> over</span>{/if}
                       {/if}
                     {/if}
                   </td>
@@ -1250,6 +1442,10 @@
               {/each}
             </div>
           </fieldset>
+          <label class="archived-toggle">
+            <input type="checkbox" checked={showArchivedVials} onchange={toggleShowArchivedVials} />
+            <span>Show archived vials{#if archivedVialCount > 0} ({archivedVialCount}){/if}</span>
+          </label>
         </section>
       {/if}
       <div class="table-scroll">
@@ -1301,8 +1497,11 @@
             </tr>
           </thead>
           <tbody>
-            {#each displayedVialTrackingRows as row, index (row.vialId)}
+            {#each displayedVialTrackingRows as row, displayIndex (row.vialId)}
+              {@const index = sourceVialTrackingRows.findIndex((r) => r.vialId === row.vialId)}
+              {@const medRow = getMedRowById(row.vialId)}
               <tr
+                class:row-archived={medRow?.archived}
                 class:row-dragging={editable && (vialDragIndex === index || vialKbIndex === index)}
                 class:row-dragover={editable && vialDragoverIndex === index && vialDragIndex !== index}
                 draggable={editable}
@@ -1328,6 +1527,17 @@
                     {/if}
                     <span>{row.vialId}</span>
                     {#if editable}
+                      {#if medRow?.archived || (medRow?.dosesLeft ?? 0) <= 0}
+                        <button
+                          type="button"
+                          class="archive-btn"
+                          class:active={medRow?.archived}
+                          aria-label={medRow?.archived ? `Restore vial ${row.vialId}` : `Archive vial ${row.vialId}`}
+                          aria-pressed={medRow?.archived ?? false}
+                          title={medRow?.archived ? 'Restore vial' : 'Archive spent vial'}
+                          onclick={() => setVialArchived(row.vialId, !medRow?.archived)}
+                        >{medRow?.archived ? '⤒' : '⤓'}</button>
+                      {/if}
                       <button
                         type="button"
                         class="delete-btn"
@@ -1571,6 +1781,34 @@
     background: color-mix(in oklab, var(--danger) 25%, transparent 75%);
   }
 
+  .archive-btn {
+    border: 0;
+    border-radius: 8px;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    margin-left: 0.25rem;
+    background: color-mix(in oklab, var(--cardBorder) 14%, transparent 86%);
+    color: color-mix(in oklab, var(--cardBorder) 70%, #555 30%);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 0;
+    display: inline-grid;
+    place-items: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .archive-btn:hover {
+    background: color-mix(in oklab, var(--cardBorder) 26%, transparent 74%);
+  }
+
+  /* Restore (already-archived) state reads as a filled, "on" chip. */
+  .archive-btn.active {
+    background: color-mix(in oklab, var(--headerBg) 86%, transparent);
+    color: var(--headerText);
+  }
+
   .th-edit {
     display: flex;
     flex-direction: column;
@@ -1590,6 +1828,10 @@
     display: grid;
     gap: 0.45rem;
     justify-items: start;
+    /* Solid fill: this panel sits above the chip strip (via .tab-panel's
+     * z-index), so a transparent background would let the tab skirts show
+     * through it. Opaque --surface paints them out cleanly. */
+    background: var(--surface);
   }
 
   .column-manager fieldset {
@@ -1668,6 +1910,18 @@
     font-size: 1rem;
     font-weight: 800;
     line-height: 1;
+  }
+
+  .archived-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.92rem;
+    cursor: pointer;
+  }
+
+  .archived-toggle input {
+    cursor: pointer;
   }
 
   .column-remove-btn {
@@ -2027,6 +2281,41 @@
 
   .inputs-table tbody tr.vial-status-neutral {
     background: transparent;
+  }
+
+  /* Header toggle that flips the remaining column between doses and mg. Reads as
+   * a column label, not a chunky button. */
+  .vial-unit-toggle {
+    font: inherit;
+    font-weight: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    white-space: nowrap;
+    text-decoration: underline dotted;
+    text-underline-offset: 0.18rem;
+  }
+  .vial-unit-toggle:hover,
+  .vial-unit-toggle:focus-visible {
+    text-decoration-style: solid;
+  }
+
+  /* Overfill marker: this vial has been drawn past its labeled fill. */
+  .vial-over {
+    margin-left: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: color-mix(in oklab, var(--warning, #e08a3c) 80%, var(--text, #000) 20%);
+  }
+
+  /* Archived vials only appear when "Show archived vials" is on; mute them so
+   * they read as set-aside without hiding their data. */
+  .inputs-table tbody tr.row-archived {
+    opacity: 0.55;
   }
 
   .inputs-table :global(input) {

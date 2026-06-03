@@ -16,11 +16,14 @@ import {
   BACKUP_KIND,
 } from './backup';
 import {
+  dedupeAgainstExisting,
   emptyImportData,
   importResultSummary,
   importTrackingFile,
   parseTrackingFile,
 } from './importer';
+import type { ImportData } from './shared';
+import type { InjectionEntry, WeightEntry } from '$lib/domain/types';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 
@@ -201,6 +204,85 @@ describe('importTrackingFile — merge mode', () => {
     expect(weights).toHaveLength(2);
     expect(injections).toHaveLength(2);
     expect(weights.map((w) => w.date).sort()).toEqual(['2026-05-01', '2026-05-10']);
+  });
+
+  it('skips rows that duplicate existing data and reports them in the warnings', async () => {
+    // Same day + same weight, and same day + same dose + same drug as the import.
+    await addWeight({ date: iso('2026-05-10'), weightLbs: 180 });
+    await addInjection({
+      date: iso('2026-05-10'),
+      amountMg: 5,
+      medication: SEMA,
+      site: 'belly',
+      symptoms: [],
+    });
+
+    const result = await importTrackingFile(jsonFile('b.json', backupPayload()), 'merge');
+
+    const weights = await getAllWeights();
+    const injections = await getAllInjections();
+    expect(weights).toHaveLength(1); // the imported duplicate was dropped
+    expect(injections).toHaveLength(1);
+    expect(result.data.weights).toHaveLength(0); // reported counts reflect what was added
+    expect(result.data.injections).toHaveLength(0);
+    expect(result.warnings.some((w) => /duplicate/i.test(w))).toBe(true);
+  });
+});
+
+describe('dedupeAgainstExisting', () => {
+  const weight = (date: string, weightLbs?: number): WeightEntry =>
+    ({ id: `w-${date}-${weightLbs ?? 'x'}`, date: iso(date), weightLbs, createdAt: 'c', updatedAt: 'u' }) as WeightEntry;
+  const dose = (date: string, amountMg: number, medication: string): InjectionEntry =>
+    ({ id: `i-${date}-${amountMg}-${medication}`, date: iso(date), amountMg, medication, site: '', symptoms: [], createdAt: 'c', updatedAt: 'u' }) as InjectionEntry;
+  const data = (over: Partial<ImportData>): ImportData => ({ weights: [], injections: [], prescriptions: [], ...over });
+
+  it('drops a weight matching an existing day + value, keeps a different value', async () => {
+    const result = dedupeAgainstExisting(
+      data({ weights: [weight('2026-05-10', 180), weight('2026-05-10', 190)] }),
+      { weights: [weight('2026-05-10', 180)], injections: [] },
+    );
+    expect(result.skippedWeights).toBe(1);
+    expect(result.data.weights.map((w) => w.weightLbs)).toEqual([190]);
+  });
+
+  it('drops an exact dose duplicate (day + amount + drug)', async () => {
+    const result = dedupeAgainstExisting(
+      data({ injections: [dose('2026-05-10', 5, SEMA)] }),
+      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
+    );
+    expect(result.skippedInjections).toBe(1);
+    expect(result.data.injections).toHaveLength(0);
+  });
+
+  it('treats a blank-drug import as the same drug logged that day at the same dose', async () => {
+    const result = dedupeAgainstExisting(
+      data({ injections: [dose('2026-05-10', 5, '')] }),
+      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
+    );
+    expect(result.skippedInjections).toBe(1);
+    expect(result.data.injections).toHaveLength(0);
+  });
+
+  it('keeps two different known drugs at the same dose on the same day', async () => {
+    const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
+    const result = dedupeAgainstExisting(
+      data({ injections: [dose('2026-05-10', 5, TIRZ)] }),
+      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
+    );
+    expect(result.skippedInjections).toBe(0);
+    expect(result.data.injections).toHaveLength(1);
+  });
+
+  it('dedupes within the same import batch, not just against existing data', async () => {
+    const result = dedupeAgainstExisting(
+      data({
+        weights: [weight('2026-05-10', 180), weight('2026-05-10', 180)],
+        injections: [dose('2026-05-10', 5, SEMA), dose('2026-05-10', 5, '')],
+      }),
+      { weights: [], injections: [] },
+    );
+    expect(result.data.weights).toHaveLength(1);
+    expect(result.data.injections).toHaveLength(1); // 2nd dose (blank drug) collapses into the 1st
   });
 });
 

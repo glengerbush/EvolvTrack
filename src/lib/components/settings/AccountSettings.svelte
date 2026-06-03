@@ -2,16 +2,14 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { dev } from '$app/environment';
-  import { onMount } from 'svelte';
-  import { bulkUpdateInjections, bulkUpdatePrescriptions, getProfile, getProfileSyncMode } from '$lib/domain/repo';
-  import type { E2EEMigrationState, InjectionEntry, Medication, Prescription, SyncMode } from '$lib/domain/types';
+  import { bulkUpdateInjections, bulkUpdatePrescriptions, getProfileSyncMode } from '$lib/domain/repo';
+  import { db } from '$lib/db/schema';
+  import { fromLiveQuery } from '$lib/db/liveQuery';
+  import type { InjectionEntry, Medication, Prescription } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
   import ThemeTuner from '$lib/components/settings/ThemeTuner.svelte';
   import {
-    resumeE2EEMigration,
-    resumeE2EEDisableMigration,
-    resumeE2EEKeyRotation,
     startE2EEMigration,
     startE2EEDisableMigration,
     startE2EEKeyRotation,
@@ -55,9 +53,25 @@
   let { only = null }: { only?: Section[] | null } = $props();
   const showSection = (name: Section) => !only || only.includes(name);
 
-  let syncMode = $state<SyncMode>('plain');
-  let e2eeMigration = $state<E2EEMigrationState | undefined>();
+  // Derive the encryption state from a live query on the profile — the same
+  // source the sync pill reads — so the card never goes stale. A login-time
+  // `reconcileSyncMode` (server says encrypted, this device was plain) flips the
+  // profile under us; reading it once on mount would leave the card showing
+  // "disabled" while the pill prompts for an unlock passphrase. (See the
+  // matching live query in `syncIndicator.ts`.)
+  const profile = fromLiveQuery(() => db.profile.get('profile'), undefined);
+  const syncMode = $derived(getProfileSyncMode($profile));
+  const e2eeMigration = $derived($profile?.e2eeMigration);
   let e2eeRequested = $state(false);
+
+  // `e2eeRequested` only gates the "create passphrase" form shown while sync is
+  // still plain and the user has ticked the box to begin enabling. Once the
+  // mode leaves plain (migration started, or reconciled from the server) that
+  // request has been consumed, so clear it — otherwise a later disable back to
+  // plain would wrongly re-show the enable form.
+  $effect(() => {
+    if (syncMode !== 'plain') e2eeRequested = false;
+  });
   let e2eeBusy = $state(false);
   let passphrase = $state('');
   let passphraseConfirm = $state('');
@@ -119,17 +133,6 @@
           ? 'Rotating encryption key'
         : 'Plain sync'
   );
-
-  onMount(() => {
-    void refreshSyncMode();
-  });
-
-  async function refreshSyncMode() {
-    const profile = await getProfile();
-    syncMode = getProfileSyncMode(profile);
-    e2eeMigration = profile?.e2eeMigration;
-    e2eeRequested = syncMode !== 'plain';
-  }
 
   function showRecoveryCode(next: string) {
     codeToShow = next;
@@ -225,9 +228,8 @@
   }
 
   function applyMigrationResult(result: E2EEMigrationRunResult) {
-    syncMode = result.syncMode;
-    e2eeMigration = result.migration;
-    e2eeRequested = result.syncMode !== 'plain';
+    // `syncMode` / `e2eeMigration` are derived from the profile live query, so
+    // the migration's own `saveProfile` writes drive them — nothing to set here.
     // A completed run clears any "resume needs your passphrase" prompt the
     // orchestrator raised; otherwise the next sync cycle reconciles it.
     if (result.completed) migrationResumePending.set(null);
@@ -267,42 +269,6 @@
     status = 'Starting encryption upgrade...';
     try {
       applyMigrationResult(await startE2EEMigration(passphrase));
-    } catch (error) {
-      status = (error as Error).message;
-    } finally {
-      e2eeBusy = false;
-    }
-  }
-
-  async function resumeE2EE() {
-    e2eeBusy = true;
-    status = 'Resuming encryption upgrade...';
-    try {
-      applyMigrationResult(await resumeE2EEMigration(passphrase));
-    } catch (error) {
-      status = (error as Error).message;
-    } finally {
-      e2eeBusy = false;
-    }
-  }
-
-  async function resumeKeyRotation() {
-    e2eeBusy = true;
-    status = 'Resuming key rotation…';
-    try {
-      applyMigrationResult(await resumeE2EEKeyRotation(passphrase));
-    } catch (error) {
-      status = (error as Error).message;
-    } finally {
-      e2eeBusy = false;
-    }
-  }
-
-  async function resumeDisableE2EE() {
-    e2eeBusy = true;
-    status = 'Resuming encryption disable...';
-    try {
-      applyMigrationResult(await resumeE2EEDisableMigration(passphrase));
     } catch (error) {
       status = (error as Error).message;
     } finally {
@@ -738,54 +704,18 @@
           <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !passphraseMatch} onclick={enableE2EE}>
             {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery code'}
           </button>
-        {:else if e2eeEnableMigrating}
+        {:else if migrationInProgress}
           <div class="migration-status">
             <p class="toggle-hint">
-              Encrypted upload is paused until this migration finishes.
+              {e2eeEnableMigrating
+                ? 'Encryption setup is in progress.'
+                : e2eeDisableMigrating
+                  ? 'Turning off encryption is in progress.'
+                  : 'Key rotation is in progress.'}
+              Steady-state sync is paused until it finishes — follow the prompt
+              on screen to complete or resume it.
             </p>
-            {#if e2eeMigration?.encryptedEventCount != null}
-              <p class="toggle-hint">{e2eeMigration.encryptedEventCount} local records prepared for encrypted sync.</p>
-            {/if}
-            {#if e2eeMigration?.lastError}
-              <p class="field-error">{e2eeMigration.lastError}</p>
-            {/if}
           </div>
-          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Passphrase" /></label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeE2EE}>
-            {e2eeBusy ? 'Resuming...' : 'Resume encryption upgrade'}
-          </button>
-        {:else if e2eeDisableMigrating}
-          <div class="migration-status">
-            <p class="toggle-hint">
-              Plaintext upload is paused until this migration finishes. Encrypted sync data will be deleted after plaintext upload succeeds.
-            </p>
-            {#if e2eeMigration?.plaintextEventCount != null}
-              <p class="toggle-hint">{e2eeMigration.plaintextEventCount} plaintext events prepared.</p>
-            {/if}
-            {#if e2eeMigration?.lastError}
-              <p class="field-error">{e2eeMigration.lastError}</p>
-            {/if}
-          </div>
-          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" /></label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeDisableE2EE}>
-            {e2eeBusy ? 'Resuming...' : 'Resume turning off E2EE'}
-          </button>
-        {:else if e2eeKeyRotating}
-          <div class="migration-status">
-            <p class="toggle-hint">
-              Key rotation is in progress. Encrypted sync is paused until it finishes.
-            </p>
-            {#if e2eeMigration?.encryptedEventCount != null}
-              <p class="toggle-hint">{e2eeMigration.encryptedEventCount} records re-encrypted under the new key.</p>
-            {/if}
-            {#if e2eeMigration?.lastError}
-              <p class="field-error">{e2eeMigration.lastError}</p>
-            {/if}
-          </div>
-          <label>Passphrase<input bind:value={passphrase} type="password" placeholder="Passphrase you most recently set" /></label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase} onclick={resumeKeyRotation}>
-            {e2eeBusy ? 'Resuming…' : 'Resume key rotation'}
-          </button>
         {:else if e2eeEnabled}
           <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" autocomplete="current-password" /></label>
           <div class="recovery-row">

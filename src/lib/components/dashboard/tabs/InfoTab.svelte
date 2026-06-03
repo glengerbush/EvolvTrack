@@ -238,6 +238,68 @@
         </p>
       </div>
     </details>
+
+    <details class="faq-item" id="faq-vials">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>How does EvolvTrack track what&rsquo;s left in each vial?</summary>
+      <div class="faq-answer">
+        <p>
+          In the <strong>Medications</strong> tab, the amount left in each vial is
+          <strong>calculated for you</strong>, you don&rsquo;t keep a running
+          count by hand. Tap the <strong>Doses Left</strong> column heading to
+          switch it between <strong>Doses Left</strong> and <strong>mg Left</strong>.
+        </p>
+
+        <h3 class="faq-subhead">What&rsquo;s calculated for you</h3>
+        <p>Each vial starts from its labeled size, taken from three columns you enter:</p>
+        <ul>
+          <li><strong>Concentration (mg/mL) &times; mL in Vial = total mg</strong> the vial holds.</li>
+          <li><strong>total mg &divide; Prescribed Dose = the number of doses</strong> in the vial.</li>
+        </ul>
+        <p>
+          From there, every dose you log is subtracted automatically, so the
+          remaining figure always reflects your real history. Only doses you
+          actually took count, <strong>planned</strong> (not-yet-taken) and
+          <strong>skipped</strong> doses don&rsquo;t draw anything down.
+        </p>
+
+        <h3 class="faq-subhead">Which vial a dose comes from</h3>
+        <p>
+          Doses come out of your <strong>oldest vial first</strong> (by compound
+          date). When a dose is larger than what&rsquo;s left in that vial, the
+          remainder is taken from the next one, the same split the
+          <a href="#faq-calculators">vial transition calculator</a> helps you draw.
+          So a vial only starts being used once the one before it is empty.
+        </p>
+
+        <h3 class="faq-subhead">Overfill</h3>
+        <p>
+          The count is based on the <strong>labeled</strong> fill (the mL you
+          entered). Compounded vials are often slightly overfilled, so you may get
+          an extra partial, or even full, dose beyond what the label
+          says. When that happens the vial shows <strong>0 left</strong> with an
+          <strong>&ldquo;over&rdquo;</strong> marker rather than pretending it holds
+          more. We don&rsquo;t guess at overfill; the numbers you can rely on are
+          the ones from the label.
+        </p>
+
+        <h3 class="faq-subhead">What you can override</h3>
+        <p>
+          The remaining amount can be manually overriden: type a number
+          into a vial&rsquo;s <strong>Doses Left / mg Left</strong> cell to set it
+          directly. That&rsquo;s useful if you used part of a vial before you started
+          logging, or want to fix an estimate. Your correction sticks, and doses you
+          log afterward keep counting down from it. Clear the cell to return to the
+          automatic calculation; and note that editing a vial&rsquo;s
+          concentration, mL, or prescribed dose also resets the override, since
+          those change what the vial is and the figure recalculates from scratch.
+        </p>
+        <p>
+          Everything else(a vial&rsquo;s capacity, how many doses it holds,
+          and which vial is currently active) follows from the columns above
+          and your logged doses, so it stays correct without any manual upkeep.
+        </p>
+      </div>
+    </details>
   </section>
 
   <section id="faq-charts" class="faq-section">

@@ -155,12 +155,30 @@ export interface Prescription {
   concentrationMgMl?: number;
   vialMl?: number;
   prescribedDoseMg?: number;
+  /**
+   * Legacy manual "doses remaining" figure. Superseded by the computed vial
+   * level (see `computeVialLevels`); retained for backward compatibility and as
+   * a fallback when specs are incomplete. New edits write `manualMgUsed`.
+   */
   dosesLeft?: number;
+  /**
+   * Manual correction (mg) added to a vial's computed consumption — e.g. doses
+   * taken before logging began, or fixing a misattribution. Set when the user
+   * edits the (otherwise auto-calculated) remaining cell. See `vialLevels.ts`.
+   */
+  manualMgUsed?: number;
   costUsd?: number;
   pharmacy?: string;
   additive?: string;
   status?: PrescriptionStatus;
   sortOrder?: number;
+  /**
+   * Hides a spent vial (typically once `dosesLeft` hits 0) from the medication
+   * tables. Inventory/history is preserved — the row is still saved, synced,
+   * and counted toward total spend; it's just filtered out of the default view
+   * unless `ProfileSettings.showArchivedVials` is on.
+   */
+  archived?: boolean;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   /** Per-field LWW clocks; see WeightEntry.fieldUpdatedAt for the format. */
@@ -181,6 +199,8 @@ export interface ProfileSettings {
   dosageHiddenCols?: DosageColKey[];
   vialColOrder?: VialColKey[];
   vialHiddenCols?: VialColKey[];
+  /** When true, archived (spent) vials are shown in the medication tables. */
+  showArchivedVials?: boolean;
   healthColOrder?: HealthColKey[];
   healthHiddenCols?: HealthColKey[];
   /**

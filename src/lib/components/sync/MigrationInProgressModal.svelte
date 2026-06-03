@@ -1,9 +1,10 @@
 <script lang="ts">
   // Shown on a device that finds an E2EE migration running on *another* device.
   // It reassures (the migration finishes on its own and this device's data is
-  // safe meanwhile) and shows live progress. Taking over is offered, but only
-  // emphasised once the other device's heartbeat looks stale — otherwise the
-  // primary action is simply to keep waiting.
+  // safe meanwhile) and shows live progress. The modal is non-dismissible —
+  // waiting is implicit (it closes itself when the other device finishes), and
+  // the only action is to take the migration over here, emphasised once the
+  // other device's heartbeat looks stale.
   type Direction = 'enable' | 'disable' | 'rotate';
 
   let {
@@ -14,7 +15,6 @@
     stale,
     takingOver = false,
     error = null,
-    onKeepWaiting,
     onTakeOver,
   }: {
     direction: Direction;
@@ -24,7 +24,6 @@
     stale: boolean;
     takingOver?: boolean;
     error?: string | null;
-    onKeepWaiting: () => void;
     onTakeOver: () => void;
   } = $props();
 
@@ -44,22 +43,16 @@
   );
   const hasTotal = $derived(typeof total === 'number' && total > 0);
 
+  // Non-dismissible: Escape and backdrop clicks are inert. The modal clears
+  // itself when the other device's migration completes (SyncGate polls).
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && !takingOver) {
-      event.preventDefault();
-      onKeepWaiting();
-    }
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (takingOver) return;
-    if (event.target === event.currentTarget) onKeepWaiting();
+    if (event.key === 'Escape') event.preventDefault();
   }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="modal-backdrop" role="presentation" onclick={handleBackdropClick}>
+<div class="modal-backdrop" role="presentation">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="migration-progress-title">
     <h3 id="migration-progress-title">{title}</h3>
     <p>
@@ -100,14 +93,6 @@
     {/if}
 
     <div class="modal-actions">
-      <button
-        type="button"
-        class={stale ? 'ghost' : 'primary'}
-        onclick={onKeepWaiting}
-        disabled={takingOver}
-      >
-        Keep waiting
-      </button>
       <button
         type="button"
         class={stale ? 'primary' : 'ghost'}

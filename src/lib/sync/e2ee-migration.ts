@@ -30,6 +30,7 @@ import {
   wrapDek,
 } from '$lib/crypto/e2ee';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
+import { lastSynced } from '$lib/stores/syncStore';
 import { getDeviceId, upsertRemoteSyncAccount } from '$lib/sync/account-state';
 import { clearSession, getSessionKey, setSessionKey } from '$lib/sync/session-key';
 import { clearPullCursor } from '$lib/sync/pull-cursor';
@@ -244,38 +245,63 @@ async function backfillEncryptedRecords(
   return backfillEntries.length;
 }
 
-function makePlainChangeId(migrationId: string, sourceId: string) {
-  return `${migrationId}:plain:${sourceId}`;
+/** The last colon-separated segment of a backfill/encrypted row id — the bare
+ * entity id, regardless of whether the source id was `${aggregate}:${entityId}`
+ * (steady-state) or `${migrationId}:${aggregate}:${entityId}` (migration). */
+function lastIdSegment(id: string): string {
+  const idx = id.lastIndexOf(':');
+  return idx >= 0 ? id.slice(idx + 1) : id;
 }
 
-async function collectPlainChangesFromLocalRecords(migrationId: string): Promise<PlainSyncChange[]> {
+/**
+ * Build a plaintext sync change in the canonical steady-state shape: id is
+ * `${aggregate}:${entityId}` (so `pullPlain`/`entityIdFromRowId` recover the
+ * right entity and `onConflict: user_id,id` overwrites the entity's row rather
+ * than accumulating a new one per migration), and `createdAt` carries the
+ * record's own `updatedAt` as the LWW clock. The record itself is the payload;
+ * `pushPlainChanges` wraps it in the `{aggregate, op, record}` envelope.
+ */
+function canonicalPlainChange(
+  aggregate: SyncAggregate,
+  op: 'upsert' | 'delete',
+  record: unknown,
+  fallbackSourceId: string,
+  fallbackUpdatedAt: string,
+  protocolVersion: number = SYNC_PROTOCOL_VERSION,
+  schemaVersion: number = DB_SCHEMA_VERSION,
+): PlainSyncChange {
+  const rec = record as { id?: string; updatedAt?: string } | null | undefined;
+  const entityId = rec?.id ?? lastIdSegment(fallbackSourceId);
+  return {
+    id: `${aggregate}:${entityId}`,
+    aggregate,
+    op,
+    payload: record,
+    protocolVersion,
+    schemaVersion,
+    createdAt: rec?.updatedAt ?? fallbackUpdatedAt,
+  };
+}
+
+async function collectPlainChangesFromLocalRecords(): Promise<PlainSyncChange[]> {
   const items = await collectBackfillItems();
-  return items.map((item) => ({
-    id: makePlainChangeId(migrationId, `${item.aggregate}:${item.id}`),
-    aggregate: item.aggregate,
-    op: 'upsert',
-    payload: item.payload,
-    protocolVersion: SYNC_PROTOCOL_VERSION,
-    schemaVersion: DB_SCHEMA_VERSION,
-    createdAt: nowIso(),
-  }));
+  return items.map((item) =>
+    canonicalPlainChange(item.aggregate, 'upsert', item.payload, item.id, item.updatedAt),
+  );
 }
 
-async function decryptLocalBackfill(dek: string, migrationId: string) {
+async function decryptLocalBackfill(dek: string) {
   const rows = await db.migrationBackfill.orderBy('createdAt').toArray();
   const plainChanges: PlainSyncChange[] = [];
 
   for (const row of rows) {
     const decrypted = await decryptRecord<EncryptedSyncPayload>(dek, row.payloadCiphertext, row.payloadIv);
-    plainChanges.push({
-      id: makePlainChangeId(migrationId, row.id),
-      aggregate: decrypted.aggregate ?? row.aggregate,
-      op: decrypted.op ?? row.op,
-      payload: decrypted.record ?? decrypted.payload ?? decrypted,
-      protocolVersion: row.protocolVersion,
-      schemaVersion: row.schemaVersion,
-      createdAt: row.createdAt,
-    });
+    const aggregate = decrypted.aggregate ?? row.aggregate;
+    const op = decrypted.op ?? row.op;
+    const record = op === 'delete' ? null : (decrypted.record ?? decrypted.payload ?? decrypted);
+    plainChanges.push(
+      canonicalPlainChange(aggregate, op, record, row.id, row.createdAt, row.protocolVersion, row.schemaVersion),
+    );
   }
 
   return {
@@ -284,7 +310,7 @@ async function decryptLocalBackfill(dek: string, migrationId: string) {
   };
 }
 
-async function decryptRemoteBackfill(dek: string, migrationId: string) {
+async function decryptRemoteBackfill(dek: string) {
   const rows = await fetchRemoteEncryptedChanges();
   const plainChanges: PlainSyncChange[] = [];
 
@@ -295,15 +321,18 @@ async function decryptRemoteBackfill(dek: string, migrationId: string) {
     if (!decrypted.aggregate || !decrypted.op) {
       throw new Error(`Encrypted sync row ${row.id} is missing aggregate/op in its envelope.`);
     }
-    plainChanges.push({
-      id: makePlainChangeId(migrationId, row.id),
-      aggregate: decrypted.aggregate,
-      op: decrypted.op,
-      payload: decrypted.record ?? decrypted.payload ?? decrypted,
-      protocolVersion: row.protocolVersion,
-      schemaVersion: row.schemaVersion,
-      createdAt: row.createdAt,
-    });
+    const record = decrypted.op === 'delete' ? null : (decrypted.record ?? decrypted.payload ?? decrypted);
+    plainChanges.push(
+      canonicalPlainChange(
+        decrypted.aggregate,
+        decrypted.op,
+        record,
+        row.id,
+        row.createdAt,
+        row.protocolVersion,
+        row.schemaVersion,
+      ),
+    );
   }
 
   return {
@@ -384,6 +413,11 @@ async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEM
   // The pull cursor tracked the old table's `inserted_at` sequence, so it is
   // meaningless against the new one — reset it and let the next pull refetch.
   clearPullCursor();
+  // The whole dataset is now on the server under the new mode — that's a
+  // completed sync. Stamp it so "Last synced" reflects a real completion, not a
+  // mid-flight push step (which is why the granular push/delete helpers no
+  // longer record it).
+  lastSynced.record();
 
   return completedMigration;
 }
@@ -553,6 +587,8 @@ async function finishE2EEDisableMigration(
     syncMode: 'plain',
     e2eeMigration: completedMigration,
   });
+  // A completed disable is a completed sync — see finishE2EEMigration.
+  lastSynced.record();
 
   return completedMigration;
 }
@@ -576,10 +612,10 @@ async function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMig
       setSessionKey(dek);
     }
 
-    const remoteDecrypted = await decryptRemoteBackfill(dek, migration.id);
+    const remoteDecrypted = await decryptRemoteBackfill(dek);
     const localDecrypted = remoteDecrypted.plainChanges.length
       ? { plainChanges: [] as PlainSyncChange[], encryptedChangeIds: [] as string[] }
-      : await decryptLocalBackfill(dek, migration.id);
+      : await decryptLocalBackfill(dek);
     const encryptedChangeIds = remoteDecrypted.encryptedChangeIds.length
       ? remoteDecrypted.encryptedChangeIds
       : localDecrypted.encryptedChangeIds;
@@ -588,7 +624,7 @@ async function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMig
       : localDecrypted.plainChanges;
     const plainChanges = decryptedPlainChanges.length
       ? decryptedPlainChanges
-      : await collectPlainChangesFromLocalRecords(migration.id);
+      : await collectPlainChangesFromLocalRecords();
 
     const plaintextEventCount = plainChanges.length;
     const updatedMigration: E2EEMigrationState = {
@@ -850,6 +886,20 @@ export async function startE2EEKeyRotation(
 export async function resumeE2EEKeyRotation(passphrase: string): Promise<E2EEMigrationRunResult> {
   if (!passphrase) throw new Error('Passphrase is required.');
   return continueE2EEKeyRotation(passphrase);
+}
+
+/**
+ * Resume whichever migration is in flight, dispatched by direction. The single
+ * entry point the migration modal calls so it doesn't have to branch on the
+ * three resume functions itself.
+ */
+export function resumeMigrationByDirection(
+  direction: E2EEMigrationDirection,
+  passphrase: string,
+): Promise<E2EEMigrationRunResult> {
+  if (direction === 'disable') return resumeE2EEDisableMigration(passphrase);
+  if (direction === 'rotate') return resumeE2EEKeyRotation(passphrase);
+  return resumeE2EEMigration(passphrase);
 }
 
 // ── Recovery via recovery code ───────────────────────────────────────────

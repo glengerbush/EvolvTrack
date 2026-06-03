@@ -6,15 +6,18 @@
   import { registerServiceWorker } from '$lib/utils/pwa';
   import { initInstallPrompt } from '$lib/stores/pwaInstallStore';
   import { startSyncOrchestrator } from '$lib/sync/sync-orchestrator';
-  import SyncBanner from '$lib/components/sync/SyncBanner.svelte';
+  import SyncGate from '$lib/components/sync/SyncGate.svelte';
   import InstallBanner from '$lib/components/InstallBanner.svelte';
+  import StorageWarningBanner from '$lib/components/StorageWarningBanner.svelte';
+  import { checkStorageHealth } from '$lib/stores/storageHealth';
   import { activeColorMode } from '$lib/stores/themeStore';
   import { authState } from '$lib/stores/authStore';
 
   let { children }: { children?: Snippet } = $props();
 
-  // This sync banner for app users — hide it on admin routes.
-  const showSyncBanner = $derived(!page.url.pathname.startsWith('/admin'));
+  // The sync gate (lock / migration modals) is for app users — hide it on
+  // admin routes.
+  const showSyncGate = $derived(!page.url.pathname.startsWith('/admin'));
 
   // Mirror the resolved color mode onto <html> so global CSS / browser-native
   // UI (scrollbars, form controls) follows the active theme.
@@ -41,6 +44,9 @@
   onMount(() => {
     registerServiceWorker();
     initInstallPrompt();
+    // Probe whether the browser can durably store data (warns on clear-on-close
+    // / blocked-storage browsers instead of silently losing everything).
+    void checkStorageHealth();
     // Returns a teardown fn that onMount runs on unmount.
     return startSyncOrchestrator();
   });
@@ -50,8 +56,9 @@
   <title>EvolvTrack - Own your progress</title>
 </svelte:head>
 
-{#if showSyncBanner}
-  <SyncBanner />
+{#if showSyncGate}
+  <SyncGate />
+  <StorageWarningBanner />
 {/if}
 <InstallBanner />
 {@render children?.()}

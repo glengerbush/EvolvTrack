@@ -505,6 +505,18 @@ export type RemoteChange = {
 export async function applyRemoteChange(change: RemoteChange): Promise<boolean> {
   const { aggregate, entityId, op, record, remoteUpdatedAt } = change;
 
+  // A malformed remote upsert whose record is null/undefined. The canonical
+  // source is a plaintext row written by an older E2EE *disable* migration,
+  // which stored the bare record without the `{aggregate, op, record}`
+  // envelope steady-state expects — so `pullPlain` decodes its `record` as
+  // null. Applying it would `db.<table>.put(null)`, which throws inside
+  // Dexie's key-path extraction (`null['id']` → "null is not an object
+  // (evaluating 'e[t]')") and aborts the whole pull / migration. There is
+  // nothing to write, so skip it as a no-op and let the cycle continue.
+  if (op === 'upsert' && (record === null || record === undefined)) {
+    return false;
+  }
+
   if (aggregate === 'weight') {
     const { result, stored } = await applyEntityChange(
       db.weights,

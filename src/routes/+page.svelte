@@ -202,12 +202,17 @@
   }
   .chart-frame {
     position: relative;
-    padding: 1.25rem;
     overflow: hidden;
   }
+  /* The chart is a faded backdrop: absolutely positioned so it fills whatever
+   * height the overlay content needs. The overlay (below) is in normal flow and
+   * therefore sizes the frame, so the headline + button never get clipped — at
+   * any width. preserveAspectRatio on the SVG keeps it undistorted as it scales. */
   .chart-frame svg {
+    position: absolute;
+    inset: 0;
     width: 100%;
-    height: auto;
+    height: 100%;
     display: block;
     opacity: 0.55;
   }
@@ -218,14 +223,14 @@
     stroke: var(--brand-2);
   }
   .chart-overlay {
-    position: absolute;
-    inset: 0;
+    position: relative;
     display: flex;
     flex-direction: column;
     justify-content: center;
     align-items: center;
     text-align: center;
-    padding: 1.5rem;
+    padding: 2.5rem 1.5rem;
+    min-height: 16rem;
     background: linear-gradient(
       to bottom,
       color-mix(in oklab, var(--surface) 70%, transparent) 0%,

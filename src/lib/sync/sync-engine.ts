@@ -1,6 +1,5 @@
 import { DB_SCHEMA_VERSION, db } from '$lib/db/schema';
 import { supabase } from '$lib/auth/supabase';
-import { lastSynced } from '$lib/stores/syncStore';
 import { applyRemoteChange, getProfile, getProfileSyncMode } from '$lib/domain/repo';
 import { requireAuthenticatedUser } from '$lib/sync/account-state';
 import { getSessionKey } from '$lib/sync/session-key';
@@ -84,11 +83,19 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
 }
 
 /**
- * The wire shape of an outbox change, before plain/encrypted routing. For a
- * delete, `record` is null — the envelope itself is the tombstone.
+ * The wire shape of a sync change, before plain/encrypted routing. For a
+ * delete, `record` is null — the envelope itself is the tombstone. Both the
+ * steady-state push and the migration push must produce this exact shape:
+ * `pullPlain` / `pullEncrypted` read `payload.record` back out, so a row
+ * written without the wrapper decodes to a null record (see the guard in
+ * `applyRemoteChange`).
  */
+function plainWireEnvelope(aggregate: SyncAggregate, op: 'upsert' | 'delete', record: unknown) {
+  return { aggregate, op, record };
+}
+
 function syncEnvelope(row: OutboxEntry) {
-  return { aggregate: row.aggregate, op: row.op, record: row.payload };
+  return plainWireEnvelope(row.aggregate, row.op, row.payload);
 }
 
 async function pushPlainOutbox(rows: OutboxEntry[], userId: string): Promise<void> {
@@ -348,7 +355,6 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
     .from('sync_changes_encrypted')
     .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
-  lastSynced.record();
   return { pushed: payload.length };
 }
 
@@ -361,7 +367,10 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
     user_id: user.id,
     aggregate: change.aggregate,
     op: change.op,
-    payload: change.payload,
+    // Wrap in the same envelope `pushPlainOutbox` uses so `pullPlain` can read
+    // `record` back out. Storing the bare record here was the disable-migration
+    // bug that left every converted row decoding to a null upsert.
+    payload: plainWireEnvelope(change.aggregate, change.op, change.payload),
     protocol_version: change.protocolVersion,
     schema_version: change.schemaVersion,
     created_at: change.createdAt,
@@ -371,7 +380,6 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
     .from('sync_changes_plain')
     .upsert(payload, { onConflict: 'user_id,id' });
   if (error) throw error;
-  lastSynced.record();
   return { pushed: payload.length };
 }
 
@@ -386,7 +394,6 @@ export async function deleteRemoteEncryptedChanges(ids?: string[]) {
 
   const { error } = await query;
   if (error) throw error;
-  lastSynced.record();
   return { deleted };
 }
 
@@ -410,7 +417,6 @@ export async function deleteRemotePlainChanges(ids?: string[]) {
 
   const { error } = await query;
   if (error) throw error;
-  lastSynced.record();
   return { deleted };
 }
 
