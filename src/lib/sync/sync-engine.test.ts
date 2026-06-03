@@ -123,6 +123,7 @@ import {
   pushEncryptedChanges,
   pushOutbox,
   pushPlainChanges,
+  reEncryptServerRows,
 } from './sync-engine';
 import { SYNC_PROTOCOL_VERSION } from './protocol';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
@@ -230,6 +231,9 @@ describe('pushEncryptedChanges — happy path', () => {
     const wireRow = (rows as Array<Record<string, unknown>>)[0];
     expect(wireRow).not.toHaveProperty('aggregate');
     expect(wireRow).not.toHaveProperty('op');
+    // Tagged with the active DEK version (1 with no rotation yet) so a future
+    // rotation can tell what's already been re-encrypted.
+    expect(wireRow.dek_version).toBe(1);
     // A single migration push step is not a completed sync: "Last synced" is
     // stamped only when the migration finishes (finishE2EE*Migration) or a
     // steady-state cycle completes (the orchestrator), never per push step.
@@ -656,6 +660,9 @@ describe('pullAndApply', () => {
 
     expect(result).toEqual({ fetched: 1, applied: 1 });
     expect(h.fromMock).toHaveBeenCalledWith('sync_changes_encrypted');
+    // Pull is scoped to the active DEK version (1), so orphaned rows under a
+    // different key are never fetched and can't crash the decrypt path.
+    expect(h.selectImpl.mock.calls.at(-1)?.[1]).toMatchObject({ dek_version: 1 });
     expect(h.decryptImpl).toHaveBeenCalledWith('pp', 'ct', 'iv');
     expect(h.applyImpl.mock.calls[0][0]).toMatchObject({
       aggregate: 'weight',
@@ -672,5 +679,49 @@ describe('pullAndApply', () => {
     await expect(pullAndApply()).rejects.toMatchObject({ message: 'rls-denied' });
     expect(h.state.pullCursor).toBe('cursor-before');
     expect(h.applyImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('reEncryptServerRows — server-side key rotation', () => {
+  it('re-encrypts old-version rows under the new DEK and upserts them at the new version', async () => {
+    h.selectImpl.mockResolvedValueOnce({
+      data: [
+        { id: 'weight:w1', ciphertext: 'old-ct-1', iv: 'iv1', protocol_version: 1, schema_version: 2, created_at: '2026-05-10T00:00:00.000Z' },
+        { id: 'injection:i1', ciphertext: 'old-ct-2', iv: 'iv2', protocol_version: 1, schema_version: 2, created_at: '2026-05-11T00:00:00.000Z' },
+      ],
+      error: null,
+    });
+    // decrypt(old) → envelope; encrypt(new) → fresh ciphertext.
+    h.decryptImpl.mockResolvedValue({ aggregate: 'weight', op: 'upsert', record: { id: 'x' } });
+    h.encryptImpl.mockResolvedValue({ ciphertext: 'new-ct', iv: 'new-iv' });
+
+    const converted = await reEncryptServerRows({ oldDek: 'OLD', oldVersion: 1, newDek: 'NEW', newVersion: 2 });
+
+    expect(converted).toBe(2);
+    // Fetched only the old version.
+    const [selTable, selFilters] = h.selectImpl.mock.calls[0];
+    expect(selTable).toBe('sync_changes_encrypted');
+    expect(selFilters).toMatchObject({ user_id: 'user-1', dek_version: 1 });
+    // Decrypt used the old DEK, encrypt used the new DEK.
+    expect(h.decryptImpl.mock.calls[0][0]).toBe('OLD');
+    expect(h.encryptImpl.mock.calls[0][0]).toBe('NEW');
+    // Upserted in place (same id) at the new version with the new ciphertext.
+    const [upTable, rows, opts] = h.upsertImpl.mock.calls[0];
+    expect(upTable).toBe('sync_changes_encrypted');
+    expect(opts).toEqual({ onConflict: 'user_id,id' });
+    expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
+      id: 'weight:w1',
+      user_id: 'user-1',
+      ciphertext: 'new-ct',
+      iv: 'new-iv',
+      dek_version: 2,
+    });
+  });
+
+  it('is a no-op (no upsert) when nothing remains on the old version', async () => {
+    h.selectImpl.mockResolvedValueOnce({ data: [], error: null });
+    const converted = await reEncryptServerRows({ oldDek: 'OLD', oldVersion: 1, newDek: 'NEW', newVersion: 2 });
+    expect(converted).toBe(0);
+    expect(h.upsertImpl).not.toHaveBeenCalled();
   });
 });

@@ -114,6 +114,8 @@ const pushEncryptedChangesMock = vi.fn(async (..._args: unknown[]) => ({ pushed:
 const deleteRemoteEncryptedChangesMock = vi.fn(async (..._args: unknown[]) => ({ deleted: 0 }));
 
 vi.mock('$lib/sync/sync-engine', () => ({
+  // Recovery rotates the key by re-encrypting the server's rows old→new.
+  reEncryptServerRows: vi.fn(async () => 1),
   pushEncryptedChanges: (...args: unknown[]) => pushEncryptedChangesMock(...args),
   pushPlainChanges: vi.fn(async () => ({ pushed: 0 })),
   deleteRemoteEncryptedChanges: (...args: unknown[]) => deleteRemoteEncryptedChangesMock(...args),

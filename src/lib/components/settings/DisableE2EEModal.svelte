@@ -1,4 +1,6 @@
 <script lang="ts">
+  import BackupButton from '$lib/components/settings/BackupButton.svelte';
+
   let {
     busy = false,
     error = null,
@@ -66,6 +68,9 @@
       {#if error}
         <p class="field-error" role="alert">{error}</p>
       {/if}
+      <div class="backup-slot">
+        <BackupButton compact />
+      </div>
       <div class="modal-actions">
         <button type="button" class="ghost" onclick={onCancel} disabled={busy}>Cancel</button>
         <button type="submit" class="primary" disabled={!passphrase || busy}>
@@ -176,5 +181,9 @@
     background: var(--brand, #1f7a3a);
     border: 1px solid var(--brand, #1f7a3a);
     color: #fff;
+  }
+
+  .backup-slot {
+    margin: 0.25rem 0 0.85rem;
   }
 </style>

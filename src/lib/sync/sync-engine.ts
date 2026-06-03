@@ -6,7 +6,19 @@ import { getSessionKey } from '$lib/sync/session-key';
 import { getPullCursor, setPullCursor } from '$lib/sync/pull-cursor';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { ENCRYPTION_FORMAT_VERSION, decryptRecord, encryptRecord } from '$lib/crypto/e2ee';
+import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import type { OutboxEntry, SyncAggregate } from '$lib/domain/types';
+
+/**
+ * The DEK version currently in force, taken from the local key bundle (defaults
+ * to 1 pre-versioning). Encrypted rows are tagged with this so a key rotation
+ * can tell what's already been re-encrypted, and pulls filter on it so an
+ * orphaned row under a different key (e.g. a crashed rotation) never reaches —
+ * and crashes — the decrypt path.
+ */
+async function activeDekVersion(): Promise<number> {
+  return (await getLocalWrappedKeys())?.dekVersion ?? 1;
+}
 
 type PushEncryptedChangesOptions = {
   allowMigrating?: boolean;
@@ -126,6 +138,7 @@ async function pushEncryptedOutbox(
   // cannot tell what kind of record this is or whether it's an upsert vs a
   // delete. The matching server column was dropped in migration
   // 20260528010000_strip_encrypted_metadata.sql.
+  const dekVersion = await activeDekVersion();
   const payload = [];
   for (const row of rows) {
     const encrypted = await encryptRecord(sessionKey, syncEnvelope(row));
@@ -136,6 +149,7 @@ async function pushEncryptedOutbox(
       iv: encrypted.iv,
       protocol_version: SYNC_PROTOCOL_VERSION,
       encryption_version: ENCRYPTION_FORMAT_VERSION,
+      dek_version: dekVersion,
       schema_version: DB_SCHEMA_VERSION,
       created_at: row.updatedAt,
     });
@@ -272,10 +286,15 @@ async function pullEncrypted(
   cursor: string | null,
   sessionKey: string,
 ): Promise<PulledEvent[]> {
+  // Only pull rows under the DEK we actually hold. A row under a different
+  // version (an orphan from an interrupted rotation, say) is undecryptable
+  // anyway, so excluding it here keeps one bad row from crashing the whole pull.
+  const dekVersion = await activeDekVersion();
   let query = supabase
     .from('sync_changes_encrypted')
     .select('id,ciphertext,iv,created_at,inserted_at')
     .eq('user_id', userId)
+    .eq('dek_version', dekVersion)
     .order('inserted_at', { ascending: true });
   if (cursor) query = query.gt('inserted_at', cursor);
 
@@ -339,7 +358,9 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
   if (!rows.length) return { pushed: 0 };
 
   // `aggregate` and `op` stay inside the encrypted payload — see
-  // pushEncryptedOutbox for the rationale.
+  // pushEncryptedOutbox for the rationale. Tag with the active DEK version (the
+  // bundle these backfill rows were encrypted under).
+  const dekVersion = await activeDekVersion();
   const payload = rows.map((row) => ({
     id: row.id,
     user_id: user.id,
@@ -347,6 +368,7 @@ export async function pushEncryptedChanges(options: PushEncryptedChangesOptions 
     iv: row.payloadIv,
     protocol_version: row.protocolVersion,
     encryption_version: row.encryptionVersion,
+    dek_version: dekVersion,
     schema_version: row.schemaVersion,
     created_at: row.createdAt
   }));
@@ -451,13 +473,14 @@ export async function pullSnapshotForMigration(
   return { fetched: events.length, applied };
 }
 
-export async function fetchRemoteEncryptedChanges(): Promise<EncryptedSyncChange[]> {
+export async function fetchRemoteEncryptedChanges(dekVersion?: number): Promise<EncryptedSyncChange[]> {
   const user = await requireAuthenticatedUser();
-  const { data, error } = await supabase
+  let query = supabase
     .from('sync_changes_encrypted')
     .select('id,ciphertext,iv,protocol_version,encryption_version,schema_version,created_at')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: true });
+    .eq('user_id', user.id);
+  if (dekVersion !== undefined) query = query.eq('dek_version', dekVersion);
+  const { data, error } = await query.order('created_at', { ascending: true });
 
   if (error) throw error;
 
@@ -470,4 +493,72 @@ export async function fetchRemoteEncryptedChanges(): Promise<EncryptedSyncChange
     schemaVersion: row.schema_version,
     createdAt: row.created_at,
   }));
+}
+
+export type ReEncryptProgress = (converted: number, total: number) => Promise<void> | void;
+
+/**
+ * Re-encrypt the server's encrypted rows from one DEK to another, in place.
+ *
+ * The heart of a crash-safe key rotation: it reads the rows still tagged with
+ * the OLD `dek_version`, decrypts each with `oldDek`, re-encrypts with `newDek`,
+ * and upserts it back under the SAME id with the NEW `dek_version`. Because it
+ * works from the server's ciphertext (not local plaintext) it needs no local
+ * data, so it runs on a fresh device. Because it only ever reads old-version
+ * rows and flips them in place, it's idempotent: a crashed run just re-processes
+ * whatever is still on the old version. Returns the number of rows converted.
+ */
+export async function reEncryptServerRows(params: {
+  oldDek: string;
+  oldVersion: number;
+  newDek: string;
+  newVersion: number;
+  onProgress?: ReEncryptProgress;
+}): Promise<number> {
+  const { oldDek, oldVersion, newDek, newVersion, onProgress } = params;
+  const user = await requireAuthenticatedUser();
+
+  const { data, error } = await supabase
+    .from('sync_changes_encrypted')
+    .select('id,ciphertext,iv,protocol_version,schema_version,created_at')
+    .eq('user_id', user.id)
+    .eq('dek_version', oldVersion);
+  if (error) throw error;
+
+  const rows = data ?? [];
+  const total = rows.length;
+  if (onProgress) await onProgress(0, total);
+  if (total === 0) return 0;
+
+  let converted = 0;
+  const CHUNK = 100;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const batch = rows.slice(i, i + CHUNK);
+    const payload = [];
+    for (const row of batch) {
+      // The envelope ({ aggregate, op, record }) is preserved verbatim — we only
+      // change the key it's sealed under.
+      const envelope = await decryptRecord<unknown>(oldDek, row.ciphertext, row.iv);
+      const encrypted = await encryptRecord(newDek, envelope);
+      payload.push({
+        id: row.id,
+        user_id: user.id,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        protocol_version: row.protocol_version,
+        encryption_version: ENCRYPTION_FORMAT_VERSION,
+        dek_version: newVersion,
+        schema_version: row.schema_version,
+        created_at: row.created_at,
+      });
+    }
+    const { error: upsertError } = await supabase
+      .from('sync_changes_encrypted')
+      .upsert(payload, { onConflict: 'user_id,id' });
+    if (upsertError) throw upsertError;
+    converted += batch.length;
+    if (onProgress) await onProgress(converted, total);
+  }
+
+  return converted;
 }

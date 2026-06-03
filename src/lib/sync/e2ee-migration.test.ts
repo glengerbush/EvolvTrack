@@ -132,11 +132,14 @@ import {
   resumeE2EEDisableMigration,
   resumeE2EEMigration,
   resumeMigrationByDirection,
+  resetEncryptionToPlain,
+  startFreshToPlain,
   startE2EEDisableMigration,
   startE2EEMigration,
   takeOverMigration,
 } from './e2ee-migration';
 import { db } from '$lib/db/schema';
+import { getAllWeights, getAllInjections } from '$lib/domain/repo';
 import {
   decryptRecord,
   derivePassphraseKek,
@@ -342,8 +345,11 @@ describe('startE2EEMigration — happy path from plain', () => {
   });
 });
 
-describe('startE2EEMigration — resume', () => {
-  it('resumes an in-progress migration by unwrapping the existing bundle, not minting a new one', async () => {
+describe('startE2EEMigration — refuses while a migration is in progress', () => {
+  // The enable toggle must not start a fresh migration (a new DEK) on top of an
+  // unfinished one — that's what orphaned rows under a second DEK. Resuming is a
+  // separate path (resumeE2EEMigration), driven by the migration modal.
+  it('throws instead of minting a second DEK', async () => {
     state.mockProfile = {
       id: 'profile',
       syncMode: 'migrating_to_e2ee',
@@ -356,7 +362,26 @@ describe('startE2EEMigration — resume', () => {
     } as ProfileSettings;
     state.localBundle = bundleFor('pw');
 
-    const result = await startE2EEMigration('pw');
+    await expect(startE2EEMigration('pw')).rejects.toThrow(/already in progress|finish or reset/i);
+    expect(generateDek).not.toHaveBeenCalled();
+  });
+});
+
+describe('resumeE2EEMigration — resume an in-progress enable', () => {
+  it('unwraps the existing bundle and finishes, without minting a new DEK', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        id: 'mig-x',
+        ownerDeviceId: 'device-1',
+        startedAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+
+    const result = await resumeE2EEMigration('pw');
 
     // A resume must not mint a fresh DEK or code — that would orphan the
     // already-encrypted backfill rows.
@@ -368,7 +393,7 @@ describe('startE2EEMigration — resume', () => {
     expect(result.recoveryCode).toBeUndefined();
   });
 
-  it('rejects with a clear error when no local bundle exists to unwrap', async () => {
+  it('pauses with a clear error when no local bundle exists to unwrap', async () => {
     state.mockProfile = {
       id: 'profile',
       syncMode: 'migrating_to_e2ee',
@@ -381,7 +406,7 @@ describe('startE2EEMigration — resume', () => {
     } as ProfileSettings;
     state.localBundle = undefined;
 
-    const result = await startE2EEMigration('pw');
+    const result = await resumeE2EEMigration('pw');
     // Failure surfaces as a paused migration with the error captured.
     expect(result.completed).toBe(false);
     expect(result.error).toMatch(/wrapped-key bundle/i);
@@ -740,6 +765,81 @@ describe('resumeMigrationByDirection', () => {
 
   it('requires a passphrase regardless of direction', async () => {
     await expect(resumeMigrationByDirection('enable', '')).rejects.toThrow(/passphrase is required/i);
+  });
+});
+
+describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
+  beforeEach(() => {
+    state.mockProfile = { id: 'profile', syncMode: 'migrating_to_e2ee' } as ProfileSettings;
+  });
+
+  it('re-pushes local data as canonical plaintext without decrypting anything', async () => {
+    pushPlainChangesMock.mockResolvedValueOnce({ pushed: 3 });
+    const result = await resetEncryptionToPlain();
+
+    // Never touches the (undecryptable) encrypted rows on the server.
+    expect(fetchRemoteEncryptedChangesMock).not.toHaveBeenCalled();
+    const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
+    const ids = changes.map((c) => c.id);
+    expect(ids).toContain('weight:w1');
+    expect(ids).toContain('injection:i1');
+    expect(result.pushed).toBe(3);
+  });
+
+  it('discards the encrypted server copy + key bundle and lands in plain mode', async () => {
+    setPullCursor('2026-05-01T00:00:00.000Z');
+    await resetEncryptionToPlain();
+
+    expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalled();
+    expect(clearLocalWrappedKeys).toHaveBeenCalled();
+    expect(deleteRemoteWrappedKeys).toHaveBeenCalled();
+    expect(clearSession).toHaveBeenCalled();
+    expect(getPullCursor()).toBeNull();
+
+    const finalSave = state.saveProfileCalls.at(-1);
+    expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
+    expect(state.upsertAccountCalls.at(-1)?.mode).toBe('plain');
+  });
+
+  it('does not delete the encrypted copy if the plaintext push fails', async () => {
+    pushPlainChangesMock.mockRejectedValueOnce(new Error('network down'));
+    await expect(resetEncryptionToPlain()).rejects.toThrow(/network down/);
+    expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses (and deletes nothing) when this device has no data to keep', async () => {
+    vi.mocked(getAllWeights).mockResolvedValueOnce([]);
+    vi.mocked(getAllInjections).mockResolvedValueOnce([]);
+    // getAllPrescriptions already returns [] in the repo mock.
+
+    await expect(resetEncryptionToPlain()).rejects.toThrow(/no data on this device/i);
+    expect(pushPlainChangesMock).not.toHaveBeenCalled();
+    expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('startFreshToPlain — erase and start over (no local data required)', () => {
+  beforeEach(() => {
+    state.mockProfile = { id: 'profile', syncMode: 'migrating_to_e2ee' } as ProfileSettings;
+  });
+
+  it('erases the encrypted + plaintext server data and the key bundle, then lands in plain', async () => {
+    await startFreshToPlain();
+
+    expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalled();
+    expect(deleteRemotePlainChangesMock).toHaveBeenCalled();
+    expect(clearLocalWrappedKeys).toHaveBeenCalled();
+    expect(deleteRemoteWrappedKeys).toHaveBeenCalled();
+    expect(clearSession).toHaveBeenCalled();
+
+    const finalSave = state.saveProfileCalls.at(-1);
+    expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
+    expect(state.upsertAccountCalls.at(-1)?.mode).toBe('plain');
+  });
+
+  it('never pushes local data (it discards rather than keeps)', async () => {
+    await startFreshToPlain();
+    expect(pushPlainChangesMock).not.toHaveBeenCalled();
   });
 });
 

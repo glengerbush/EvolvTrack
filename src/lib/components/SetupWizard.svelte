@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { setupWizardPending } from '$lib/stores/setupWizardStore';
   import { startE2EEMigration } from '$lib/sync/e2ee-migration';
+  import BackupButton from '$lib/components/settings/BackupButton.svelte';
   import { importTrackingFile, importResultSummary } from '$lib/importExport/importer';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { claimLicense, fetchLicenseStatus, type LicenseStatusRow } from '$lib/sync/license';
@@ -327,6 +328,10 @@
           </label>
 
           {#if e2eeStatus}<p class="status" role="status">{e2eeStatus}</p>{/if}
+
+          <div class="backup-slot">
+            <BackupButton compact />
+          </div>
         {/if}
       </div>
       <footer class="wizard-footer">

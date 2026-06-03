@@ -19,6 +19,7 @@
   import { migrationResumePending } from '$lib/stores/syncStore';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
+  import BackupButton from '$lib/components/settings/BackupButton.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
   import type { ColorModePreference, ThemeName } from '$lib/theme/dashboardTheme';
   import { weightUnit } from '$lib/stores/unitStore';
@@ -688,10 +689,7 @@
           Enable end-to-end encryption
         </label>
         <div class="backup-reminder">
-          <p class="toggle-hint">
-            <strong>Tip:</strong> download a backup from <em>Import / Export</em> above before
-            changing encryption settings — there's no undo for a stuck migration.
-          </p>
+          <BackupButton />
         </div>
 
         {#if e2eeRequested && syncMode === 'plain'}

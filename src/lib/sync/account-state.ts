@@ -63,6 +63,12 @@ export type RemoteSyncAccount = {
    * `rotating_*` mode). Reconstructed from the `sync_accounts` columns so a
    * device that logs in mid-migration learns one is underway and who owns it. */
   migration?: E2EEMigrationState;
+  /** The DEK version steady-state sync reads/writes (null ⇒ pre-versioning,
+   * treat as 1). */
+  activeDekVersion?: number;
+  /** The DEK version a key rotation is migrating toward; undefined when no
+   * rotation is in progress. */
+  pendingDekVersion?: number;
 };
 
 /**
@@ -75,7 +81,7 @@ export async function fetchRemoteSyncAccount(): Promise<RemoteSyncAccount | null
   const { data, error } = await supabase
     .from('sync_accounts')
     .select(
-      'sync_mode, e2ee_migration_id, e2ee_migration_direction, migration_owner_device_id, migration_started_at, migration_updated_at, migration_completed_at, plaintext_high_water_mark, migration_records_total, migration_records_converted',
+      'sync_mode, e2ee_migration_id, e2ee_migration_direction, migration_owner_device_id, migration_started_at, migration_updated_at, migration_completed_at, plaintext_high_water_mark, migration_records_total, migration_records_converted, active_dek_version, pending_dek_version',
     )
     .eq('user_id', user.id)
     .maybeSingle();
@@ -101,17 +107,34 @@ export async function fetchRemoteSyncAccount(): Promise<RemoteSyncAccount | null
       }
     : undefined;
 
-  return { syncMode: mode as SyncMode, migration };
+  return {
+    syncMode: mode as SyncMode,
+    migration,
+    activeDekVersion: (data.active_dek_version as number | null) ?? undefined,
+    pendingDekVersion: (data.pending_dek_version as number | null) ?? undefined,
+  };
 }
+
+/**
+ * DEK-version columns to write alongside the sync mode. Each field is only
+ * included in the upsert when explicitly provided, so callers that don't manage
+ * versioning leave the existing column values untouched (an omitted column is
+ * not in the conflict UPDATE set). Pass `null` to clear a column.
+ */
+export type DekVersionUpdate = {
+  activeDekVersion?: number | null;
+  pendingDekVersion?: number | null;
+};
 
 export async function upsertRemoteSyncAccount(
   syncMode: SyncMode,
   migration?: E2EEMigrationState,
+  dekVersions?: DekVersionUpdate,
 ): Promise<void> {
   const user = await requireAuthenticatedUser();
   const timestamp = nowIso();
 
-  const { error } = await supabase.from('sync_accounts').upsert({
+  const payload: Record<string, unknown> = {
     user_id: user.id,
     sync_mode: syncMode,
     e2ee_migration_id: migration?.id ?? null,
@@ -124,7 +147,15 @@ export async function upsertRemoteSyncAccount(
     migration_records_total: migration?.recordsTotal ?? null,
     migration_records_converted: migration?.recordsConverted ?? null,
     updated_at: timestamp,
-  }, { onConflict: 'user_id' });
+  };
+  if (dekVersions && 'activeDekVersion' in dekVersions) {
+    payload.active_dek_version = dekVersions.activeDekVersion;
+  }
+  if (dekVersions && 'pendingDekVersion' in dekVersions) {
+    payload.pending_dek_version = dekVersions.pendingDekVersion;
+  }
+
+  const { error } = await supabase.from('sync_accounts').upsert(payload, { onConflict: 'user_id' });
 
   if (error) throw error;
 }
