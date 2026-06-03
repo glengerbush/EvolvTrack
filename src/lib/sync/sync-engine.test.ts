@@ -294,6 +294,35 @@ describe('pushPlainChanges', () => {
     // orchestrator cycle, not this per-step push.
     expect(h.recordMock).not.toHaveBeenCalled();
   });
+
+  it('collapses duplicate ids to the newest, so the upsert never touches a row twice', async () => {
+    // Two encrypted rows (enable-backfill + steady-state) can decode to the same
+    // canonical plain id; Postgres rejects an upsert batch with a repeated
+    // (user_id, id), so pushPlainChanges must dedupe first.
+    const change = (createdAt: string, weightLbs: number) => ({
+      id: 'weight:w1',
+      aggregate: 'weight' as const,
+      op: 'upsert' as const,
+      payload: { id: 'w1', weightLbs },
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      schemaVersion: DB_SCHEMA_VERSION,
+      createdAt,
+    });
+
+    const result = await pushPlainChanges([
+      change('2026-05-05T00:00:00.000Z', 180),
+      change('2026-05-09T00:00:00.000Z', 190), // newer wins
+    ]);
+
+    expect(result).toEqual({ pushed: 1 });
+    const rows = h.upsertImpl.mock.calls[0][1] as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: 'weight:w1',
+      payload: { record: { id: 'w1', weightLbs: 190 } },
+      created_at: '2026-05-09T00:00:00.000Z',
+    });
+  });
 });
 
 describe('deleteRemoteEncryptedChanges', () => {

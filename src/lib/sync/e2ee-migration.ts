@@ -224,7 +224,12 @@ async function backfillEncryptedRecords(
     });
 
     backfillEntries.push({
-      id: `${migrationId}:${item.aggregate}:${item.id}`,
+      // Canonical `${aggregate}:${entityId}` — the SAME id steady-state encrypted
+      // pushes use — so an enable-backfill row and a later steady-state row for
+      // the same entity upsert into ONE server row instead of two. Two rows per
+      // entity would otherwise collapse to a duplicate id when disabling and
+      // crash the plaintext upsert. (`migrationId` lives inside the ciphertext.)
+      id: `${item.aggregate}:${item.id}`,
       aggregate: item.aggregate,
       op: 'upsert',
       payloadCiphertext: encrypted.ciphertext,

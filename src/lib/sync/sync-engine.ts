@@ -384,7 +384,18 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
   const user = await requireAuthenticatedUser();
   if (!changes.length) return { pushed: 0 };
 
-  const payload = changes.map((change) => ({
+  // Collapse duplicate ids, keeping the newest by `createdAt` (the LWW clock).
+  // Two encrypted rows can map to the same canonical plain id when one entity
+  // exists both as an enable-backfill row and a steady-state row; a Postgres
+  // upsert rejects a batch that touches the same (user_id, id) twice
+  // ("ON CONFLICT DO UPDATE command cannot affect row a second time").
+  const deduped = [...new Map(
+    [...changes]
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+      .map((change) => [change.id, change] as const),
+  ).values()];
+
+  const payload = deduped.map((change) => ({
     id: change.id,
     user_id: user.id,
     aggregate: change.aggregate,
