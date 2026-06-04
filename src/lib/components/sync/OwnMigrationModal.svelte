@@ -20,6 +20,7 @@
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { db } from '$lib/db/schema';
   import { errorMessage } from '$lib/utils/errorMessage';
+  import { focusTrap } from '$lib/utils/focusTrap';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
 
   type Direction = 'enable' | 'disable' | 'rotate';
@@ -105,7 +106,15 @@
         direction === 'rotate'
           ? await resumeE2EEKeyRotation(passphrase, newPassphrase || passphrase)
           : await resumeMigrationByDirection(direction, passphrase);
-      if (result.completed) {
+      if (result.superseded) {
+        // Another device took this migration over while we were resuming. Stand
+        // down rather than fight for it: clear the prompt and let sync converge
+        // us to the take-over banner (or steady state if it finishes there).
+        migrationResumePending.set(null);
+        passphrase = '';
+        newPassphrase = '';
+        requestSync();
+      } else if (result.completed) {
         migrationResumePending.set(null);
         passphrase = '';
         newPassphrase = '';
@@ -195,7 +204,14 @@
 </script>
 
 <div class="modal-backdrop" role="presentation">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="own-migration-title">
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="own-migration-title"
+    tabindex="-1"
+    use:focusTrap
+  >
     <h3 id="own-migration-title">{title}</h3>
 
     {#if needsAction}

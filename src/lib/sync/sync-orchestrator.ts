@@ -221,6 +221,18 @@ async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
     return 'halt';
   }
 
+  if (resume.status === 'superseded') {
+    // This device was driving the migration but another device took it over
+    // mid-run. Not an error: the aborted run left server state untouched. Drop
+    // our resume prompt and clear any stale error; the next cycle's reconcile
+    // adopts the new owner and re-raises the take-over banner with its data.
+    migrationResumePending.set(null);
+    lastSyncError.set(null);
+    connectivity.set('online');
+    syncStatus.set('idle');
+    return 'halt';
+  }
+
   migrationTakeoverAvailable.set(null);
 
   if (resume.status === 'needs-passphrase') {

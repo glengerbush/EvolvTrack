@@ -135,6 +135,16 @@ export class SyncTransitionConflictError extends Error {
   }
 }
 
+/** Raised when a migration this device was driving has been claimed (taken over)
+ * by another device. The signal to stop WITHOUT writing any failure/clobbering
+ * state — the new owner is finishing it, and the next reconcile converges. */
+export class MigrationSupersededError extends Error {
+  constructor() {
+    super('This migration was taken over by another device.');
+    this.name = 'MigrationSupersededError';
+  }
+}
+
 /**
  * Atomically claim an E2EE sync-mode transition on the server (see the
  * `begin_sync_transition` RPC). This is the authoritative cross-device guard:
@@ -171,6 +181,85 @@ export async function beginSyncTransition(params: {
     activeDekVersion: row?.active_version ?? null,
     pendingDekVersion: row?.pending_version ?? null,
   };
+}
+
+/**
+ * Atomically claim ownership of an in-flight migration (the "Take over on this
+ * device" affordance). A compare-and-swap on the owner this device last
+ * observed (`expectedOwnerDeviceId`): see the `claim_migration_owner` RPC. Only
+ * one of several waiting devices can win — the rest get
+ * `SyncTransitionConflictError` and must re-render from the refreshed state.
+ */
+export async function claimMigrationOwner(params: {
+  migrationId: string;
+  expectedOwnerDeviceId: string;
+  newOwnerDeviceId: string;
+}): Promise<void> {
+  await requireAuthenticatedUser();
+  const { error } = await supabase.rpc('claim_migration_owner', {
+    p_migration_id: params.migrationId,
+    p_expected_owner_device_id: params.expectedOwnerDeviceId,
+    p_new_owner_device_id: params.newOwnerDeviceId,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new SyncTransitionConflictError();
+    }
+    throw error;
+  }
+}
+
+/**
+ * Finalize a migration into its steady-state mode, but only if this device
+ * still owns it (see the `complete_sync_transition` RPC). If another device
+ * took the migration over, this raises `MigrationSupersededError` and writes
+ * nothing — so a slow original owner can't clobber the new owner's state.
+ * `activeDekVersion` is written verbatim (null when disabling); the pending
+ * version is always cleared.
+ */
+export async function completeSyncTransition(params: {
+  migrationId: string;
+  ownerDeviceId: string;
+  to: SyncMode;
+  activeDekVersion: number | null;
+}): Promise<void> {
+  await requireAuthenticatedUser();
+  const { error } = await supabase.rpc('complete_sync_transition', {
+    p_migration_id: params.migrationId,
+    p_owner_device_id: params.ownerDeviceId,
+    p_to: params.to,
+    p_active_version: params.activeDekVersion,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new MigrationSupersededError();
+    }
+    throw error;
+  }
+}
+
+/**
+ * Stamp a progress + liveness heartbeat for a migration this device owns.
+ *
+ * Unlike `upsertRemoteSyncAccount`, this NEVER writes `sync_mode` (or ownership)
+ * and is scoped `WHERE migration_owner_device_id = <owner>`: if the device has
+ * been superseded the update touches zero rows instead of resurrecting a stale
+ * mode/owner over the new owner's claim. Used for the mid-backfill heartbeats.
+ */
+export async function heartbeatMigrationProgress(migration: E2EEMigrationState): Promise<void> {
+  const user = await requireAuthenticatedUser();
+  const { error } = await supabase
+    .from('sync_accounts')
+    .update({
+      migration_updated_at: migration.updatedAt,
+      migration_records_total: migration.recordsTotal ?? null,
+      migration_records_converted: migration.recordsConverted ?? null,
+      updated_at: nowIso(),
+    })
+    .eq('user_id', user.id)
+    .eq('e2ee_migration_id', migration.id)
+    .eq('migration_owner_device_id', migration.ownerDeviceId);
+  if (error) throw error;
 }
 
 export async function upsertRemoteSyncAccount(

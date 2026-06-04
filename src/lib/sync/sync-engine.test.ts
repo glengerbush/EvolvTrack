@@ -13,6 +13,7 @@ const h = vi.hoisted(() => {
   const encryptImpl = vi.fn();
   const decryptImpl = vi.fn();
   const applyImpl = vi.fn();
+  const fetchAccountImpl = vi.fn();
   const state = {
     syncMode: 'e2ee' as 'plain' | 'migrating_to_e2ee' | 'e2ee' | 'migrating_to_plain',
     sessionKey: 'pp' as string | null,
@@ -27,6 +28,7 @@ const h = vi.hoisted(() => {
     encryptImpl,
     decryptImpl,
     applyImpl,
+    fetchAccountImpl,
     state,
   };
 });
@@ -90,6 +92,11 @@ vi.mock('$lib/stores/syncStore', () => ({
   lastSynced: { record: (...args: unknown[]) => h.recordMock(...args) },
 }));
 
+vi.mock('$lib/sync/account-state', () => ({
+  requireAuthenticatedUser: vi.fn(async () => ({ id: 'user-1' })),
+  fetchRemoteSyncAccount: () => h.fetchAccountImpl(),
+}));
+
 vi.mock('$lib/domain/repo', () => ({
   getProfile: vi.fn(async () => ({ syncMode: h.state.syncMode })),
   getProfileSyncMode: (profile: { syncMode?: string } | undefined) =>
@@ -119,6 +126,7 @@ import { db } from '$lib/db/schema';
 import {
   deleteRemoteEncryptedChanges,
   fetchRemoteEncryptedChanges,
+  fetchRemotePlainChanges,
   pullAndApply,
   pushEncryptedChanges,
   pushOutbox,
@@ -151,6 +159,8 @@ beforeEach(() => {
   h.upsertImpl.mockResolvedValue({ data: null, error: null });
   h.selectImpl.mockResolvedValue({ data: [], error: null });
   h.deleteImpl.mockResolvedValue({ data: null, error: null });
+  h.fetchAccountImpl.mockReset();
+  h.fetchAccountImpl.mockResolvedValue(null);
 });
 
 async function seedOutbox(id: string, overrides: Partial<OutboxEntry> = {}) {
@@ -349,6 +359,47 @@ describe('deleteRemoteEncryptedChanges', () => {
     await expect(deleteRemoteEncryptedChanges(['x'])).rejects.toMatchObject({ message: 'fail' });
     expect(h.recordMock).not.toHaveBeenCalled();
   });
+
+  it('reports the backend row count for a no-id sweep when one is returned', async () => {
+    // `delete({ count: 'exact' })` lets a delete-all report how many rows it
+    // removed — the disable migration surfaces this as deletedEncryptedEventCount.
+    h.deleteImpl.mockResolvedValueOnce({ data: null, error: null, count: 7 });
+    const result = await deleteRemoteEncryptedChanges();
+    expect(result).toEqual({ deleted: 7 });
+  });
+});
+
+describe('fetchRemotePlainChanges', () => {
+  it('maps plaintext rows into canonical PlainSyncChanges (id, record payload, LWW clock)', async () => {
+    h.selectImpl.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'weight:w1',
+          aggregate: 'weight',
+          op: 'upsert',
+          payload: { aggregate: 'weight', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
+          created_at: '2026-05-01T00:00:00.000Z',
+          inserted_at: '2026-05-01T00:00:01.000Z',
+        },
+      ],
+      error: null,
+    });
+
+    const changes = await fetchRemotePlainChanges();
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      id: 'weight:w1',
+      aggregate: 'weight',
+      op: 'upsert',
+      payload: { id: 'w1', weightLbs: 180 },
+      createdAt: '2026-05-01T00:00:00.000Z', // the row's own clock, not inserted_at
+    });
+  });
+
+  it('returns an empty array when the plaintext table is empty', async () => {
+    h.selectImpl.mockResolvedValueOnce({ data: [], error: null });
+    expect(await fetchRemotePlainChanges()).toEqual([]);
+  });
 });
 
 describe('fetchRemoteEncryptedChanges', () => {
@@ -417,6 +468,41 @@ describe('pushOutbox', () => {
     expect(result).toEqual({ pushed: 0, skipped: 'migration-in-progress' });
     expect(h.upsertImpl).not.toHaveBeenCalled();
     expect(await db.outbox.count()).toBe(1); // left intact for after the migration
+  });
+
+  it('swallows an RLS rejection as skipped=mode-rejected when the server is mid-transition', async () => {
+    // A non-owner device raced an E2EE change another device just started: this
+    // cycle reconciled in the old mode, so the server's sync_mode WITH CHECK
+    // (Postgres 42501) refused the write. That's benign — the outbox must
+    // survive so the edits re-push once the change finishes.
+    h.state.syncMode = 'e2ee';
+    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
+    h.upsertImpl.mockResolvedValueOnce({
+      data: null,
+      error: { code: '42501', message: 'new row violates row-level security policy' },
+    });
+    h.fetchAccountImpl.mockResolvedValueOnce({ syncMode: 'migrating_to_plain' });
+
+    const result = await pushOutbox();
+
+    expect(result).toEqual({ pushed: 0, skipped: 'mode-rejected' });
+    expect(await db.outbox.count()).toBe(1); // left intact for after the migration
+  });
+
+  it('rethrows an RLS rejection when the server is NOT mid-transition (e.g. lapsed license)', async () => {
+    // Same 42501, but the server is in steady state — this is a real failure
+    // (license/permission), not a transition race. It must surface, and the
+    // outbox must NOT be cleared.
+    h.state.syncMode = 'e2ee';
+    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
+    h.upsertImpl.mockResolvedValueOnce({
+      data: null,
+      error: { code: '42501', message: 'new row violates row-level security policy' },
+    });
+    h.fetchAccountImpl.mockResolvedValueOnce({ syncMode: 'e2ee' });
+
+    await expect(pushOutbox()).rejects.toMatchObject({ code: '42501' });
+    expect(await db.outbox.count()).toBe(1);
   });
 
   it('plain mode upserts enveloped payloads to sync_changes_plain and clears the outbox', async () => {

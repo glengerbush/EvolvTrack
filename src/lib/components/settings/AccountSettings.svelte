@@ -17,6 +17,7 @@
     type E2EEMigrationRunResult,
   } from '$lib/sync/e2ee-migration';
   import { rotateRecoveryCode } from '$lib/sync/recovery-code-rotation';
+  import { SyncTransitionConflictError } from '$lib/sync/account-state';
   import { migrationResumePending } from '$lib/stores/syncStore';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
@@ -170,6 +171,17 @@
     }
   }
 
+  // A cross-device transition conflict (another device is already enabling/
+  // disabling/rotating) isn't a failure of this device — surface clear "wait or
+  // take over" copy instead of the raw RPC error. The in-progress modal appears
+  // on the next sync cycle, where the user can wait or take over.
+  function e2eeErrorMessage(error: unknown): string {
+    if (error instanceof SyncTransitionConflictError) {
+      return 'Another device is already changing your encryption settings. Wait for it to finish — you can take over from the progress dialog if it stalls.';
+    }
+    return errorMessage(error);
+  }
+
   async function rotateEncryptionKey() {
     if (!passphrase) {
       status = 'Enter your current passphrase to rotate the encryption key.';
@@ -184,7 +196,7 @@
     try {
       applyMigrationResult(await startE2EEKeyRotation(passphrase));
     } catch (error) {
-      status = errorMessage(error);
+      status = e2eeErrorMessage(error);
     } finally {
       e2eeBusy = false;
     }
@@ -222,7 +234,7 @@
       // UI moves into the migration-status branch and the user can resume there.
       disableModalOpen = false;
     } catch (error) {
-      disableError = errorMessage(error);
+      disableError = e2eeErrorMessage(error);
       status = disableError;
     } finally {
       e2eeBusy = false;
@@ -239,6 +251,15 @@
     if (result.syncMode === 'plain') codeToShow = null;
     passphrase = '';
     passphraseConfirm = '';
+
+    if (result.superseded) {
+      // Another device took this migration over while this one was driving it.
+      // Not a failure: it finishes there and this device converges on the next
+      // sync cycle. Drop the resume prompt and show a neutral status.
+      migrationResumePending.set(null);
+      status = 'Another device took over this migration. It will finish there.';
+      return;
+    }
 
     if (result.completed && result.syncMode === 'plain') {
       status = `E2EE disabled. ${result.pushed} plaintext events uploaded and encrypted sync events were deleted.`;
@@ -272,7 +293,7 @@
     try {
       applyMigrationResult(await startE2EEMigration(passphrase));
     } catch (error) {
-      status = errorMessage(error);
+      status = e2eeErrorMessage(error);
     } finally {
       e2eeBusy = false;
     }

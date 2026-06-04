@@ -1,13 +1,13 @@
 import { DB_SCHEMA_VERSION, db } from '$lib/db/schema';
 import { supabase } from '$lib/auth/supabase';
 import { applyRemoteChange, getProfile, getProfileSyncMode } from '$lib/domain/repo';
-import { requireAuthenticatedUser } from '$lib/sync/account-state';
+import { fetchRemoteSyncAccount, requireAuthenticatedUser } from '$lib/sync/account-state';
 import { getSessionKey } from '$lib/sync/session-key';
 import { getPullCursor, setPullCursor } from '$lib/sync/pull-cursor';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { ENCRYPTION_FORMAT_VERSION, decryptRecord, encryptRecord } from '$lib/crypto/e2ee';
 import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
-import type { OutboxEntry, SyncAggregate } from '$lib/domain/types';
+import type { OutboxEntry, SyncAggregate, SyncMode } from '$lib/domain/types';
 
 /**
  * The DEK version currently in force, taken from the local key bundle (defaults
@@ -18,6 +18,44 @@ import type { OutboxEntry, SyncAggregate } from '$lib/domain/types';
  */
 async function activeDekVersion(): Promise<number> {
   return (await getLocalWrappedKeys())?.dekVersion ?? 1;
+}
+
+/** True for the three transient modes an account passes through during an E2EE
+ *  change. Steady-state pull/push pause for all of them. */
+function isMigratingSyncMode(mode: SyncMode): boolean {
+  return (
+    mode === 'migrating_to_e2ee' ||
+    mode === 'migrating_to_plain' ||
+    mode === 'rotating_e2ee_key'
+  );
+}
+
+/** Postgres SQLSTATE 42501 (insufficient_privilege) — what PostgREST returns
+ *  when a row fails a RLS `WITH CHECK`. On the sync-change tables the only
+ *  WITH CHECK that can trip is the sync_mode / license guard. */
+function isRowLevelSecurityRejection(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '42501'
+  );
+}
+
+/**
+ * Confirm a push rejection is the benign "another device started an E2EE change
+ * before this one caught up" case, rather than something we must surface (a
+ * lapsed license trips the same 42501). Returns true only when the server's
+ * canonical mode is mid-transition. Best-effort: if the confirmation fetch
+ * itself fails, return false so the original rejection is rethrown rather than
+ * silently swallowed.
+ */
+async function serverIsMidTransition(): Promise<boolean> {
+  try {
+    const account = await fetchRemoteSyncAccount();
+    return account != null && isMigratingSyncMode(account.syncMode);
+  } catch {
+    return false;
+  }
 }
 
 type PushEncryptedChangesOptions = {
@@ -46,8 +84,10 @@ export type EncryptedSyncChange = {
 
 export type PushOutboxResult = {
   pushed: number;
-  /** Set when the push was intentionally a no-op rather than a success. */
-  skipped?: 'migration-in-progress' | 'locked';
+  /** Set when the push was intentionally a no-op rather than a success.
+   *  `mode-rejected` is the server refusing a write because an E2EE change
+   *  started on another device after this cycle's reconcile — benign, retried. */
+  skipped?: 'migration-in-progress' | 'locked' | 'mode-rejected';
 };
 
 /**
@@ -69,11 +109,7 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
   const profile = await getProfile();
   const syncMode = getProfileSyncMode(profile);
 
-  if (
-    syncMode === 'migrating_to_e2ee' ||
-    syncMode === 'migrating_to_plain' ||
-    syncMode === 'rotating_e2ee_key'
-  ) {
+  if (isMigratingSyncMode(syncMode)) {
     return { pushed: 0, skipped: 'migration-in-progress' };
   }
 
@@ -82,12 +118,27 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
 
   const user = await requireAuthenticatedUser();
 
-  if (syncMode === 'e2ee') {
-    const sessionKey = getSessionKey();
-    if (!sessionKey) return { pushed: 0, skipped: 'locked' };
-    await pushEncryptedOutbox(rows, user.id, sessionKey);
-  } else {
-    await pushPlainOutbox(rows, user.id);
+  try {
+    if (syncMode === 'e2ee') {
+      const sessionKey = getSessionKey();
+      if (!sessionKey) return { pushed: 0, skipped: 'locked' };
+      await pushEncryptedOutbox(rows, user.id, sessionKey);
+    } else {
+      await pushPlainOutbox(rows, user.id);
+    }
+  } catch (error) {
+    // A non-owner device can race an E2EE change another device just started:
+    // this cycle's reconcile saw the pre-change mode, so we pushed in the now-
+    // stale mode and the server's sync_mode WITH CHECK refused it. Expected and
+    // benign — leave the outbox intact (these edits re-push, re-encrypted under
+    // the new key, once the change finishes) and report a skip rather than an
+    // error. The next reconcile adopts the migrating mode and the gate/modal
+    // take over. A 42501 that ISN'T a transition (e.g. a lapsed license) still
+    // throws, so real problems aren't swallowed.
+    if (isRowLevelSecurityRejection(error) && (await serverIsMidTransition())) {
+      return { pushed: 0, skipped: 'mode-rejected' };
+    }
+    throw error;
   }
 
   await clearPushedOutboxRows(rows);
@@ -222,11 +273,7 @@ export async function pullAndApply(): Promise<PullResult> {
   const profile = await getProfile();
   const syncMode = getProfileSyncMode(profile);
 
-  if (
-    syncMode === 'migrating_to_e2ee' ||
-    syncMode === 'migrating_to_plain' ||
-    syncMode === 'rotating_e2ee_key'
-  ) {
+  if (isMigratingSyncMode(syncMode)) {
     // During rotation the server holds old-DEK rows that the local (new) DEK
     // can't decrypt — pause pull until rotation finishes.
     return { fetched: 0, applied: 0, skipped: 'migration-in-progress' };
@@ -418,16 +465,22 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
 
 export async function deleteRemoteEncryptedChanges(ids?: string[]) {
   const user = await requireAuthenticatedUser();
-  let deleted = ids?.length ?? 0;
-  let query = supabase.from('sync_changes_encrypted').delete().eq('user_id', user.id);
+  // `count: 'exact'` so a no-id sweep (delete every row for the user) still
+  // reports how many it removed — the disable migration uses this to report the
+  // number of encrypted rows discarded, including orphans under a stale DEK
+  // version. Falls back to the id-list length when the backend omits a count.
+  let query = supabase
+    .from('sync_changes_encrypted')
+    .delete({ count: 'exact' })
+    .eq('user_id', user.id);
 
   if (ids?.length) {
     query = query.in('id', ids);
   }
 
-  const { error } = await query;
+  const { error, count } = await query;
   if (error) throw error;
-  return { deleted };
+  return { deleted: count ?? ids?.length ?? 0 };
 }
 
 /**
@@ -482,6 +535,32 @@ export async function pullSnapshotForMigration(
     if (await applyRemoteChange(event)) applied += 1;
   }
   return { fetched: events.length, applied };
+}
+
+/**
+ * Fetch every row currently in `sync_changes_plain` as canonical
+ * `PlainSyncChange`s (id `${aggregate}:${entityId}`, the record as payload, the
+ * row's `created_at` as the LWW clock).
+ *
+ * The disable migration uses this to fold the plaintext table into its
+ * conversion set: a device may have pushed a plain row before it learned a
+ * disable was underway (the account sits in `migrating_to_plain`, which RLS lets
+ * plain writes through). Concatenated with the encrypted-derived changes and run
+ * through `pushPlainChanges` — whose id-dedupe keeps the newest `createdAt` — so
+ * a newer plain edit is never clobbered by an older encrypted-derived one.
+ */
+export async function fetchRemotePlainChanges(): Promise<PlainSyncChange[]> {
+  const user = await requireAuthenticatedUser();
+  const events = await pullPlain(user.id, null);
+  return events.map((event) => ({
+    id: `${event.aggregate}:${event.entityId}`,
+    aggregate: event.aggregate,
+    op: event.op,
+    payload: event.record,
+    protocolVersion: SYNC_PROTOCOL_VERSION,
+    schemaVersion: DB_SCHEMA_VERSION,
+    createdAt: event.remoteUpdatedAt,
+  }));
 }
 
 export async function fetchRemoteEncryptedChanges(dekVersion?: number): Promise<EncryptedSyncChange[]> {

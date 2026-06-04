@@ -15,6 +15,18 @@ const state = vi.hoisted(() => ({
   saveProfileCalls: [] as Array<Partial<ProfileSettings>>,
   upsertAccountCalls: [] as Array<{ mode: SyncMode; migration?: E2EEMigrationState }>,
   beginTransitionCalls: [] as Array<{ from: SyncMode[]; to: SyncMode }>,
+  completeTransitionCalls: [] as Array<{
+    migrationId: string;
+    ownerDeviceId: string;
+    to: SyncMode;
+    activeDekVersion: number | null;
+  }>,
+  claimOwnerCalls: [] as Array<{
+    migrationId: string;
+    expectedOwnerDeviceId: string;
+    newOwnerDeviceId: string;
+  }>,
+  heartbeatCalls: [] as E2EEMigrationState[],
   localBundle: undefined as WrappedKeyBundle | undefined,
   remoteBundle: undefined as WrappedKeyBundle | undefined,
   saveLocalBundleCalls: [] as Array<Omit<WrappedKeyBundle, 'id'>>,
@@ -99,6 +111,37 @@ vi.mock('$lib/sync/account-state', () => ({
     },
   ),
   SyncTransitionConflictError: class extends Error {},
+  MigrationSupersededError: class extends Error {},
+  // Owner-scoped progress/liveness heartbeat: records the call but never writes
+  // a mode (mirrors the production helper, which is scoped to the owning device).
+  heartbeatMigrationProgress: vi.fn(async (migration: E2EEMigrationState) => {
+    state.heartbeatCalls.push(migration);
+  }),
+  // Guarded finalize: stand-in for the `complete_sync_transition` RPC.
+  completeSyncTransition: vi.fn(
+    async (p: {
+      migrationId: string;
+      ownerDeviceId: string;
+      to: SyncMode;
+      activeDekVersion: number | null;
+    }) => {
+      state.completeTransitionCalls.push(p);
+    },
+  ),
+  // Atomic take-over CAS: stand-in for the `claim_migration_owner` RPC.
+  claimMigrationOwner: vi.fn(
+    async (p: { migrationId: string; expectedOwnerDeviceId: string; newOwnerDeviceId: string }) => {
+      state.claimOwnerCalls.push(p);
+    },
+  ),
+  // Ownership re-check used by assertStillMigrationOwner: reflect back the
+  // current profile's migration so the happy paths (owner === this device) pass.
+  fetchRemoteSyncAccount: vi.fn(async () => ({
+    syncMode: state.mockProfile?.syncMode ?? 'plain',
+    migration: state.mockProfile?.e2eeMigration,
+    activeDekVersion: state.localBundle?.dekVersion ?? null,
+    pendingDekVersion: null,
+  })),
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({
@@ -129,6 +172,7 @@ const pushPlainChangesMock = vi.fn(async (..._args: unknown[]) => ({ pushed: 0 }
 const deleteRemoteEncryptedChangesMock = vi.fn(async (..._args: unknown[]) => ({ deleted: 0 }));
 const deleteRemotePlainChangesMock = vi.fn(async (..._args: unknown[]) => ({ deleted: 0 }));
 const fetchRemoteEncryptedChangesMock = vi.fn(async (..._args: unknown[]): Promise<unknown[]> => []);
+const fetchRemotePlainChangesMock = vi.fn(async (..._args: unknown[]): Promise<unknown[]> => []);
 const pullSnapshotForMigrationMock = vi.fn(async (..._args: unknown[]) => ({ fetched: 0, applied: 0 }));
 
 vi.mock('$lib/sync/sync-engine', () => ({
@@ -137,6 +181,7 @@ vi.mock('$lib/sync/sync-engine', () => ({
   deleteRemoteEncryptedChanges: (...args: unknown[]) => deleteRemoteEncryptedChangesMock(...args),
   deleteRemotePlainChanges: (...args: unknown[]) => deleteRemotePlainChangesMock(...args),
   fetchRemoteEncryptedChanges: (...args: unknown[]) => fetchRemoteEncryptedChangesMock(...args),
+  fetchRemotePlainChanges: (...args: unknown[]) => fetchRemotePlainChangesMock(...args),
   pullSnapshotForMigration: (...args: unknown[]) => pullSnapshotForMigrationMock(...args),
 }));
 
@@ -153,7 +198,14 @@ import {
   takeOverMigration,
 } from './e2ee-migration';
 import { db } from '$lib/db/schema';
-import { beginSyncTransition } from '$lib/sync/account-state';
+import {
+  beginSyncTransition,
+  claimMigrationOwner,
+  completeSyncTransition,
+  fetchRemoteSyncAccount,
+  MigrationSupersededError,
+  SyncTransitionConflictError,
+} from '$lib/sync/account-state';
 import { getAllWeights, getAllInjections } from '$lib/domain/repo';
 import {
   decryptRecord,
@@ -196,6 +248,9 @@ beforeEach(() => {
   state.saveProfileCalls.length = 0;
   state.upsertAccountCalls.length = 0;
   state.beginTransitionCalls.length = 0;
+  state.completeTransitionCalls.length = 0;
+  state.claimOwnerCalls.length = 0;
+  state.heartbeatCalls.length = 0;
   state.localBundle = undefined;
   state.remoteBundle = undefined;
   state.saveLocalBundleCalls.length = 0;
@@ -212,6 +267,8 @@ beforeEach(() => {
   deleteRemotePlainChangesMock.mockResolvedValue({ deleted: 0 });
   fetchRemoteEncryptedChangesMock.mockClear();
   fetchRemoteEncryptedChangesMock.mockResolvedValue([]);
+  fetchRemotePlainChangesMock.mockClear();
+  fetchRemotePlainChangesMock.mockResolvedValue([]);
   pullSnapshotForMigrationMock.mockClear();
   pullSnapshotForMigrationMock.mockResolvedValue({ fetched: 0, applied: 0 });
   vi.mocked(encryptRecord).mockClear();
@@ -315,9 +372,10 @@ describe('startE2EEMigration — happy path from plain', () => {
   it('records account-state transitions: migrating_to_e2ee then e2ee', async () => {
     state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
     await startE2EEMigration('pw');
-    const modes = state.upsertAccountCalls.map((c) => c.mode);
-    expect(modes[0]).toBe('migrating_to_e2ee');
-    expect(modes[modes.length - 1]).toBe('e2ee');
+    // The claim is atomic now: begin_sync_transition opens the migration, and
+    // complete_sync_transition (guarded by ownership) lands the steady-state.
+    expect(state.beginTransitionCalls[0]?.to).toBe('migrating_to_e2ee');
+    expect(state.completeTransitionCalls.at(-1)?.to).toBe('e2ee');
   });
 
   it('pulls a remote snapshot under the DEK before re-encrypting', async () => {
@@ -528,6 +586,57 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     const eventsArg = pushPlainChangesMock.mock.calls[0]?.[0] as Array<{ aggregate: string }>;
     expect(Array.isArray(eventsArg)).toBe(true);
     expect(eventsArg[0].aggregate).toBe('weight');
+  });
+
+  it('decrypts only the active DEK version (skips orphan-version rows that would crash the decrypt)', async () => {
+    // Bundle the device holds is version 2 (e.g. after a rotation); the disable
+    // backfill must request only v2 rows, not every row regardless of version.
+    state.localBundle = { ...bundleFor('pw'), dekVersion: 2 };
+    fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([]);
+    pushPlainChangesMock.mockResolvedValueOnce({ pushed: 3 });
+
+    await startE2EEDisableMigration('pw');
+
+    expect(fetchRemoteEncryptedChangesMock).toHaveBeenCalledWith(2);
+    // And it sweeps ALL encrypted rows at the end (no id list) so orphan-version
+    // rows the decrypt skipped don't linger on the server.
+    expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalledWith();
+  });
+
+  it('folds rows already in the plaintext table into the conversion set (handles both tables)', async () => {
+    fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
+      {
+        id: 'weight:w99',
+        ciphertext:
+          'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99","updatedAt":"2026-04-01T00:00:00.000Z"}}',
+        iv: 'iv',
+        protocolVersion: 1,
+        encryptionVersion: 1,
+        schemaVersion: 1,
+        createdAt: '2026-04-01T00:00:00.000Z',
+      },
+    ]);
+    // A row a device pushed to the plaintext table before it learned the disable
+    // was underway (RLS lets plain writes through in migrating_to_plain).
+    fetchRemotePlainChangesMock.mockResolvedValueOnce([
+      {
+        id: 'injection:i50',
+        aggregate: 'injection',
+        op: 'upsert',
+        payload: { id: 'i50' },
+        protocolVersion: 1,
+        schemaVersion: 1,
+        createdAt: '2026-05-09T00:00:00.000Z',
+      },
+    ]);
+    pushPlainChangesMock.mockResolvedValueOnce({ pushed: 2 });
+
+    await startE2EEDisableMigration('pw');
+
+    const pushed = pushPlainChangesMock.mock.calls[0]?.[0] as Array<{ id: string }>;
+    const ids = pushed.map((c) => c.id);
+    expect(ids).toContain('weight:w99'); // converted from the encrypted table
+    expect(ids).toContain('injection:i50'); // preserved from the plaintext table
   });
 
   it('emits canonical `${aggregate}:${entityId}` ids and the record as payload (so pullPlain can read it back)', async () => {
@@ -775,6 +884,53 @@ describe('autoResumeMigration — crash recovery', () => {
     expect(outcome.status).toBe('paused');
     expect(outcome).toMatchObject({ result: { completed: false, error: 'network down' } });
   });
+
+  it('reports superseded (not paused) when another device takes the enable over mid-run', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: ownedMigration('enable'),
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+    // The ownership re-check before the destructive finalize sees a different
+    // owner on the server: this device was taken over while it was driving.
+    vi.mocked(fetchRemoteSyncAccount).mockResolvedValueOnce({
+      syncMode: 'migrating_to_e2ee',
+      migration: { ...ownedMigration('enable'), ownerDeviceId: 'device-2' },
+      activeDekVersion: 1,
+      pendingDekVersion: undefined,
+    });
+
+    const outcome = await autoResumeMigration();
+
+    // A clean hand-off, not a failure: the orchestrator must NOT surface an error.
+    expect(outcome.status).toBe('superseded');
+    // The guarded finalize and the irreversible plaintext delete never ran, so
+    // the new owner can finish from intact server state.
+    expect(state.completeTransitionCalls).toHaveLength(0);
+    expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
+  });
+
+  it('reports superseded when the guarded finalize loses the disable race', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_plain',
+      e2eeMigration: ownedMigration('disable'),
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+    // `complete_sync_transition` rejects because the row no longer names us as
+    // the owner (a second device finalized first).
+    vi.mocked(completeSyncTransition).mockRejectedValueOnce(new MigrationSupersededError());
+
+    const outcome = await autoResumeMigration();
+
+    expect(outcome.status).toBe('superseded');
+    // The encrypted copy must survive (we never reached the clear) — the data is
+    // already safe as plaintext, and the winning owner owns the teardown.
+    expect(state.clearLocalCalls).toBe(0);
+  });
 });
 
 describe('resumeMigrationByDirection', () => {
@@ -837,7 +993,11 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
 
     const finalSave = state.saveProfileCalls.at(-1);
     expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
-    expect(state.upsertAccountCalls.at(-1)?.mode).toBe('plain');
+    // Routed through the gated transition now: claim migrating_to_plain (so RLS
+    // permits the plaintext push and other devices are parked), then finalize to
+    // plain under the ownership-guarded complete RPC.
+    expect(state.beginTransitionCalls.at(-1)?.to).toBe('migrating_to_plain');
+    expect(state.completeTransitionCalls.at(-1)?.to).toBe('plain');
   });
 
   it('does not delete the encrypted copy if the plaintext push fails', async () => {
@@ -873,7 +1033,10 @@ describe('startFreshToPlain — erase and start over (no local data required)', 
 
     const finalSave = state.saveProfileCalls.at(-1);
     expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
-    expect(state.upsertAccountCalls.at(-1)?.mode).toBe('plain');
+    // Gated transition (see resetEncryptionToPlain): claim migrating_to_plain,
+    // finalize to plain via the guarded complete RPC.
+    expect(state.beginTransitionCalls.at(-1)?.to).toBe('migrating_to_plain');
+    expect(state.completeTransitionCalls.at(-1)?.to).toBe('plain');
   });
 
   it('never pushes local data (it discards rather than keeps)', async () => {
@@ -883,7 +1046,7 @@ describe('startFreshToPlain — erase and start over (no local data required)', 
 });
 
 describe('takeOverMigration', () => {
-  it('stamps this device as owner locally and on the server', async () => {
+  it('claims ownership atomically (CAS on the prior owner) and stamps this device locally', async () => {
     state.mockProfile = {
       id: 'profile',
       syncMode: 'migrating_to_e2ee',
@@ -898,11 +1061,39 @@ describe('takeOverMigration', () => {
 
     await takeOverMigration();
 
+    // Server-side compare-and-swap against the owner this device last observed.
+    const claim = state.claimOwnerCalls.at(-1);
+    expect(claim).toEqual({
+      migrationId: 'mig-x',
+      expectedOwnerDeviceId: 'some-other-device',
+      newOwnerDeviceId: 'device-1', // the getDeviceId mock
+    });
+    // Only after the claim succeeds do we stamp local ownership.
     const saved = state.saveProfileCalls.at(-1);
-    expect(saved?.e2eeMigration?.ownerDeviceId).toBe('device-1'); // the getDeviceId mock
-    const account = state.upsertAccountCalls.at(-1);
-    expect(account?.mode).toBe('migrating_to_e2ee');
-    expect(account?.migration?.ownerDeviceId).toBe('device-1');
+    expect(saved?.e2eeMigration?.ownerDeviceId).toBe('device-1');
+    // Take-over never rewrites the mode (it stays mid-migration).
+    expect(state.upsertAccountCalls).toHaveLength(0);
+  });
+
+  it('does not stamp local ownership when the claim is lost to a competing device', async () => {
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        id: 'mig-x',
+        direction: 'enable',
+        ownerDeviceId: 'some-other-device',
+        startedAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    } as ProfileSettings;
+    vi.mocked(claimMigrationOwner).mockRejectedValueOnce(new SyncTransitionConflictError());
+
+    await expect(takeOverMigration()).rejects.toThrow(SyncTransitionConflictError);
+    // The CAS failed, so we must NOT have stamped this device as the owner —
+    // otherwise it would go on to drive a migration another device won.
+    const saved = state.saveProfileCalls.at(-1);
+    expect(saved?.e2eeMigration?.ownerDeviceId ?? 'some-other-device').toBe('some-other-device');
   });
 
   it('throws when there is no in-progress migration to take over', async () => {

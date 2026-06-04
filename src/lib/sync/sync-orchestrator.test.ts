@@ -610,6 +610,24 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
     expect(h.pullImpl).not.toHaveBeenCalled();
   });
 
+  it('stands down without an error when the migration is taken over mid-run (superseded)', async () => {
+    // Simulate a leftover error + resume prompt from before the take-over.
+    lastSyncError.set('stale error');
+    migrationResumePending.set('enable');
+    h.autoResumeMigrationImpl.mockResolvedValue({ status: 'superseded' });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    // A clean hand-off, not a failure: clear the error/prompt and go idle so the
+    // next cycle's reconcile can adopt the new owner. Never an 'error' status.
+    expect(get(lastSyncError)).toBeNull();
+    expect(get(migrationResumePending)).toBeNull();
+    expect(get(syncStatus)).toBe('idle');
+    // Don't fall through to steady-state sync while still mid-migration.
+    expect(h.pullImpl).not.toHaveBeenCalled();
+    expect(h.pushImpl).not.toHaveBeenCalled();
+  });
+
   it('does not attempt a resume when signed out', async () => {
     h.getUserIdImpl.mockResolvedValue(null);
     const orchestrator = createSyncOrchestrator();

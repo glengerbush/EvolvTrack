@@ -94,6 +94,18 @@ vi.mock('$lib/sync/account-state', () => ({
     };
   }),
   SyncTransitionConflictError: class extends Error {},
+  MigrationSupersededError: class extends Error {},
+  heartbeatMigrationProgress: vi.fn(async () => undefined),
+  completeSyncTransition: vi.fn(async () => undefined),
+  claimMigrationOwner: vi.fn(async () => undefined),
+  // Ownership re-check used by the rotation finalize; reflect the current
+  // profile's migration (owned by this device on the happy path).
+  fetchRemoteSyncAccount: vi.fn(async () => ({
+    syncMode: state.mockProfile?.syncMode ?? 'plain',
+    migration: state.mockProfile?.e2eeMigration,
+    activeDekVersion: state.localBundle?.dekVersion ?? null,
+    pendingDekVersion: null,
+  })),
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({

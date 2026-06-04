@@ -17,6 +17,14 @@ const state = vi.hoisted(() => ({
     migration?: E2EEMigrationState;
     dekVersions?: { activeDekVersion?: number | null; pendingDekVersion?: number | null };
   }>,
+  completeTransitionCalls: [] as Array<{
+    migrationId: string;
+    ownerDeviceId: string;
+    to: SyncMode;
+    activeDekVersion: number | null;
+  }>,
+  heartbeatCalls: [] as E2EEMigrationState[],
+  beginTransitionCalls: [] as Array<{ from: SyncMode[]; to: SyncMode }>,
   localBundle: undefined as WrappedKeyBundle | undefined,
   remoteBundles: [] as WrappedKeyBundle[],
   deletedBundleVersions: [] as Array<number | undefined>,
@@ -91,6 +99,7 @@ vi.mock('$lib/sync/account-state', () => ({
     },
   ),
   beginSyncTransition: vi.fn(async (t: { from: SyncMode[]; to: SyncMode; allocateNewDek: boolean }) => {
+    state.beginTransitionCalls.push({ from: t.from, to: t.to });
     // Server allocates the next version off the current (old) bundle version.
     const active = state.localBundle?.dekVersion ?? null;
     return {
@@ -99,6 +108,29 @@ vi.mock('$lib/sync/account-state', () => ({
     };
   }),
   SyncTransitionConflictError: class extends Error {},
+  MigrationSupersededError: class extends Error {},
+  heartbeatMigrationProgress: vi.fn(async (migration: E2EEMigrationState) => {
+    state.heartbeatCalls.push(migration);
+  }),
+  completeSyncTransition: vi.fn(
+    async (p: {
+      migrationId: string;
+      ownerDeviceId: string;
+      to: SyncMode;
+      activeDekVersion: number | null;
+    }) => {
+      state.completeTransitionCalls.push(p);
+    },
+  ),
+  claimMigrationOwner: vi.fn(async () => undefined),
+  // Ownership re-check: reflect the current profile's migration (owner === this
+  // device on the happy path) so assertStillMigrationOwner passes.
+  fetchRemoteSyncAccount: vi.fn(async () => ({
+    syncMode: state.mockProfile?.syncMode ?? 'plain',
+    migration: state.mockProfile?.e2eeMigration,
+    activeDekVersion: state.localBundle?.dekVersion ?? null,
+    pendingDekVersion: null,
+  })),
 }));
 
 vi.mock('$lib/sync/wrapped-keys', () => ({
@@ -175,6 +207,9 @@ beforeEach(() => {
   state.mockProfile = undefined;
   state.saveProfileCalls.length = 0;
   state.upsertAccountCalls.length = 0;
+  state.completeTransitionCalls.length = 0;
+  state.heartbeatCalls.length = 0;
+  state.beginTransitionCalls.length = 0;
   state.localBundle = undefined;
   state.remoteBundles = [];
   state.deletedBundleVersions.length = 0;
@@ -247,13 +282,13 @@ describe('startE2EEKeyRotation — change-passphrase happy path', () => {
 
   it('records account-state transitions: rotating_e2ee_key then e2ee, with the active version', async () => {
     await startE2EEKeyRotation('OLD_PW', 'NEW_PW');
-    const modes = state.upsertAccountCalls.map((c) => c.mode);
-    expect(modes[0]).toBe('rotating_e2ee_key');
-    expect(modes[modes.length - 1]).toBe('e2ee');
-    expect(state.upsertAccountCalls.at(-1)?.dekVersions).toMatchObject({
-      activeDekVersion: 4,
-      pendingDekVersion: null,
-    });
+    // Entry is claimed atomically via begin_sync_transition; the steady-state is
+    // landed (guarded by ownership) via complete_sync_transition.
+    expect(state.beginTransitionCalls.at(0)?.to).toBe('rotating_e2ee_key');
+    const finalize = state.completeTransitionCalls.at(-1);
+    expect(finalize?.to).toBe('e2ee');
+    // The new bundle is the active version; pending is always cleared on finish.
+    expect(finalize?.activeDekVersion).toBe(4);
   });
 
   it('resets the pull cursor on completion', async () => {
@@ -332,6 +367,12 @@ describe('resumeE2EEKeyRotation — crash / new-device with old + new passphrase
     expect(result.completed).toBe(false);
     expect(result.syncMode).toBe('rotating_e2ee_key');
     expect(result.error).toMatch(/OperationError/);
+    // Regression (cross-device): a failed resume must NOT blind-write
+    // sync_mode/owner via upsertRemoteSyncAccount — that would clobber a device
+    // that took the rotation over. It records an owner-scoped heartbeat instead
+    // (which no-ops on the server if this device has been superseded).
+    expect(state.upsertAccountCalls).toHaveLength(0);
+    expect(state.heartbeatCalls.length).toBeGreaterThan(0);
   });
 });
 

@@ -5,6 +5,8 @@
   // waiting is implicit (it closes itself when the other device finishes), and
   // the only action is to take the migration over here, emphasised once the
   // other device's heartbeat looks stale.
+  import { focusTrap } from '$lib/utils/focusTrap';
+
   type Direction = 'enable' | 'disable' | 'rotate';
 
   let {
@@ -53,7 +55,14 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="modal-backdrop" role="presentation">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="migration-progress-title">
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="migration-progress-title"
+    tabindex="-1"
+    use:focusTrap
+  >
     <h3 id="migration-progress-title">{title}</h3>
     <p>
       Another device you are logged into is {verb}. Once complete, you can use the app normally again.
@@ -92,12 +101,20 @@
       <p class="field-error" role="alert">{error}</p>
     {/if}
 
+    {#if !stale && !takingOver}
+      <p class="takeover-hint">
+        There's nothing to do meanwhile — this finishes on its own. Take-over
+        unlocks only if that device stops responding.
+      </p>
+    {/if}
+
     <div class="modal-actions">
       <button
         type="button"
         class={stale ? 'primary' : 'ghost'}
         onclick={onTakeOver}
-        disabled={takingOver}
+        disabled={takingOver || !stale}
+        title={stale ? undefined : 'Available if the other device stops responding'}
       >
         {takingOver ? 'Taking over…' : 'Take over on this device'}
       </button>
@@ -190,6 +207,12 @@
     color: var(--accent-orange, #c5682f);
     font-size: 0.85rem;
     margin: 0 0 0.75rem;
+  }
+
+  .takeover-hint {
+    margin: 0 0 0.75rem;
+    font-size: 0.85rem;
+    color: color-mix(in oklab, var(--text) 65%, transparent);
   }
 
   .modal-actions {

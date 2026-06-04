@@ -4,9 +4,11 @@ import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
 import {
   DEFAULT_SYNC_MODE,
+  MigrationInProgressError,
   addInjection,
   addPrescription,
   addWeight,
+  applyRemoteChange,
   clearAllData,
   deletePrescription,
   getAllInjections,
@@ -15,6 +17,7 @@ import {
   getProfile,
   getProfileSyncMode,
   saveProfile,
+  setLocalProfileSyncState,
   sortPrescriptionsByDisplayOrder,
   updatePrescription,
 } from '$lib/domain/repo';
@@ -338,5 +341,61 @@ describe('clearAllData', () => {
     expect(await getAllInjections()).toEqual([]);
     expect(await getAllPrescriptions()).toEqual([]);
     expect(await getProfile()).toBeUndefined();
+  });
+});
+
+describe('edit gating during an E2EE migration', () => {
+  // Bug 5: while the account is mid-migration (enable/disable/rotate) no device
+  // may make data edits — steady-state sync is paused, and a stray edit landing
+  // in the wrong table or under a retiring key is what wedges the migration.
+  const migratingModes = ['migrating_to_e2ee', 'migrating_to_plain', 'rotating_e2ee_key'] as const;
+
+  for (const mode of migratingModes) {
+    it(`rejects a health-data write while syncMode is ${mode}`, async () => {
+      await setLocalProfileSyncState({ syncMode: mode });
+
+      await expect(
+        addWeight({ date: TODAY, weightLbs: 180 }),
+      ).rejects.toBeInstanceOf(MigrationInProgressError);
+
+      // The throw aborts the transaction: nothing persisted, nothing queued.
+      expect(await getAllWeights()).toEqual([]);
+      expect(await db.outbox.count()).toBe(0);
+    });
+  }
+
+  it('still allows edits in steady-state e2ee (only migrating modes are gated)', async () => {
+    await setLocalProfileSyncState({ syncMode: 'e2ee' });
+    const created = await addWeight({ date: TODAY, weightLbs: 180 });
+    expect(created.id).toBeTruthy();
+    expect(await getAllWeights()).toHaveLength(1);
+  });
+
+  it('re-allows edits once the migration completes (mode returns to plain)', async () => {
+    await setLocalProfileSyncState({ syncMode: 'migrating_to_e2ee' });
+    await expect(addWeight({ date: TODAY, weightLbs: 180 })).rejects.toBeInstanceOf(
+      MigrationInProgressError,
+    );
+
+    await setLocalProfileSyncState({ syncMode: 'plain' });
+    await addWeight({ date: TODAY, weightLbs: 181 });
+    expect(await getAllWeights()).toHaveLength(1);
+  });
+
+  it('does NOT block sync-apply writes (the migration drives those)', async () => {
+    await setLocalProfileSyncState({ syncMode: 'migrating_to_e2ee' });
+
+    // applyRemoteChange is the inbound counterpart — it bypasses the outbox and
+    // must keep working so a migration's snapshot pull can land remote rows.
+    const applied = await applyRemoteChange({
+      aggregate: 'weight',
+      entityId: 'w-remote',
+      op: 'upsert',
+      record: { id: 'w-remote', date: TODAY, weightLbs: 200, updatedAt: '2026-05-10T00:00:00.000Z' },
+      remoteUpdatedAt: '2026-05-10T00:00:00.000Z',
+    });
+
+    expect(applied).toBe(true);
+    expect(await getAllWeights()).toHaveLength(1);
   });
 });

@@ -30,6 +30,51 @@ import {
 const now = () => new Date().toISOString();
 export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
 
+// ── Edit gating during an E2EE change ────────────────────────────────────────
+// While the account is mid-migration (enable/disable/rotate) no device may make
+// data edits: the conversion is a multi-step server operation, and a new edit
+// landing in the wrong table (or under a key about to be retired) is what wedges
+// it. Steady-state sync is already paused for the duration; this gate closes the
+// matching hole at the *write* side so a user edit can't slip in before this
+// device's UI has even shown the blocking migration modal.
+//
+// Enforced at the single seam every interactive mutation passes through
+// (`enqueueOutbox`, plus the bulk-import builder). Sync-apply writes don't go
+// through it, and `profile` rows are exempt — the migration itself records its
+// progress as profile writes, and profile carries no PHI.
+//
+// We can't read `db.profile` inside the entity transactions that call
+// `enqueueOutbox` (it isn't in their scope), so the current mode is cached and
+// refreshed wherever the profile's sync state is written or read.
+let cachedSyncMode: SyncMode = DEFAULT_SYNC_MODE;
+
+function rememberSyncMode(mode: SyncMode | undefined): void {
+  cachedSyncMode = mode ?? DEFAULT_SYNC_MODE;
+}
+
+function isE2EEChangeInProgress(mode: SyncMode): boolean {
+  return (
+    mode === 'migrating_to_e2ee' ||
+    mode === 'migrating_to_plain' ||
+    mode === 'rotating_e2ee_key'
+  );
+}
+
+/** Thrown by a data mutation attempted while an E2EE migration is in flight. */
+export class MigrationInProgressError extends Error {
+  constructor() {
+    super('An encryption change is in progress on your account. Finish it before editing your data.');
+    this.name = 'MigrationInProgressError';
+  }
+}
+
+/** Guard a data (non-profile) edit against an in-flight E2EE migration. */
+function assertDataEditAllowed(aggregate: SyncAggregate): void {
+  if (aggregate !== 'profile' && isE2EEChangeInProgress(cachedSyncMode)) {
+    throw new MigrationInProgressError();
+  }
+}
+
 // ── Change events ──────────────────────────────────────────────────────────
 // Emitted after each weight/injection mutation so caches can update
 // incrementally instead of re-reading the full table from IndexedDB.
@@ -98,6 +143,7 @@ async function enqueueOutbox(
   updatedAt: IsoDateTime,
   payload: unknown,
 ): Promise<void> {
+  assertDataEditAllowed(aggregate);
   await db.outbox.put({
     id: `${aggregate}:${entityId}`,
     aggregate,
@@ -153,6 +199,10 @@ export async function enqueueImportedRows(
   },
   options: ApplyImportOptions = {},
 ): Promise<ProfileSettings | undefined> {
+  // A bulk import is a large data edit — block it too while an E2EE migration is
+  // converting the account (same rule as the per-entity mutations).
+  if (isE2EEChangeInProgress(cachedSyncMode)) throw new MigrationInProgressError();
+
   const { deletedIds, importedSymptoms } = options;
   const profileToPersist = await mergeImportedProfile(data.profile, importedSymptoms);
   if (profileToPersist) {
@@ -817,7 +867,9 @@ export async function getAllPrescriptions(): Promise<Prescription[]> {
 // ── Profile ────────────────────────────────────────────────────────────────
 
 export async function getProfile(): Promise<ProfileSettings | undefined> {
-  return db.profile.get('profile');
+  const profile = await db.profile.get('profile');
+  rememberSyncMode(profile?.syncMode);
+  return profile;
 }
 
 /**
@@ -838,7 +890,9 @@ export async function setLocalProfileSyncState(state: {
   await db.transaction('rw', db.profile, async () => {
     const existing = await db.profile.get('profile');
     if (existing) {
-      await db.profile.put({ ...existing, ...state, updatedAt: ts });
+      const updated = { ...existing, ...state, updatedAt: ts };
+      await db.profile.put(updated);
+      rememberSyncMode(updated.syncMode);
       return;
     }
     const seed: ProfileSettings = {
@@ -850,6 +904,7 @@ export async function setLocalProfileSyncState(state: {
       updatedAt: ts,
     };
     await db.profile.put(stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL }));
+    rememberSyncMode(seed.syncMode);
   });
 }
 
@@ -879,6 +934,7 @@ export async function saveProfile(
       saved = stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL });
       await db.profile.put(saved);
     }
+    rememberSyncMode(saved.syncMode);
     await enqueueOutbox('profile', 'profile', 'upsert', saved.updatedAt, toSyncableProfile(saved));
   });
 }
@@ -895,6 +951,7 @@ export async function clearAllData(): Promise<void> {
     db.prescriptions.clear(),
     db.profile.clear(),
   ]);
+  rememberSyncMode(DEFAULT_SYNC_MODE);
   emitHealthChange({ kind: 'weight', action: 'reset' });
   emitHealthChange({ kind: 'injection', action: 'reset' });
 }

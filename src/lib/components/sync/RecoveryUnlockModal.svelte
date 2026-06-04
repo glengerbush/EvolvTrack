@@ -1,6 +1,7 @@
 <script lang="ts">
   import { recoverWithCode } from '$lib/sync/e2ee-migration';
   import { requestSync } from '$lib/sync/sync-orchestrator';
+  import { SyncTransitionConflictError } from '$lib/sync/account-state';
 
   let {
     onClose,
@@ -53,7 +54,12 @@
       requestSync();
       onRecovered(result.recoveryCode);
     } catch (err) {
-      error = (err as Error).message ?? 'Recovery failed.';
+      // A transition conflict means another device is mid-change (e.g. already
+      // rotating). Tell the user to wait rather than showing the raw RPC error.
+      error =
+        err instanceof SyncTransitionConflictError
+          ? 'Another device is already changing your encryption settings. Wait for it to finish, then try recovering again.'
+          : ((err as Error).message ?? 'Recovery failed.');
       busy = false;
     }
   }
