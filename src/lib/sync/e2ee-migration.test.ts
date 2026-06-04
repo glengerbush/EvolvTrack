@@ -188,6 +188,7 @@ vi.mock('$lib/sync/sync-engine', () => ({
 // Imports MUST come after vi.mock so the mocks are applied.
 import {
   autoResumeMigration,
+  isMigrationRunInProgress,
   resumeE2EEDisableMigration,
   resumeE2EEMigration,
   resumeMigrationByDirection,
@@ -930,6 +931,49 @@ describe('autoResumeMigration — crash recovery', () => {
     // The encrypted copy must survive (we never reached the clear) — the data is
     // already safe as plaintext, and the winning owner owns the teardown.
     expect(state.clearLocalCalls).toBe(0);
+  });
+});
+
+describe('autoResumeMigration — stands down while a run owns the transition in-tab', () => {
+  it('reports in-progress (not needs-passphrase) while a migration run is mid-flight here', async () => {
+    // Regression: a run kicked off in this tab flips the profile to a migrating
+    // mode; an interleaved autoResumeMigration must not independently raise a
+    // resume prompt (which briefly flashed the rotation passphrase modal as the
+    // rotation finished). We gate the run's push so it stays mid-flight, then
+    // assert autoResumeMigration short-circuits to 'in-progress'.
+    state.mockProfile = {
+      id: 'profile',
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        id: 'mig-x',
+        ownerDeviceId: 'device-1',
+        startedAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    } as ProfileSettings;
+    state.localBundle = bundleFor('pw');
+    vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
+
+    let releasePush: (() => void) | undefined;
+    pushEncryptedChangesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releasePush = () => resolve({ pushed: 0 });
+      }),
+    );
+
+    expect(isMigrationRunInProgress()).toBe(false);
+    const run = resumeE2EEMigration('pw');
+    // Let the run advance to the gated push.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(isMigrationRunInProgress()).toBe(true);
+    expect(await autoResumeMigration()).toEqual({ status: 'in-progress' });
+
+    releasePush?.();
+    await run;
+    // Guard releases once the run settles, so the next cycle can reconcile.
+    expect(isMigrationRunInProgress()).toBe(false);
   });
 });
 

@@ -370,6 +370,29 @@ describe('createSyncOrchestrator — runCycle', () => {
     );
   });
 
+  it('converges a watcher out of migrating mode once the migration finishes elsewhere', async () => {
+    // Regression: device watched another device's enable migration (so it is
+    // locally pinned in 'migrating_to_e2ee' with that device's migration
+    // record). The owner finished, so the server is now steady-state 'e2ee'
+    // with no migration. The watcher must adopt the steady state — otherwise it
+    // stays mid-migration forever and the take-over modal flaps on/off as the
+    // poll clears it and the next cycle re-derives an 'awaiting-takeover' offer.
+    h.fetchRemoteSyncAccountImpl.mockResolvedValue({ syncMode: 'e2ee', activeDekVersion: 1 });
+    h.getProfileImpl.mockResolvedValue({
+      syncMode: 'migrating_to_e2ee',
+      e2eeMigration: { id: 'mig-1', ownerDeviceId: 'other-device' },
+    });
+    h.getLocalWrappedKeysImpl.mockResolvedValue({ id: 'self', dekVersion: 1 });
+
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    expect(h.setLocalSyncStateImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ syncMode: 'e2ee', e2eeMigration: undefined }),
+    );
+    expect(h.clearPullCursorImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('does not reconcile when the server has no sync_accounts row (brand-new user)', async () => {
     h.fetchRemoteSyncAccountImpl.mockResolvedValue(null);
     h.getProfileImpl.mockResolvedValue({ syncMode: 'plain' });
@@ -624,6 +647,23 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
     expect(get(migrationResumePending)).toBeNull();
     expect(get(syncStatus)).toBe('idle');
     // Don't fall through to steady-state sync while still mid-migration.
+    expect(h.pullImpl).not.toHaveBeenCalled();
+    expect(h.pushImpl).not.toHaveBeenCalled();
+  });
+
+  it('stands down silently (no passphrase prompt) when a run owns the migration in-tab', async () => {
+    // Regression: a rotation kicked off in this tab flips the profile to
+    // 'rotating_e2ee_key'; an interleaved sync cycle must NOT set a resume
+    // prompt from that (which briefly flashed the old/new passphrase modal as
+    // the rotation finished). autoResumeMigration reports 'in-progress'.
+    migrationResumePending.set(null);
+    h.autoResumeMigrationImpl.mockResolvedValue({ status: 'in-progress' });
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+
+    // The in-tab run drives its own modal; the orchestrator leaves it alone.
+    expect(get(migrationResumePending)).toBeNull();
+    expect(get(syncStatus)).toBe('idle');
     expect(h.pullImpl).not.toHaveBeenCalled();
     expect(h.pushImpl).not.toHaveBeenCalled();
   });
