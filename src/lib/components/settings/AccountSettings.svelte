@@ -16,11 +16,13 @@
     startE2EEKeyRotation,
     type E2EEMigrationRunResult,
   } from '$lib/sync/e2ee-migration';
-  import { rotateRecoveryCode } from '$lib/sync/recovery-code-rotation';
   import { SyncTransitionConflictError } from '$lib/sync/account-state';
   import { migrationResumePending } from '$lib/stores/syncStore';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
+  import ChangePasswordModal from '$lib/components/settings/ChangePasswordModal.svelte';
+  import ChangeIdentityModal from '$lib/components/settings/ChangeIdentityModal.svelte';
+  import ChangePassphraseModal from '$lib/components/settings/ChangePassphraseModal.svelte';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
   import type { ColorModePreference, ThemeName } from '$lib/theme/dashboardTheme';
@@ -78,15 +80,15 @@
   let e2eeBusy = $state(false);
   let passphrase = $state('');
   let passphraseConfirm = $state('');
-  let newPassphrase = $state('');
-  let newPassphraseConfirm = $state('');
-  let username = $state('');
-  let email = $state('');
-  let currentPassword = $state('');
-  let newPassword = $state('');
   let codeToShow = $state<string | null>(null);
   let disableModalOpen = $state(false);
   let disableError = $state<string | null>(null);
+  let passwordModalOpen = $state(false);
+  let passwordError = $state<string | null>(null);
+  let identityModalOpen = $state(false);
+  let identityError = $state<string | null>(null);
+  let passphraseModalOpen = $state(false);
+  let passphraseError = $state<string | null>(null);
   let status = $state('');
   let exportBusy = $state(false);
   let importBusy = $state(false);
@@ -98,7 +100,6 @@
   let importStatus = $state<{ kind: ImportStatusKind; message: string }>({ kind: 'idle', message: '' });
 
   const passphraseMatch = $derived(!passphraseConfirm || passphrase === passphraseConfirm);
-  const newPassphraseMatch = $derived(!newPassphraseConfirm || newPassphrase === newPassphraseConfirm);
   const settingsTheme = $derived($activeTabThemes.settings);
   const e2eeEnabled = $derived(syncMode === 'e2ee');
   const e2eeEnableMigrating = $derived(syncMode === 'migrating_to_e2ee');
@@ -148,29 +149,6 @@
     codeToShow = null;
   }
 
-  async function generateAndShowRecoveryCodes() {
-    if (!passphrase) {
-      status = 'Enter your current passphrase to rotate the recovery code.';
-      return;
-    }
-    if (!confirm(
-      'Generate a new recovery code? The previous code will stop working.',
-    )) return;
-
-    e2eeBusy = true;
-    status = 'Rotating recovery code…';
-    try {
-      const { recoveryCode } = await rotateRecoveryCode(passphrase);
-      showRecoveryCode(recoveryCode);
-      passphrase = '';
-      status = 'Recovery code rotated. Save the new one — the old one no longer works.';
-    } catch (error) {
-      status = errorMessage(error);
-    } finally {
-      e2eeBusy = false;
-    }
-  }
-
   // A cross-device transition conflict (another device is already enabling/
   // disabling/rotating) isn't a failure of this device — surface clear "wait or
   // take over" copy instead of the raw RPC error. The in-progress modal appears
@@ -180,26 +158,6 @@
       return 'Another device is already changing your encryption settings. Wait for it to finish — you can take over from the progress dialog if it stalls.';
     }
     return errorMessage(error);
-  }
-
-  async function rotateEncryptionKey() {
-    if (!passphrase) {
-      status = 'Enter your current passphrase to rotate the encryption key.';
-      return;
-    }
-    if (!confirm(
-      'Rotate the encryption key? Every record will be re-encrypted under a new key, and you will receive a new recovery code. Your passphrase is unchanged.',
-    )) return;
-
-    e2eeBusy = true;
-    status = 'Rotating encryption key…';
-    try {
-      applyMigrationResult(await startE2EEKeyRotation(passphrase));
-    } catch (error) {
-      status = e2eeErrorMessage(error);
-    } finally {
-      e2eeBusy = false;
-    }
   }
 
   function handleE2eeCheckbox(checked: boolean) {
@@ -299,31 +257,67 @@
     }
   }
 
-  function updatePassword() {
+  function openPasswordModal() {
+    passwordError = null;
+    passwordModalOpen = true;
+  }
+
+  function cancelPasswordModal() {
+    passwordModalOpen = false;
+    passwordError = null;
+  }
+
+  function updatePassword(_currentPassword: string, _newPassword: string) {
+    // TODO: wire to the auth backend. Until then, surface a clear status and
+    // keep the modal open so the entered values aren't silently lost.
+    passwordError = 'Password update workflow is not wired yet.';
     status = 'Password update workflow is not wired yet.';
   }
 
-  async function changePassphrase() {
-    if (!passphrase) { status = 'Enter your current passphrase.'; return; }
-    if (!newPassphrase) { status = 'Enter a new passphrase.'; return; }
-    if (newPassphrase !== newPassphraseConfirm) { status = 'New passphrases do not match.'; return; }
+  function openIdentityModal() {
+    identityError = null;
+    identityModalOpen = true;
+  }
 
+  function cancelIdentityModal() {
+    identityModalOpen = false;
+    identityError = null;
+  }
+
+  function updateIdentity(_username: string, _email: string) {
+    // TODO: wire to the auth backend (see updatePassword).
+    identityError = 'Username/email update workflow is not wired yet.';
+    status = 'Username/email update workflow is not wired yet.';
+  }
+
+  function openPassphraseModal() {
+    passphraseError = null;
+    passphraseModalOpen = true;
+  }
+
+  function cancelPassphraseModal() {
+    if (e2eeBusy) return;
+    passphraseModalOpen = false;
+    passphraseError = null;
+  }
+
+  // Changing the passphrase mints a fresh DEK (re-encrypting every record) and
+  // issues a new recovery code, so it subsumes the old standalone "rotate key"
+  // and "rotate recovery code" affordances. `applyMigrationResult` surfaces the
+  // new recovery code via the RecoveryCodesModal.
+  async function changePassphrase(currentPassphrase: string, nextPassphrase: string) {
     e2eeBusy = true;
-    status = 'Rotating encryption key under new passphrase…';
+    passphraseError = null;
+    status = 'Changing passphrase and re-encrypting under a new key…';
     try {
-      applyMigrationResult(await startE2EEKeyRotation(passphrase, newPassphrase));
-      newPassphrase = '';
-      newPassphraseConfirm = '';
-      passphrase = '';
+      applyMigrationResult(await startE2EEKeyRotation(currentPassphrase, nextPassphrase));
+      passphraseModalOpen = false;
     } catch (error) {
-      status = errorMessage(error);
+      passphraseError = e2eeErrorMessage(error);
+      status = passphraseError;
     } finally {
       e2eeBusy = false;
     }
-  }
-
-  function updateIdentity() {
-    status = 'Username/email update workflow is not wired yet.';
   }
 
   async function exportBackupFile() {
@@ -737,61 +731,37 @@
             </p>
           </div>
         {:else if e2eeEnabled}
-          <label>Current passphrase<input bind:value={passphrase} type="password" placeholder="Current passphrase" autocomplete="current-password" /></label>
-          <div class="recovery-row">
-            <button class="btn btn-ghost" type="button" disabled={e2eeBusy || !passphrase} onclick={generateAndShowRecoveryCodes}>
-              Rotate recovery code
+          <div class="passphrase-action">
+            <button class="btn btn-primary" type="button" disabled={e2eeBusy} onclick={openPassphraseModal}>
+              Change passphrase
             </button>
             <p class="toggle-hint">
-              Use if your recovery code may have been seen. Issues a fresh code; the old one stops working immediately. Your encryption key is unchanged.
+              Sets a new passphrase, mints a fresh encryption key (re-encrypting every record), and issues a new recovery code. Use this if your passphrase or recovery code may have been seen, or a device may have been compromised — your old passphrase and old recovery code stop working.
             </p>
           </div>
-          <div class="recovery-row">
-            <button class="btn btn-ghost" type="button" disabled={e2eeBusy || !passphrase} onclick={rotateEncryptionKey}>
-              Rotate encryption key
-            </button>
-            <p class="toggle-hint">
-              Use if a device may have been compromised. Mints a new encryption key, re-encrypts every record, and issues a fresh recovery code. Your passphrase is unchanged. Data captured before the rotation stays decryptable with the old key, but future data is safe.
-            </p>
-          </div>
-          <label>New passphrase<input bind:value={newPassphrase} type="password" placeholder="New passphrase" autocomplete="new-password" /></label>
-          <label>
-            Confirm new passphrase
-            <input bind:value={newPassphraseConfirm} type="password" placeholder="Confirm new passphrase" class:mismatch={!newPassphraseMatch} autocomplete="new-password" />
-            {#if !newPassphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
-          </label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !newPassphrase || !newPassphraseMatch} onclick={changePassphrase}>
-            {e2eeBusy ? 'Rotating…' : 'Rotate passphrase'}
-          </button>
         {/if}
       {/if}
     </div>
   </div>
   {/if}
 
-  {#if showSection('password') && !$isDemoMode}
+  {#if (showSection('password') || showSection('identity')) && !$isDemoMode}
     <div class="card-wrap">
-      <h2>Change login password</h2>
-      <div class="panel">
-        <label>Current password<input bind:value={currentPassword} type="password" placeholder="Current password" /></label>
-        <label>New password<input bind:value={newPassword} type="password" placeholder="New password" /></label>
-        <button class="btn btn-primary" onclick={updatePassword}>Update password</button>
-      </div>
-    </div>
-  {/if}
-
-  {#if showSection('identity') && !$isDemoMode}
-    <div class="card-wrap">
-      <h2>Change username / email</h2>
+      <h2>Change login details</h2>
       <div class="panel">
         {#if currentIdentifier}
           <p class="toggle-hint">
             Currently signed in as <strong>{currentIdentifier}</strong>
           </p>
         {/if}
-        <label>Username<input bind:value={username} type="text" placeholder="New username" /></label>
-        <label>Email<input bind:value={email} type="email" placeholder="New email" /></label>
-        <button class="btn btn-primary" onclick={updateIdentity}>Update account identity</button>
+        <div class="login-detail-actions">
+          <button class="btn btn-primary" type="button" onclick={openIdentityModal}>
+            Change username / email
+          </button>
+          <button class="btn btn-primary" type="button" onclick={openPasswordModal}>
+            Change login password
+          </button>
+        </div>
       </div>
     </div>
   {/if}
@@ -852,6 +822,32 @@
     error={disableError}
     onConfirm={confirmDisableE2EE}
     onCancel={cancelDisableE2EE}
+  />
+{/if}
+
+{#if passwordModalOpen}
+  <ChangePasswordModal
+    error={passwordError}
+    onConfirm={updatePassword}
+    onCancel={cancelPasswordModal}
+  />
+{/if}
+
+{#if identityModalOpen}
+  <ChangeIdentityModal
+    {currentIdentifier}
+    error={identityError}
+    onConfirm={updateIdentity}
+    onCancel={cancelIdentityModal}
+  />
+{/if}
+
+{#if passphraseModalOpen}
+  <ChangePassphraseModal
+    busy={e2eeBusy}
+    error={passphraseError}
+    onConfirm={changePassphrase}
+    onCancel={cancelPassphraseModal}
   />
 {/if}
 
@@ -981,14 +977,21 @@
     padding-left: 1rem;
   }
 
-  .recovery-row {
+  .login-detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+
+  .login-detail-actions .btn {
+    padding: 0.6rem 1rem;
+  }
+
+  .passphrase-action {
     display: flex;
     flex-direction: column;
     gap: 0.55rem;
     align-items: flex-start;
-    margin-bottom: 0.4rem;
-    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 24%, transparent 76%);
-    padding-bottom: 0.5rem;
   }
 
   small {

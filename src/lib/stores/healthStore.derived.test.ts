@@ -54,11 +54,35 @@ describe('healthStore — latestWeightLbs', () => {
     expect(get(latestWeightLbs)).toBeNull();
   });
 
-  it('returns the lbs of the most recent (last array element) weight that has a value', async () => {
+  it('returns the lbs of the weight with the latest date', async () => {
     const { latestWeightLbs, emitHealthChange } = await setup();
     emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180) });
     emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-05', 175) });
     expect(get(latestWeightLbs)).toBe(175);
+  });
+
+  it('uses the latest date, not insertion order, when a later-added row is older', async () => {
+    // Regression: the store is seeded in insertion order, so adding an
+    // older-dated weigh-in after a newer one must not change "current weight".
+    const { latestWeightLbs, emitHealthChange } = await setup();
+    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-05', 175) });
+    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-01', 180) });
+    expect(get(latestWeightLbs)).toBe(175);
+  });
+
+  it('breaks a same-date tie by createdAt, preferring the later-created row', async () => {
+    const { latestWeightLbs, emitHealthChange } = await setup();
+    emitHealthChange({
+      kind: 'weight',
+      action: 'add',
+      entity: weight('w1', '2026-05-05', 175, { createdAt: '2026-05-05T08:00:00.000Z' }),
+    });
+    emitHealthChange({
+      kind: 'weight',
+      action: 'add',
+      entity: weight('w2', '2026-05-05', 172, { createdAt: '2026-05-05T20:00:00.000Z' }),
+    });
+    expect(get(latestWeightLbs)).toBe(172);
   });
 
   it('skips entries that have no weightLbs and returns the next valid one', async () => {

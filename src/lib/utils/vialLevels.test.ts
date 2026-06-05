@@ -48,20 +48,34 @@ describe('computeVialLevels', () => {
     expect(v.over).toBe(false);
   });
 
-  it('splits a dose across vials when the current one runs out (FIFO by compound date)', () => {
+  it('splits a dose across vials when the current one runs out (top of table first)', () => {
     const levels = computeVialLevels(
       [
-        vial({ id: 'old', compoundDate: iso('2026-04-01') }), // 10 mg
-        vial({ id: 'new', compoundDate: iso('2026-05-01') }), // 10 mg
+        vial({ id: 'top', sortOrder: 0 }), // 10 mg — highest on the table
+        vial({ id: 'next', sortOrder: 1 }), // 10 mg
       ],
       [
-        dose({ date: '2026-05-02', amountMg: 8 }), // drains old to 2
-        dose({ date: '2026-05-09', amountMg: 5 }), // 2 from old (→0), 3 from new
+        dose({ date: '2026-05-02', amountMg: 8 }), // drains top to 2
+        dose({ date: '2026-05-09', amountMg: 5 }), // 2 from top (→0), 3 from next
       ],
     );
-    expect(levels.get('old')!.mgLeft).toBe(0);
-    expect(levels.get('new')!.mgLeft).toBe(7); // 10 − 3
-    expect(levels.get('old')!.over).toBe(false);
+    expect(levels.get('top')!.mgLeft).toBe(0);
+    expect(levels.get('next')!.mgLeft).toBe(7); // 10 − 3
+    expect(levels.get('top')!.over).toBe(false);
+  });
+
+  it('attributes by table order, not by compound date', () => {
+    // The vial higher on the table (lower sortOrder) drains first even when it
+    // has the *newer* compound date — date must not drive attribution anymore.
+    const levels = computeVialLevels(
+      [
+        vial({ id: 'top', sortOrder: 0, compoundDate: iso('2026-05-01') }), // newer
+        vial({ id: 'bottom', sortOrder: 1, compoundDate: iso('2026-04-01') }), // older
+      ],
+      [dose({ date: '2026-05-05', amountMg: 12 })], // 10 from top (→0), 2 from bottom
+    );
+    expect(levels.get('top')!.mgLeft).toBe(0);
+    expect(levels.get('bottom')!.mgLeft).toBe(8); // 10 − 2
   });
 
   it('flags overfill: consumption past the labeled fill goes negative on the last vial', () => {
