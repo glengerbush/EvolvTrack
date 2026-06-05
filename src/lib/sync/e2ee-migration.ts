@@ -83,6 +83,36 @@ export const MIGRATION_STALE_MS = 25000;
 /** Reports backfill progress as `(converted, total)`; may be throttled. */
 type ProgressReporter = (converted: number, total: number) => Promise<void>;
 
+/**
+ * How many migration runs (enable / disable / rotate, started here or resumed
+ * from the modal) are executing in THIS tab right now. A counter rather than a
+ * boolean because the public entry points nest (e.g. `startE2EEKeyRotation`
+ * delegates to `resumeE2EEKeyRotation`).
+ *
+ * The orchestrator's `autoResumeMigration` consults this: while a run owns the
+ * transition locally, a concurrent sync cycle must not independently raise the
+ * "needs your passphrase" prompt or try to drive the same migration. That race
+ * is what briefly flashed the rotation passphrase modal as a rotation finished
+ * — the run had flipped the profile to `rotating_e2ee_key`, an interleaved
+ * cycle saw that and set `migrationResumePending`, and the run then cleared it.
+ */
+let activeMigrationRuns = 0;
+
+/** True while a migration run is executing in this tab. See {@link activeMigrationRuns}. */
+export function isMigrationRunInProgress(): boolean {
+  return activeMigrationRuns > 0;
+}
+
+/** Run `fn` while marking a migration as actively in progress in this tab. */
+async function withMigrationRun<T>(fn: () => Promise<T>): Promise<T> {
+  activeMigrationRuns++;
+  try {
+    return await fn();
+  } finally {
+    activeMigrationRuns--;
+  }
+}
+
 export type E2EEMigrationRunResult = {
   syncMode: SyncMode;
   migration: E2EEMigrationState;
@@ -478,7 +508,14 @@ async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEM
   return completedMigration;
 }
 
-async function continueE2EEMigration(
+function continueE2EEMigration(
+  passphrase: string,
+  recoveryCode?: string,
+): Promise<E2EEMigrationRunResult> {
+  return withMigrationRun(() => continueE2EEMigrationImpl(passphrase, recoveryCode));
+}
+
+async function continueE2EEMigrationImpl(
   passphrase: string,
   recoveryCode?: string,
 ): Promise<E2EEMigrationRunResult> {
@@ -696,7 +733,11 @@ async function finishE2EEDisableMigration(
   return completedMigration;
 }
 
-async function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMigrationRunResult> {
+function continueE2EEDisableMigration(passphrase: string): Promise<E2EEMigrationRunResult> {
+  return withMigrationRun(() => continueE2EEDisableMigrationImpl(passphrase));
+}
+
+async function continueE2EEDisableMigrationImpl(passphrase: string): Promise<E2EEMigrationRunResult> {
   const profile = await getProfile();
   if (getProfileSyncMode(profile) !== 'migrating_to_plain' || !profile?.e2eeMigration) {
     throw new Error('No E2EE disable migration is in progress.');
@@ -873,7 +914,20 @@ async function deriveDekFromBundle(bundle: WrappedKeyBundle, passphrase: string)
  * leaves the rotation resumable, because both bundles and the old-version rows
  * are still in place until the very end.
  */
-async function driveRotation(
+function driveRotation(
+  oldDek: string,
+  oldVersion: number,
+  newDek: string,
+  newVersion: number,
+  migration: E2EEMigrationState,
+  recoveryCode?: string,
+): Promise<E2EEMigrationRunResult> {
+  return withMigrationRun(() =>
+    driveRotationImpl(oldDek, oldVersion, newDek, newVersion, migration, recoveryCode),
+  );
+}
+
+async function driveRotationImpl(
   oldDek: string,
   oldVersion: number,
   newDek: string,
@@ -1015,7 +1069,14 @@ export async function startE2EEKeyRotation(
  * (to decrypt rows still under it) and `newPassphrase` unwraps the new one. For
  * a panic rotate they're identical, so `newPassphrase` defaults to `oldPassphrase`.
  */
-export async function resumeE2EEKeyRotation(
+export function resumeE2EEKeyRotation(
+  oldPassphrase: string,
+  newPassphrase?: string,
+): Promise<E2EEMigrationRunResult> {
+  return withMigrationRun(() => resumeE2EEKeyRotationImpl(oldPassphrase, newPassphrase));
+}
+
+async function resumeE2EEKeyRotationImpl(
   oldPassphrase: string,
   newPassphrase?: string,
 ): Promise<E2EEMigrationRunResult> {
@@ -1348,6 +1409,7 @@ export type MigrationProgress = {
 
 export type AutoResumeResult =
   | { status: 'idle' }
+  | { status: 'in-progress' }
   | ({ status: 'awaiting-takeover'; direction: E2EEMigrationDirection; ownerDeviceId: string } & MigrationProgress)
   | { status: 'needs-passphrase'; direction: E2EEMigrationDirection }
   | { status: 'superseded' }
@@ -1373,6 +1435,10 @@ function directionFor(
  *
  *  - `idle`             — no migration to resume here (steady state, or a
  *                         migrating device with no migration record yet).
+ *  - `in-progress`      — a migration run already owns the transition in THIS
+ *                         tab (kicked off from settings, or the modal's Resume).
+ *                         The orchestrator must stand down: it must not raise a
+ *                         resume prompt or try to drive the same migration.
  *  - `awaiting-takeover`— a migration is in progress but owned by *another*
  *                         device. This device can adopt it (see
  *                         `takeOverMigration`) once the user opts in; until
@@ -1391,6 +1457,15 @@ function directionFor(
  *                         device stays migrating and the next cycle retries.
  */
 export async function autoResumeMigration(): Promise<AutoResumeResult> {
+  // A migration run is already executing in this tab (the user started it from
+  // settings, or hit Resume in the modal). It owns the transition and drives its
+  // own UI; a concurrent sync cycle must not independently raise the resume
+  // prompt or try to drive the same migration. Doing so briefly flashed the
+  // rotation passphrase modal as a rotation finished — the run had flipped the
+  // profile to `rotating_e2ee_key`, this cycle saw that and set
+  // `migrationResumePending`, then the run cleared it.
+  if (isMigrationRunInProgress()) return { status: 'in-progress' };
+
   const profile = await getProfile();
   const mode = getProfileSyncMode(profile);
   const migration = profile?.e2eeMigration;

@@ -152,6 +152,28 @@ async function reconcileSyncMode(): Promise<void> {
       }
     }
 
+    // The migration finished on another device: the server settled into
+    // steady-state 'e2ee' with no migration record, but this device is still
+    // pinned in a transient migrating mode (it had been showing the take-over
+    // banner for that migration). Adopt the steady state and drop the stale
+    // migration record. Without this the local mode stays e.g.
+    // 'migrating_to_e2ee' forever, and every orchestrator cycle re-derives an
+    // 'awaiting-takeover' offer from it — so the take-over modal flaps on and
+    // off (SyncGate's poll clears it on seeing the steady-state server, then the
+    // next cycle re-raises it from the stale local mode). Converging here leaves
+    // the device 'e2ee'; with no cached session key that resolves to the unlock
+    // modal, which is the correct resting state. The pull cursor is reset
+    // because the rows were rewritten into the encrypted table.
+    if (remote.syncMode === 'e2ee' && !remote.migration && localMode !== 'e2ee') {
+      await setLocalProfileSyncState({
+        syncMode: 'e2ee',
+        passphraseEnabled: true,
+        e2eeMigration: undefined,
+      });
+      clearPullCursor();
+      return;
+    }
+
     // Already in a non-plain mode locally. Keep migration *ownership*
     // convergent: if another device took the migration over (different owner,
     // at least as recent), adopt that so two devices don't both drive it.
@@ -204,6 +226,16 @@ async function reconcileSyncMode(): Promise<void> {
  */
 async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
   const resume = await autoResumeMigration();
+
+  if (resume.status === 'in-progress') {
+    // A migration run owns the transition in this tab (started from settings,
+    // or the modal's Resume). It drives its own modal and clears its own resume
+    // prompt on completion — don't touch `migrationResumePending` here, or we'd
+    // flash the (rotation) passphrase modal mid-run. Pull/push are gated during
+    // a migration anyway, so there's nothing else to do this cycle.
+    syncStatus.set('idle');
+    return 'halt';
+  }
 
   if (resume.status === 'awaiting-takeover') {
     // A migration owned by another device. Don't drive it; offer the user a
