@@ -655,7 +655,7 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
       if (w.date === acc.date && w.createdAt < acc.createdAt) return w;
       return acc;
     }, null);
-  if (earliest?.weightLbs != null) setStartWeightIfUnset(earliest.weightLbs);
+  if (earliest?.weightLbs != null) void setStartWeightIfUnset(earliest.weightLbs);
 }
 
 export async function importTrackingFile(file: File, mode: ImportMode): Promise<ImportApplyResult> {

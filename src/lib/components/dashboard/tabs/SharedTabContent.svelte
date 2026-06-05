@@ -6,7 +6,12 @@
   import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
   import HelpBadge from '$lib/components/icons/HelpBadge.svelte';
   import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
-  import { startWeight, currentWeight, goalWeight } from '$lib/stores/progressStore';
+  import {
+    startWeight,
+    currentWeight,
+    goalWeight,
+    setStartAndGoalWeight,
+  } from '$lib/stores/progressStore';
   import { rawPrescriptions } from '$lib/stores/medicationStore';
   import { healthEntries } from '$lib/stores/healthStore';
   import { symptomColors } from '$lib/stores/symptomStore';
@@ -507,8 +512,7 @@
   function saveProgressEdits() {
     const savedStartLbs = progressDraftValueToLbs(draftStartWeight, progressDraftUnit);
     const savedGoalLbs = progressDraftValueToLbs(draftGoalWeight, progressDraftUnit);
-    startWeight.set(savedStartLbs);
-    goalWeight.set(savedGoalLbs);
+    setStartAndGoalWeight(savedStartLbs, savedGoalLbs);
     progressBaseStartWeightLbs = savedStartLbs;
     progressBaseGoalWeightLbs = savedGoalLbs;
     syncProgressDraftsFromSaved(savedStartLbs, savedGoalLbs, $weightUnit);

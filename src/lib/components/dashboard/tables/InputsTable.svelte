@@ -546,6 +546,21 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   let prefix: number[] = [0];
   let estimate = DEFAULT_ROW_HEIGHT;
 
+  // True while the user is actively scrolling (including the momentum tail).
+  // Scroll-anchor compensation (`window.scrollBy`) and estimate drift are
+  // suppressed during this window: a programmatic scroll mid-fling cancels the
+  // browser's native momentum, and an estimate that keeps shifting re-anchors
+  // the page every frame, so the two together make the page judder and the
+  // scroll feel "stuck". We reconcile once when scrolling settles instead.
+  let isUserScrolling = false;
+  let scrollIdleTimer: ReturnType<typeof setTimeout> | undefined;
+  // Set while we drive a programmatic scroll (the bottom re-pin) so its own
+  // scroll event doesn't re-arm the settle reconcile — otherwise the pin would
+  // schedule another reconcile 150ms later that re-pins to a slightly different
+  // bottom, which reads as a snap. The bottom convergence below already folds in
+  // the freshly rendered rows within a few frames.
+  let suppressScrollSettle = false;
+
   // A stable primitive: re-fires only when the count actually changes, unlike
   // `displayedRows` whose reference shifts on every keystroke.
   const displayedRowsLength = $derived(displayedRows.length);
@@ -623,16 +638,14 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   // cache. If rows *above* the viewport top were re-measured (e.g. scrolling up
   // into not-yet-seen rows, or a card↔table switch), the anchored row would
   // shift, so we scroll-compensate by the offset delta to keep it put.
-  function measureRenderedRows() {
-    if (!tableEl) return;
-    const tbody = tableEl.tBodies[0];
-    if (!tbody) return;
+  // Fold the heights of the currently rendered rows into the cache, optionally
+  // refining the running estimate, and rebuild the prefix. Returns whether
+  // anything changed (so callers know if the total height moved).
+  function foldRenderedHeights(updateEstimate: boolean): boolean {
+    const tbody = tableEl?.tBodies[0];
+    if (!tbody) return false;
     const rows = tbody.querySelectorAll<HTMLElement>('tr:not(.virtual-spacer)');
-    if (rows.length === 0) return;
-
-    const scrolledPast = Math.max(0, -tbody.getBoundingClientRect().top);
-    const anchorIndex = Math.min(indexAtOffset(scrolledPast), prefix.length - 1);
-    const anchorBefore = prefix[anchorIndex];
+    if (rows.length === 0) return false;
 
     let changed = false;
     let total = 0;
@@ -652,19 +665,91 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     });
 
     let estimateChanged = false;
-    if (count > 0) {
+    if (updateEstimate && count > 0) {
       const nextEstimate = total / count;
       if (Math.abs(nextEstimate - estimate) > 0.5) {
         estimate = nextEstimate;
         estimateChanged = true;
       }
     }
-    if (!changed && !estimateChanged) return;
-
+    if (!changed && !estimateChanged) return false;
     rebuildPrefix();
+    return true;
+  }
+
+  // Pin to the true bottom and converge over a few frames. A fast fling lands at
+  // the *estimated* bottom with many skipped rows still unmeasured; each frame we
+  // pin, let the freshly revealed bottom rows render, fold their real heights in,
+  // and repeat until the total height stops moving. Doing this within a handful
+  // of frames (rather than across 150ms settle gaps) makes it read as a smooth
+  // settle instead of a delayed snap. `suppressScrollSettle` keeps our own pin
+  // scrolls from arming a fresh reconcile.
+  function reconcileBottom(passesLeft: number) {
+    requestAnimationFrame(() => {
+      if (!tableEl) {
+        suppressScrollSettle = false;
+        return;
+      }
+      const docEl = document.documentElement;
+      const max = docEl.scrollHeight - window.innerHeight;
+      if (window.scrollY < max - 0.5) {
+        suppressScrollSettle = true;
+        window.scrollTo({ top: max, left: 0, behavior: 'auto' });
+      }
+      const changed = foldRenderedHeights(true);
+      if (changed) recomputeVisibleRange();
+      if (changed && passesLeft > 0) {
+        reconcileBottom(passesLeft - 1);
+      } else {
+        // Release the settle suppression after the final pin's scroll event has
+        // had a frame to fire, so a genuine subsequent user scroll re-arms it.
+        requestAnimationFrame(() => {
+          suppressScrollSettle = false;
+        });
+      }
+    });
+  }
+
+  // Measure the rendered (non-spacer) rows and fold their real heights into the
+  // cache. If rows *above* the viewport top were re-measured (e.g. scrolling up
+  // into not-yet-seen rows, or a card↔table switch), the anchored row would
+  // shift, so we scroll-compensate by the offset delta to keep it put.
+  function measureRenderedRows() {
+    if (!tableEl) return;
+    const tbody = tableEl.tBodies[0];
+    if (!tbody) return;
+
+    const scrolledPast = Math.max(0, -tbody.getBoundingClientRect().top);
+    const anchorIndex = Math.min(indexAtOffset(scrolledPast), prefix.length - 1);
+    const anchorBefore = prefix[anchorIndex];
+
+    const docEl = document.documentElement;
+    const atBottom = window.scrollY + window.innerHeight >= docEl.scrollHeight - 2;
+
+    // Don't let the estimate drift mid-scroll: it changes the height of every
+    // not-yet-measured row at once, which shifts the prefix above the anchor
+    // and forces a compensation every frame. Reconciled on scroll-settle.
+    if (!foldRenderedHeights(!isUserScrolling)) return;
+
+    if (!isUserScrolling && atBottom) {
+      // At the page bottom the browser already clamps scrollY when the content
+      // height changes under us, so the model-based anchor compensation below
+      // would double-correct and leave us a little short of the bottom. Pin to
+      // the true bottom and converge the skipped-row heights instead.
+      recomputeVisibleRange();
+      reconcileBottom(3);
+      return;
+    }
+
     const anchorAfter = prefix[anchorIndex];
     const delta = anchorAfter - anchorBefore;
-    if (Math.abs(delta) > 0.5) window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+    // Skip scroll-anchor compensation while the user is scrolling — a
+    // programmatic scroll mid-fling kills native momentum. Visited rows are
+    // already measured (delta ≈ 0) during ordinary scrolling anyway; the rare
+    // above-viewport correction is folded in by the scroll-settle reconcile.
+    if (!isUserScrolling && Math.abs(delta) > 0.5) {
+      window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+    }
     recomputeVisibleRange();
   }
 
@@ -682,6 +767,22 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     let resizeRaf = 0;
     let lastWidth = tableEl.getBoundingClientRect().width;
     const onScroll = () => {
+      // Our own bottom re-pin scrolls run with suppressScrollSettle set; they
+      // still need the range recompute below to render the newly exposed rows,
+      // but must not arm a fresh settle reconcile (that's what caused the
+      // delayed bottom snap).
+      if (!suppressScrollSettle) {
+        isUserScrolling = true;
+        if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
+        // ~150ms after the last scroll event the fling has settled; fold in any
+        // deferred estimate/anchor correction now that a scrollBy won't fight
+        // momentum. By this point visited rows are measured, so the reconcile is
+        // typically a no-op — it just makes the spacers exact.
+        scrollIdleTimer = setTimeout(() => {
+          isUserScrolling = false;
+          measureRenderedRows();
+        }, 150);
+      }
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = 0;
@@ -713,6 +814,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     return () => {
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
       tableObserver.disconnect();
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);

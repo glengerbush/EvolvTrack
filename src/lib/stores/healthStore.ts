@@ -174,8 +174,16 @@ export const healthEntries = derived(rawHealthData, ($d) =>
 );
 
 export const latestWeightLbs = derived(rawHealthData, ($d) => {
-  const withWeight = [...$d.weights].reverse().find((w) => w.weightLbs != null);
-  return withWeight?.weightLbs ?? null;
+  // `$d.weights` is in insertion order, not date order (it's seeded from
+  // `db.weights.toArray()` and `upsert` appends), so we can't just take the
+  // last element. Pick the weighed entry with the latest date, tie-broken by
+  // `createdAt`. Symmetric with `earliestWeightLbs` below.
+  const weighed = $d.weights.filter((w) => w.weightLbs != null);
+  if (weighed.length === 0) return null;
+  const latest = weighed.reduce((acc, w) =>
+    w.date > acc.date || (w.date === acc.date && w.createdAt > acc.createdAt) ? w : acc,
+  );
+  return latest.weightLbs ?? null;
 });
 
 export const earliestWeightLbs = derived(rawHealthData, ($d) => {

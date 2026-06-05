@@ -10,10 +10,12 @@ import type { IsoDate } from '$lib/domain/types';
  *  - Capacity is the *labeled* fill: `concentrationMgMl × vialMl`. We do not
  *    invent overfill capacity — a vial can deplete to zero and beyond, and the
  *    overage is surfaced honestly via `over` / a negative `mgLeft`.
- *  - Doses are attributed compound-date FIFO: the oldest vial is drained first,
- *    and a dose that exceeds what's left *splits* — the remainder is drawn from
- *    the next vial (matching the vial-transition calculator). So a dose "starts
- *    coming from the next vial" exactly when the current vial can't cover it.
+ *  - Doses are attributed by *medication-table order*: the vial highest on the
+ *    table (lowest `sortOrder`) for that drug is drained first, and a dose that
+ *    exceeds what's left *splits* — the remainder is drawn from the next vial
+ *    down (matching the vial-transition calculator). So a dose "starts coming
+ *    from the next vial" exactly when the current vial can't cover it. Compound
+ *    date is *not* used for attribution — only table position decides the order.
  *  - `manualMgUsed` is an additive correction to consumed mg for one vial (e.g.
  *    doses taken before logging began, or fixing a misattribution). It does NOT
  *    change FIFO room — it's applied after pouring — so the override stays
@@ -67,12 +69,11 @@ function capacityOf(v: VialSpec): number | null {
   return c * m;
 }
 
-// Oldest compound date first; missing dates sort last (treated as newest), then
-// by explicit sortOrder, then createdAt, then id — fully deterministic.
+// Medication-table order: drain the vial highest on the table first. Ascending
+// `sortOrder` (the display order from `sortPrescriptionsByDisplayOrder`),
+// missing sortOrder last, then createdAt, then id — fully deterministic.
+// Compound date is intentionally ignored: attribution follows table position.
 function compareVials(a: VialSpec, b: VialSpec): number {
-  const ad = a.compoundDate ?? '￿';
-  const bd = b.compoundDate ?? '￿';
-  if (ad !== bd) return ad < bd ? -1 : 1;
   const ao = a.sortOrder ?? Number.POSITIVE_INFINITY;
   const bo = b.sortOrder ?? Number.POSITIVE_INFINITY;
   if (ao !== bo) return ao - bo;

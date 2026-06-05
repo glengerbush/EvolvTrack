@@ -131,7 +131,7 @@
       <div class="faq-answer">
         <p>
           EvolvTrack is a Progressive Web App (PWA), so you install it straight
-          from your browser — there's no app store, and no separate download.
+          from your browser, there's no app store, and no separate download.
           Once installed it opens in its own window, works offline, and behaves
           like any other app on your device. The exact steps depend on your
           device and browser:
@@ -142,7 +142,7 @@
             <button type="button" class="btn btn-primary" onclick={() => promptInstall()}>
               Install EvolvTrack
             </button>
-            <span class="install-cta-note">Your browser can install it directly — one tap.</span>
+            <span class="install-cta-note">Your browser can install it directly, in one tap.</span>
           </p>
         {/if}
 
@@ -168,7 +168,7 @@
         <h3 class="faq-subhead">Windows, Mac &amp; Linux (Chrome or Edge)</h3>
         <p>
           Look for the <strong>install icon</strong> at the right-hand end of
-          the address bar — a small screen with a downward arrow. Click it and
+          the address bar, a small screen with a downward arrow. Click it and
           confirm <strong>Install</strong>. If you don't see it, open the
           <strong>⋮</strong> (Chrome) or <strong>…</strong> (Edge) menu and
           choose <strong>Install EvolvTrack…</strong>
@@ -264,11 +264,14 @@
 
         <h3 class="faq-subhead">Which vial a dose comes from</h3>
         <p>
-          Doses come out of your <strong>oldest vial first</strong> (by compound
-          date). When a dose is larger than what&rsquo;s left in that vial, the
-          remainder is taken from the next one, the same split the
+          Doses come out of the <strong>vial highest on the table</strong> first
+          (for that medication), not by date. When a dose is larger than
+          what&rsquo;s left in that vial, the remainder is taken from the next one
+          down, the same split the
           <a href="#faq-calculators">vial transition calculator</a> helps you draw.
-          So a vial only starts being used once the one before it is empty.
+          So a vial only starts being used once the one above it is empty. To change
+          which vial is drawn from first, <strong>reorder the rows</strong>, drag the
+          vial you want used next to the top.
         </p>
 
         <h3 class="faq-subhead">Overfill</h3>
@@ -327,9 +330,7 @@
         <p>
           Treats your body as two connected buckets: your bloodstream (fast) and
           your deeper tissues (slow). The drug exchanges back and forth between
-          them while also draining out. This captures something real — a sharper
-          peak and a steeper drop in the first day or two after a dose — that the
-          simple curve smooths over. EvolvTrack plots the amount estimated to be
+          them while also draining out. EvolvTrack plots the amount estimated to be
           in the bloodstream, which is the part that actually drives how the drug
           makes you feel. This is the more accurate of the two, and it's lifted
           straight from published medical studies.
@@ -530,23 +531,13 @@
       <div class="faq-answer">
         <p>
           It's a common surprise: you inject, say, 11&nbsp;mg of tirzepatide and
-          the chart peaks around a quarter of that. That's expected, not a bug.
+          the chart peaks around a quarter of that. That's expected, not a bug. 
         </p>
         <p>
-          For semaglutide, tirzepatide and dulaglutide, the line is an
-          <strong>estimate of how much drug is in your blood plasma</strong> —
-          the level that actually drives the drug's effect — not the total
-          amount of drug sitting in your body. At any moment, a large share of
-          what you injected is either still being absorbed from the injection
-          site or has moved out into your tissues, and only ~80&nbsp;% of the
-          dose is absorbed at all. So the plasma figure naturally peaks well
-          below the milligrams you injected.
+          For semaglutide, tirzepatide, and dulaglutide, the chart <strong>estimates how much drug is in your blood plasma</strong>, not the total amount in your body. Some of the dose is still being absorbed from the injection site, some has moved into your tissues, and not all of it is absorbed in the first place. For a detailed explanation see <a href="#faq-amount-calc">How is &ldquo;amount in system&rdquo; calculated?</a>
         </p>
         <p>
-          Because of this, the number is most useful as a
-          <strong>day-to-day trend within one drug</strong> — for lining up how
-          you feel against your levels — rather than as a literal count of
-          milligrams in your body or a way to compare one drug against another.
+This number is best used as a trend line: a way to compare your levels day to day within the same medication, and see how they line up with how you feel. It is not a literal count of how many milligrams are in your body, and it is not a good way to compare one medication against another.
         </p>
         <p>
           For a deeper understanding of the calculation, see
@@ -560,33 +551,16 @@
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>Why is liraglutide less accurate than the other drugs?</summary>
       <div class="faq-answer">
         <p>
-          Liraglutide (Victoza, Saxenda) is normally injected
-          <strong>once per day</strong>, and its half-life of about
-          13&nbsp;hours means the dose rises and falls entirely within that
-          day — the peak lands roughly 10&nbsp;hours after the injection. The
-          other four medications EvolvTrack models are weekly drugs whose
-          curves are slow enough that the time of day they're taken barely
-          shifts the plasma level a week later.
+          Liraglutide is usually taken once a day, and its levels rise and fall within that same day. It peaks about 10 hours after injection, then drops again.
         </p>
         <p>
-          To keep logging simple, EvolvTrack records each dose against a
-          <em>date</em> only, not a time of day, and reads the chart once
-          per day at midnight. For the four weekly drugs, that's effectively
-          lossless: knowing the exact hour wouldn't measurably improve their
-          curves, so asking for it would just be friction in the logging UI.
-          For liraglutide, though, that same simplification means the chart
-          never sees the daily peak; the line it draws sits well below the
-          real plasma level.
+          EvolvTrack keeps logging simple by recording doses by date, not exact time, and reading the chart once per day at midnight. That works well for weekly medications, where the curve changes slowly and the exact hour barely matters.
         </p>
         <p>
-          The pharmacokinetic model itself is faithful, liraglutide is a
-          one-compartment drug and EvolvTrack matches that structure. The
-          inaccuracy is purely a sampling-resolution choice that favors the
-          common case (weekly dosing) at liraglutide's expense.
+          For liraglutide, though, timing matters more. Because the chart does not track the daily peak, the line may sit lower than your actual plasma level.
         </p>
         <p>
-          Practical guidance: treat liraglutide's line as a rough day-to-day
-          trend, not as an accurate plasma level.
+          So liraglutide’s line is best treated as a rough day-to-day trend, not an exact plasma-level estimate.
         </p>
       </div>
     </details>
@@ -858,7 +832,6 @@
   .faq-answer :global(ul),
   .faq-answer :global(ol) {
     margin: 0 0 0.65rem;
-    max-width: 72ch;
   }
 
   .faq-answer :global(li) {
