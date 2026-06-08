@@ -363,7 +363,7 @@
   h1 { margin: 0; font-size: 1.5rem; font-weight: 700; color: var(--text); }
 
   .card {
-    border: 2px solid color-mix(in oklab, var(--text) 18%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 18%, transparent);
     border-radius: 12px;
     padding: 0.85rem 1rem;
     background: var(--surface);
@@ -392,7 +392,7 @@
 
   input, select {
     padding: 0.5rem 0.6rem;
-    border: 2px solid color-mix(in oklab, var(--text) 24%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 24%, transparent);
     border-radius: 8px;
     font: inherit;
     background: var(--surface);
@@ -405,7 +405,7 @@
     border-radius: 9px;
     font-weight: 600;
     cursor: pointer;
-    border: 2px solid color-mix(in oklab, var(--text) 22%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 22%, transparent);
   }
 
   .btn-primary {
@@ -454,7 +454,7 @@
     margin: 0;
     padding: 0.5rem 0.75rem;
     background: color-mix(in oklab, var(--warning, #c80) 22%, var(--surface) 78%);
-    border: 2px solid var(--warning, #c80);
+    border: 1px solid var(--warning, #c80);
     border-radius: 8px;
     color: var(--text);
   }

@@ -2,11 +2,11 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { dev } from '$app/environment';
-  import { bulkUpdateInjections, bulkUpdatePrescriptions, getProfileSyncMode } from '$lib/domain/repo';
+  import { bulkUpdateEntries, bulkUpdatePrescriptions, getProfileSyncMode } from '$lib/domain/repo';
   import { db } from '$lib/db/schema';
   import { fromLiveQuery } from '$lib/db/liveQuery';
   import { errorMessage } from '$lib/utils/errorMessage';
-  import type { InjectionEntry, Medication, Prescription } from '$lib/domain/types';
+  import type { HealthEntry, Medication, Prescription } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
   import ThemeTuner from '$lib/components/settings/ThemeTuner.svelte';
@@ -93,7 +93,7 @@
   let exportBusy = $state(false);
   let importBusy = $state(false);
   let importMode = $state<ImportMode>('merge');
-  let pendingMedFixup = $state<InjectionEntry[]>([]);
+  let pendingMedFixup = $state<HealthEntry[]>([]);
   let pendingVialFixup = $state<Prescription[]>([]);
 
   type ImportStatusKind = 'idle' | 'pending' | 'success' | 'warning' | 'error';
@@ -363,7 +363,9 @@
         kind: result.warnings.length ? 'warning' : 'success',
         message: `${importResultSummary(result)}${warningText}`,
       };
-      pendingMedFixup = result.data.injections.filter((injection) => !injection.medication);
+      pendingMedFixup = result.data.entries.filter(
+        (entry) => entry.amountMg != null && entry.amountMg > 0 && !entry.medication,
+      );
       pendingVialFixup = result.data.prescriptions.filter((prescription) => !prescription.type);
     } catch (error) {
       importStatus = { kind: 'error', message: errorMessage(error) };
@@ -383,7 +385,7 @@
     pendingMedFixup = [];
     pendingVialFixup = [];
     await Promise.all([
-      bulkUpdateInjections(injections.map((i) => i.id), { medication }),
+      bulkUpdateEntries(injections.map((i) => i.id), { medication }),
       bulkUpdatePrescriptions(vials.map((v) => v.id), { type: medication }),
     ]);
     const parts: string[] = [];
@@ -867,7 +869,7 @@
     font-variant: small-caps;
     color: var(--headerText);
     background: color-mix(in oklab, var(--headerBg) 92%, white 8%);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 14px;
     padding: 0.45rem 1rem 0.5rem;
   }
@@ -878,7 +880,7 @@
     gap: 0.75rem;
     flex-wrap: wrap;
     background: color-mix(in oklab, var(--warning) 18%, white 82%);
-    border: 2px solid var(--warning);
+    border: 1px solid var(--warning);
     border-radius: 12px;
     padding: 0.65rem 0.9rem;
     font-size: 0.95rem;
@@ -887,7 +889,7 @@
 
   .exit-demo-btn {
     margin-left: auto;
-    border: 2px solid color-mix(in oklab, var(--warning) 70%, black 30%);
+    border: 1px solid color-mix(in oklab, var(--warning) 70%, black 30%);
     border-radius: 8px;
     background: transparent;
     color: color-mix(in oklab, var(--warning) 40%, black 60%);
@@ -926,7 +928,7 @@
     font-variant: small-caps;
     color: var(--headerText);
     background: color-mix(in oklab, var(--headerBg) 92%, white 8%);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-bottom: none;
     border-top-left-radius: 12px;
     border-top-right-radius: 12px;
@@ -938,7 +940,7 @@
   .panel {
     display: grid;
     gap: 0.65rem;
-    border: 4px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 0 14px 14px 14px;
     padding: 0.8rem;
     background: color-mix(in oklab, var(--surface) 86%, transparent);
@@ -947,7 +949,7 @@
 
   input {
     padding: 0.7rem;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
     border-radius: 10px;
     display: block;
     width: min(100%, 380px);
@@ -1006,14 +1008,14 @@
   .settings-panel .btn-primary {
     background: var(--headerBg);
     color: var(--headerText);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     opacity: 1;
   }
 
   .settings-panel .btn-ghost {
     background: color-mix(in oklab, var(--headerBg) 14%, var(--surface) 86%);
     color: var(--text);
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 65%, var(--surface) 35%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 65%, var(--surface) 35%);
     opacity: 1;
   }
 
@@ -1026,7 +1028,7 @@
   .settings-panel .btn-danger {
     background: color-mix(in oklab, var(--danger, #b91c1c) 88%, white 12%);
     color: white;
-    border: 2px solid color-mix(in oklab, var(--danger, #b91c1c) 70%, black 30%);
+    border: 1px solid color-mix(in oklab, var(--danger, #b91c1c) 70%, black 30%);
     opacity: 1;
     width: fit-content;
   }
@@ -1044,7 +1046,7 @@
   .theme-selector {
     display: flex;
     gap: 0;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 50%, #ccc 50%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 50%, #ccc 50%);
     border-radius: 11px;
     overflow: hidden;
     width: fit-content;
@@ -1064,7 +1066,7 @@
   }
 
   .theme-btn + .theme-btn {
-    border-left: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #ccc 60%);
+    border-left: 1px solid color-mix(in oklab, var(--cardBorder) 40%, #ccc 60%);
   }
 
   .theme-btn.selected {
@@ -1244,7 +1246,7 @@
     border-radius: 999px;
     background: var(--headerBg);
     color: var(--headerText);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     font-weight: 700;
     padding: 0.72rem 1.2rem;
   }
@@ -1260,7 +1262,7 @@
     display: inline-flex;
     align-items: center;
     min-height: 1.9rem;
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 999px;
     padding: 0.18rem 0.72rem;
     font-size: 0.85rem;

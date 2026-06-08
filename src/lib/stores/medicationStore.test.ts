@@ -25,7 +25,7 @@ vi.mock('$lib/db/liveQuery', () => ({
 let prescriptionsForRepo: Prescription[] = [];
 vi.mock('$lib/domain/repo', () => ({
   getAllPrescriptions: async () => prescriptionsForRepo,
-  getAllInjections: async () => [],
+  getAllEntries: async () => [],
 }));
 
 function rx(partial: Partial<Prescription> & { id: string }): Prescription {

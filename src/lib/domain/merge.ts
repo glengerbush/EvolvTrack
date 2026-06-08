@@ -73,7 +73,7 @@ function maxIso(times: IsoDateTime[], fallback: IsoDateTime): IsoDateTime {
  * Stamp `ts` onto every field present on `record` whose name isn't reserved.
  * Existing stamps are preserved unless overridden by the input set. Use this
  * on initial entity creation to seed a complete per-field clock — without it,
- * any later `updateWeight` that bumps row `updatedAt` would make absent stamps
+ * any later `updateEntry` that bumps row `updatedAt` would make absent stamps
  * silently jump forward via the fallback to row time.
  */
 export function stampAllFields<T extends Mergeable>(
@@ -94,7 +94,7 @@ export function stampAllFields<T extends Mergeable>(
 /**
  * Apply a partial edit: bump `fieldUpdatedAt[field] = ts` for every patched
  * field, carry every other currently-present field's stamp forward (defaulting
- * to the pre-edit row time so a subsequent `updateWeight` bump can't make them
+ * to the pre-edit row time so a subsequent `updateEntry` bump can't make them
  * appear "newer"), and recompute row `updatedAt`. Returns the next field-clock
  * sidecar — callers also need to merge `patch` into the field values
  * themselves.
@@ -230,9 +230,8 @@ export function applyPatchWithClears<T extends object>(
  * path is opt-in per aggregate — other aggregates keep whole-row LWW until
  * they're individually migrated.
  */
-export const MERGEABLE_AGGREGATES: ReadonlySet<SyncAggregate> = new Set([
-  'weight',
-  'injection',
+export const MERGEABLE_AGGREGATES: ReadonlySet<SyncAggregate> = new Set<SyncAggregate>([
+  'entry',
   'prescription',
 ]);
 

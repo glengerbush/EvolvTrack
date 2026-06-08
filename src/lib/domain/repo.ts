@@ -2,7 +2,7 @@ import { nanoid } from 'nanoid';
 import type { Table } from 'dexie';
 import { db } from '$lib/db/schema';
 import type {
-  InjectionEntry,
+  HealthEntry,
   IsoDate,
   IsoDateTime,
   OutboxEntry,
@@ -10,7 +10,6 @@ import type {
   ProfileSettings,
   SyncAggregate,
   SyncMode,
-  WeightEntry,
 } from '$lib/domain/types';
 import { localDateKey } from '$lib/utils/dateKeys';
 import {
@@ -76,19 +75,15 @@ function assertDataEditAllowed(aggregate: SyncAggregate): void {
 }
 
 // ── Change events ──────────────────────────────────────────────────────────
-// Emitted after each weight/injection mutation so caches can update
-// incrementally instead of re-reading the full table from IndexedDB.
+// Emitted after each health-entry mutation so caches can update incrementally
+// instead of re-reading the full table from IndexedDB.
 
 export type HealthDataChange =
-  | { kind: 'weight'; action: 'add'; entity: WeightEntry }
-  | { kind: 'weight'; action: 'patch'; id: string; patch: Partial<WeightEntry> }
-  | { kind: 'weight'; action: 'delete'; id: string }
-  | { kind: 'weight'; action: 'reset' }
-  | { kind: 'injection'; action: 'add'; entity: InjectionEntry }
-  | { kind: 'injection'; action: 'patch'; id: string; patch: Partial<InjectionEntry> }
-  | { kind: 'injection'; action: 'bulkPatch'; ids: string[]; patch: Partial<InjectionEntry> }
-  | { kind: 'injection'; action: 'delete'; id: string }
-  | { kind: 'injection'; action: 'reset' };
+  | { action: 'add'; entity: HealthEntry }
+  | { action: 'patch'; id: string; patch: Partial<HealthEntry> }
+  | { action: 'bulkPatch'; ids: string[]; patch: Partial<HealthEntry> }
+  | { action: 'delete'; id: string }
+  | { action: 'reset' };
 
 const healthChangeListeners = new Set<(change: HealthDataChange) => void>();
 
@@ -164,7 +159,7 @@ export type ApplyImportOptions = {
   /** Pre-existing row ids that the caller cleared (replace-mode only) — they
    *  get delete tombstones on the wire so the cloud actually drops them. Ids
    *  also present in `data` are coalesced into the upsert instead. */
-  deletedIds?: { weights: string[]; injections: string[]; prescriptions: string[] };
+  deletedIds?: { entries: string[]; prescriptions: string[] };
   /** Every symptom string found on the imported rows. Any not already known
    *  to the profile are added to `profile.symptomOptions` with a generated
    *  color, in the same Dexie write and the same outbox entry as the rest of
@@ -192,8 +187,7 @@ export type ApplyImportOptions = {
  */
 export async function enqueueImportedRows(
   data: {
-    weights: WeightEntry[];
-    injections: InjectionEntry[];
+    entries: HealthEntry[];
     prescriptions: Prescription[];
     profile?: ProfileSettings;
   },
@@ -212,8 +206,7 @@ export async function enqueueImportedRows(
   const enqueuedAt = now();
   const entries: OutboxEntry[] = [];
   const importedIds = {
-    weight: new Set(data.weights.map((w) => w.id)),
-    injection: new Set(data.injections.map((i) => i.id)),
+    entry: new Set(data.entries.map((e) => e.id)),
     prescription: new Set(data.prescriptions.map((p) => p.id)),
   };
 
@@ -246,12 +239,10 @@ export async function enqueueImportedRows(
     });
   }
 
-  tombstone('weight', deletedIds?.weights, importedIds.weight);
-  tombstone('injection', deletedIds?.injections, importedIds.injection);
+  tombstone('entry', deletedIds?.entries, importedIds.entry);
   tombstone('prescription', deletedIds?.prescriptions, importedIds.prescription);
 
-  for (const w of data.weights) upsert('weight', w.id, w.updatedAt, w);
-  for (const i of data.injections) upsert('injection', i.id, i.updatedAt, i);
+  for (const e of data.entries) upsert('entry', e.id, e.updatedAt, e);
   for (const p of data.prescriptions) upsert('prescription', p.id, p.updatedAt, p);
   if (profileToPersist) {
     upsert('profile', 'profile', profileToPersist.updatedAt, toSyncableProfile(profileToPersist));
@@ -349,9 +340,9 @@ async function mergeImportedProfile(
 // The inbound counterpart to the outbox: changes pulled from the cloud are
 // applied here, last-writer-wins. These write straight to the entity tables
 // and DO NOT enqueue an outbox entry — an applied remote change must never
-// bounce back as a new local event. Weight/injection writes still emit a
-// HealthDataChange so the (non-liveQuery) health store updates; prescriptions
-// and profile are observed via liveQuery / re-read on next load.
+// bounce back as a new local event. Entry writes still emit a HealthDataChange
+// so the (non-liveQuery) health store updates; prescriptions and profile are
+// observed via liveQuery / re-read on next load.
 
 function parseTime(value: IsoDateTime): number {
   return new Date(value).getTime();
@@ -567,10 +558,10 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
     return false;
   }
 
-  if (aggregate === 'weight') {
+  if (aggregate === 'entry') {
     const { result, stored } = await applyEntityChange(
-      db.weights,
-      'weight',
+      db.entries,
+      'entry',
       entityId,
       op,
       record,
@@ -579,26 +570,9 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
     if (result === 'upsert' && stored) {
       // Emit the actually-stored row (post-merge), not the raw remote — consumers
       // diverge from Dexie otherwise when a per-field merge has happened.
-      emitHealthChange({ kind: 'weight', action: 'add', entity: stored });
+      emitHealthChange({ action: 'add', entity: stored });
     } else if (result === 'delete') {
-      emitHealthChange({ kind: 'weight', action: 'delete', id: entityId });
-    }
-    return result !== null;
-  }
-
-  if (aggregate === 'injection') {
-    const { result, stored } = await applyEntityChange(
-      db.injections,
-      'injection',
-      entityId,
-      op,
-      record,
-      remoteUpdatedAt,
-    );
-    if (result === 'upsert' && stored) {
-      emitHealthChange({ kind: 'injection', action: 'add', entity: stored });
-    } else if (result === 'delete') {
-      emitHealthChange({ kind: 'injection', action: 'delete', id: entityId });
+      emitHealthChange({ action: 'delete', id: entityId });
     }
     return result !== null;
   }
@@ -636,156 +610,88 @@ export function sortPrescriptionsByDisplayOrder(prescriptions: Prescription[]): 
   });
 }
 
-// ── Weights ────────────────────────────────────────────────────────────────
+// ── Health entries (unified weigh-in + dose rows) ───────────────────────────
 
-export async function addWeight(data: {
-  date?: IsoDate;
-  weightLbs?: number;
-  wellness?: number;
-  systemMg?: number;
-  symptoms?: string[];
-  notes?: string;
-}): Promise<WeightEntry> {
+export async function addEntry(
+  input: Omit<HealthEntry, 'id' | 'createdAt' | 'updatedAt' | 'date'> & { date?: IsoDate },
+): Promise<HealthEntry> {
   const ts = now();
-  // Seed `fieldUpdatedAt` for every persistent field at creation time so
-  // future per-field merges have an explicit clock to compare against
-  // (instead of inheriting the row clock, which moves on every edit).
-  const item: WeightEntry = stampAllFields(
+  // Seed `fieldUpdatedAt` for every persistent field at creation time so future
+  // per-field merges have an explicit clock to compare against.
+  const item: HealthEntry = stampAllFields(
     {
       id: nanoid(),
-      date: data.date ?? localDateKey(),
-      weightLbs: data.weightLbs,
-      wellness: data.wellness,
-      systemMg: data.systemMg,
-      symptoms: data.symptoms,
-      notes: data.notes,
       createdAt: ts,
       updatedAt: ts,
+      ...input,
+      date: input.date ?? localDateKey(),
+      symptoms: input.symptoms ?? [],
     },
     ts,
   );
-  await db.transaction('rw', db.weights, db.outbox, async () => {
-    await db.weights.put(item);
-    await enqueueOutbox('weight', item.id, 'upsert', item.updatedAt, item);
+  await db.transaction('rw', db.entries, db.outbox, async () => {
+    await db.entries.put(item);
+    await enqueueOutbox('entry', item.id, 'upsert', item.updatedAt, item);
   });
-  emitHealthChange({ kind: 'weight', action: 'add', entity: item });
+  emitHealthChange({ action: 'add', entity: item });
   return item;
 }
 
-export async function updateWeight(
+export async function updateEntry(
   id: string,
-  data: Partial<Omit<WeightEntry, 'id' | 'createdAt'>>,
+  data: Partial<Omit<HealthEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
   const ts = now();
-  await db.transaction('rw', db.weights, db.outbox, async () => {
-    const before = await db.weights.get(id);
+  let patchForEvent: Partial<HealthEntry> | null = null;
+  await db.transaction('rw', db.entries, db.outbox, async () => {
+    const before = await db.entries.get(id);
     if (!before) return;
     const merged = applyPatchWithClears(before, data);
     const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
-    const updated: WeightEntry = { ...merged, fieldUpdatedAt, updatedAt };
-    await db.weights.put(updated);
-    await enqueueOutbox('weight', id, 'upsert', updated.updatedAt, updated);
-    emitHealthChange({ kind: 'weight', action: 'patch', id, patch: { ...data, updatedAt } });
-  });
-}
-
-export async function deleteWeight(id: string): Promise<void> {
-  const deletedAt = now();
-  await db.transaction('rw', db.weights, db.outbox, async () => {
-    const existing = await db.weights.get(id);
-    await db.weights.delete(id);
-    if (existing) await enqueueOutbox('weight', id, 'delete', deletedAt, null);
-  });
-  emitHealthChange({ kind: 'weight', action: 'delete', id });
-}
-
-export async function getAllWeights(): Promise<WeightEntry[]> {
-  return db.weights.orderBy('date').toArray();
-}
-
-// ── Injections ─────────────────────────────────────────────────────────────
-
-export async function addInjection(
-  input: Omit<InjectionEntry, 'id' | 'createdAt' | 'updatedAt'>,
-): Promise<InjectionEntry> {
-  const ts = now();
-  const item: InjectionEntry = stampAllFields(
-    { id: nanoid(), createdAt: ts, updatedAt: ts, ...input },
-    ts,
-  );
-  await db.transaction('rw', db.injections, db.outbox, async () => {
-    await db.injections.put(item);
-    await enqueueOutbox('injection', item.id, 'upsert', item.updatedAt, item);
-  });
-  emitHealthChange({ kind: 'injection', action: 'add', entity: item });
-  return item;
-}
-
-export async function updateInjection(
-  id: string,
-  data: Partial<Omit<InjectionEntry, 'id' | 'createdAt'>>,
-): Promise<void> {
-  const ts = now();
-  let patchForEvent: Partial<InjectionEntry> | null = null;
-  await db.transaction('rw', db.injections, db.outbox, async () => {
-    const before = await db.injections.get(id);
-    if (!before) return;
-    const merged = applyPatchWithClears(before, data);
-    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
-    const updated: InjectionEntry = { ...merged, fieldUpdatedAt, updatedAt };
-    await db.injections.put(updated);
-    await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
+    const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
+    await db.entries.put(updated);
+    await enqueueOutbox('entry', id, 'upsert', updated.updatedAt, updated);
     patchForEvent = { ...data, updatedAt };
   });
-  if (patchForEvent) emitHealthChange({ kind: 'injection', action: 'patch', id, patch: patchForEvent });
+  if (patchForEvent) emitHealthChange({ action: 'patch', id, patch: patchForEvent });
 }
 
-// Applies the same patch to many injections in one transaction and emits a
-// single change event. Callers that need to backfill a field across the whole
-// table (e.g. assigning a medication to a bulk import) should use this — doing
-// it as N sequential updateInjection calls triggers N store rebuilds, which
-// chains into N full PK/chart recomputes on the main thread.
-export async function bulkUpdateInjections(
+// Applies the same patch to many entries in one transaction and emits a single
+// change event. Callers backfilling a field across the table (e.g. assigning a
+// medication to a bulk import) should use this — N sequential updateEntry calls
+// trigger N store rebuilds and N full PK/chart recomputes on the main thread.
+export async function bulkUpdateEntries(
   ids: string[],
-  data: Partial<Omit<InjectionEntry, 'id' | 'createdAt'>>,
+  data: Partial<Omit<HealthEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
   if (ids.length === 0) return;
   const ts = now();
-  // Note: each row gets its own `updatedAt` derived from its own pre-edit row
-  // clock via `bumpFieldStamps`. The emitted bulkPatch carries the bulk `ts`
-  // as a representative timestamp — listeners use it for "newer than ours?"
-  // cache decisions, not as a per-row truth.
-  await db.transaction('rw', db.injections, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.outbox, async () => {
     for (const id of ids) {
-      const before = await db.injections.get(id);
+      const before = await db.entries.get(id);
       if (!before) continue;
       const merged = applyPatchWithClears(before, data);
       const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
-      const updated: InjectionEntry = { ...merged, fieldUpdatedAt, updatedAt };
-      await db.injections.put(updated);
-      await enqueueOutbox('injection', id, 'upsert', updated.updatedAt, updated);
+      const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
+      await db.entries.put(updated);
+      await enqueueOutbox('entry', id, 'upsert', updated.updatedAt, updated);
     }
   });
-  emitHealthChange({
-    kind: 'injection',
-    action: 'bulkPatch',
-    ids,
-    patch: { ...data, updatedAt: ts },
-  });
+  emitHealthChange({ action: 'bulkPatch', ids, patch: { ...data, updatedAt: ts } });
 }
 
-export async function deleteInjection(id: string): Promise<void> {
+export async function deleteEntry(id: string): Promise<void> {
   const deletedAt = now();
-  await db.transaction('rw', db.injections, db.outbox, async () => {
-    const existing = await db.injections.get(id);
-    await db.injections.delete(id);
-    if (existing) await enqueueOutbox('injection', id, 'delete', deletedAt, null);
+  await db.transaction('rw', db.entries, db.outbox, async () => {
+    const existing = await db.entries.get(id);
+    await db.entries.delete(id);
+    if (existing) await enqueueOutbox('entry', id, 'delete', deletedAt, null);
   });
-  emitHealthChange({ kind: 'injection', action: 'delete', id });
+  emitHealthChange({ action: 'delete', id });
 }
 
-export async function getAllInjections(): Promise<InjectionEntry[]> {
-  return db.injections.orderBy('date').toArray();
+export async function getAllEntries(): Promise<HealthEntry[]> {
+  return db.entries.orderBy('date').toArray();
 }
 
 // ── Prescriptions ──────────────────────────────────────────────────────────
@@ -829,7 +735,7 @@ export async function updatePrescription(
 }
 
 // Applies the same patch to many prescriptions in one transaction. Mirrors
-// bulkUpdateInjections so import flows can backfill a medication type across
+// bulkUpdateEntries so import flows can backfill a medication type across
 // multiple vial rows atomically. Prescriptions are observed via liveQuery so
 // no change event is emitted here.
 export async function bulkUpdatePrescriptions(
@@ -946,12 +852,10 @@ export async function clearAllData(): Promise<void> {
   // user edits to propagate. Bulk import (applyParsedImport) likewise writes
   // straight to the tables. Reconciling these with sync is a later concern.
   await Promise.all([
-    db.weights.clear(),
-    db.injections.clear(),
+    db.entries.clear(),
     db.prescriptions.clear(),
     db.profile.clear(),
   ]);
   rememberSyncMode(DEFAULT_SYNC_MODE);
-  emitHealthChange({ kind: 'weight', action: 'reset' });
-  emitHealthChange({ kind: 'injection', action: 'reset' });
+  emitHealthChange({ action: 'reset' });
 }

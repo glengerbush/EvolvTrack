@@ -20,10 +20,12 @@ function mountIn(component: unknown, props: Record<string, unknown>): HTMLElemen
 function setup(props: {
   values?: string[];
   options?: string[];
-  onToggle: (option: string) => void;
+  onToggle?: (option: string) => void;
   optionColor?: (option: string) => string;
+  forceOpen?: boolean;
+  onRequestClose?: () => void;
 }): HTMLElement {
-  return mountIn(MultiPicker, { ariaLabel: 'Symptoms', ...props });
+  return mountIn(MultiPicker, { ariaLabel: 'Symptoms', onToggle: () => {}, ...props });
 }
 
 function setupHarness(props: {
@@ -50,10 +52,10 @@ function chevron(container: HTMLElement): HTMLButtonElement {
   return container.querySelector('.multi-picker-chevron-btn') as HTMLButtonElement;
 }
 
-function selectedPills(container: HTMLElement): HTMLButtonElement[] {
+function selectedPills(container: HTMLElement): HTMLElement[] {
   return Array.from(
     container.querySelectorAll('.multi-picker-values .multi-picker-pill'),
-  ) as HTMLButtonElement[];
+  ) as HTMLElement[];
 }
 
 function dropdownOptions(container: HTMLElement): HTMLElement[] {
@@ -77,850 +79,263 @@ async function settle(): Promise<void> {
   flushSync();
 }
 
-describe('MultiPicker — rendering & basic interaction', () => {
-  it('renders each selected value as a pill button', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    expect(selectedPills(container).map((p) => p.textContent)).toEqual([
-      'Headache',
-      'Fatigue',
-    ]);
-    selectedPills(container).forEach((pill) => {
-      expect(pill.tagName).toBe('BUTTON');
-    });
+describe('MultiPicker — rendering', () => {
+  it('renders each selected value as a pill in the trigger', () => {
+    const container = setup({ values: ['Headache', 'Nausea'], options: ['Headache', 'Nausea', 'Fatigue'] });
+    expect(selectedPills(container).map((p) => p.textContent?.trim())).toEqual(['Headache', 'Nausea']);
   });
 
   it('shows the "None" placeholder when no values are selected', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
+    const container = setup({ values: [], options: ['Headache'] });
     expect(container.querySelector('.multi-picker-placeholder')?.textContent).toBe('None');
-  });
-
-  it('filters already-selected values out of the dropdown', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    expect(dropdownOptions(container).map((o) => o.textContent)).toEqual([
-      'Fatigue',
-      'Nausea',
-    ]);
-  });
-
-  it('shows "All selected" when every option is already chosen', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    expect(container.querySelector('.multi-picker-empty')?.textContent).toBe('All selected');
   });
 
   it('uses empty arrays as defaults when values/options are omitted', () => {
-    const container = setup({ onToggle: vi.fn() });
-    expect(container.querySelector('.multi-picker-placeholder')?.textContent).toBe('None');
-    chevron(container).click();
-    flushSync();
-    expect(container.querySelector('.multi-picker-empty')?.textContent).toBe('All selected');
+    const container = setup({});
+    expect(selectedPills(container)).toHaveLength(0);
+    expect(menu(container)).toBeNull();
   });
 
-  it('applies optionColor to selected pills and dropdown options', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      optionColor: (option) =>
-        option === 'Headache' ? 'rgb(255, 0, 0)' : 'rgb(0, 0, 255)',
-      onToggle: vi.fn(),
-    });
-    expect(selectedPills(container)[0].style.background).toContain('rgb(255, 0, 0)');
+  it('the menu lists ALL options (selected and unselected) once open', async () => {
+    const container = setup({ values: ['Nausea'], options: ['Headache', 'Nausea', 'Fatigue'] });
     chevron(container).click();
-    flushSync();
-    expect(dropdownOptions(container)[0].style.background).toContain('rgb(0, 0, 255)');
+    await settle();
+    expect(dropdownOptions(container).map((o) => o.textContent?.trim())).toEqual([
+      'Headache',
+      '✓ Nausea',
+      'Fatigue',
+    ]);
+  });
+
+  it('marks selected options with aria-selected and the selected class', async () => {
+    const container = setup({ values: ['Nausea'], options: ['Headache', 'Nausea'] });
+    chevron(container).click();
+    await settle();
+    const [headache, nausea] = dropdownOptions(container);
+    expect(headache.getAttribute('aria-selected')).toBe('false');
+    expect(headache.classList.contains('selected')).toBe(false);
+    expect(nausea.getAttribute('aria-selected')).toBe('true');
+    expect(nausea.classList.contains('selected')).toBe(true);
+  });
+
+  it('applies optionColor as a fill for selected and a tint for unselected', async () => {
+    const container = setup({
+      values: ['Nausea'],
+      options: ['Headache', 'Nausea'],
+      optionColor: () => '#3366cc',
+    });
+    chevron(container).click();
+    await settle();
+    const [headache, nausea] = dropdownOptions(container);
+    // Selected = solid fill in the option colour; unselected = a different
+    // (tinted) treatment. (happy-dom drops color-mix() from inline styles, so we
+    // assert the two states render distinctly rather than the exact tint.)
+    expect(nausea.getAttribute('style')).toContain('#3366cc');
+    expect(headache.getAttribute('style')).not.toBe(nausea.getAttribute('style'));
   });
 });
 
-describe('MultiPicker — click semantics', () => {
-  it('clicking empty area of the trigger toggles the dropdown', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    trigger(container).click();
-    flushSync();
-    expect(menu(container)).not.toBeNull();
-    trigger(container).click();
-    flushSync();
-    expect(menu(container)).toBeNull();
-  });
-
-  it('clicking the chevron toggles the dropdown', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    chevron(container).click();
-    flushSync();
-    expect(menu(container)).not.toBeNull();
-    chevron(container).click();
-    flushSync();
-    expect(menu(container)).toBeNull();
-  });
-
-  it('calls onToggle with the chosen option when a dropdown option is clicked', () => {
+describe('MultiPicker — toggle semantics', () => {
+  it('clicking an option calls onToggle with that option', async () => {
     const onToggle = vi.fn();
-    const container = setup({ values: [], options: ['Headache', 'Fatigue'], onToggle });
+    const container = setup({ values: [], options: ['Headache', 'Nausea'], onToggle });
     chevron(container).click();
-    flushSync();
+    await settle();
     dropdownOptions(container)[1].click();
-    expect(onToggle).toHaveBeenCalledWith('Fatigue');
+    expect(onToggle).toHaveBeenCalledWith('Nausea');
   });
 
-  it('first click on a selected pill opens the dropdown without calling onToggle', () => {
+  it('Space on a focused option toggles it and keeps the menu open', async () => {
     const onToggle = vi.fn();
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    expect(menu(container)).toBeNull();
-    selectedPills(container)[0].click();
-    flushSync();
-    expect(onToggle).not.toHaveBeenCalled();
-    expect(menu(container)).not.toBeNull();
-  });
-
-  it('a subsequent click on a selected pill (while open) calls onToggle to deselect', () => {
-    const onToggle = vi.fn();
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    selectedPills(container)[0].click();
-    flushSync();
-    selectedPills(container)[0].click();
+    const container = setup({ values: [], options: ['Headache', 'Nausea'], onToggle });
+    chevron(container).click();
+    await settle();
+    keydown(dropdownOptions(container)[0], ' ');
     expect(onToggle).toHaveBeenCalledWith('Headache');
-  });
-
-  it('applies the is-removable class to selected pills only while the dropdown is open', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    expect(selectedPills(container)[0].classList.contains('is-removable')).toBe(false);
-    chevron(container).click();
-    flushSync();
-    expect(selectedPills(container)[0].classList.contains('is-removable')).toBe(true);
-  });
-
-  it('closes the dropdown on outside pointerdown', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    chevron(container).click();
-    flushSync();
     expect(menu(container)).not.toBeNull();
-
-    const outside = document.createElement('div');
-    document.body.appendChild(outside);
-    outside.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    flushSync();
-    expect(menu(container)).toBeNull();
-    outside.remove();
   });
 
-  it('keeps the dropdown open when pointerdown happens inside the picker', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
+  it('round-trips add then remove through the harness (selected stays in the list)', async () => {
+    const container = setupHarness({ initialValues: [], options: ['Headache', 'Nausea'] });
     chevron(container).click();
-    flushSync();
-    menu(container)!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    flushSync();
-    expect(menu(container)).not.toBeNull();
+    await settle();
+    // add
+    dropdownOptions(container)[0].click();
+    await settle();
+    expect(selectedPills(container).map((p) => p.textContent?.trim())).toEqual(['Headache']);
+    expect(dropdownOptions(container)).toHaveLength(2); // still shows both
+    // remove the same option from the menu
+    dropdownOptions(container)[0].click();
+    await settle();
+    expect(selectedPills(container)).toHaveLength(0);
   });
 });
 
-describe('MultiPicker — ARIA & roles', () => {
-  it('chevron exposes aria-haspopup, aria-expanded, and a flipping aria-label; aria-controls only when expanded', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    const btn = chevron(container);
-    expect(btn.getAttribute('aria-haspopup')).toBe('listbox');
-    expect(btn.getAttribute('aria-expanded')).toBe('false');
-    expect(btn.getAttribute('aria-label')).toContain('Open');
-    // aria-controls must NOT reference a listbox that isn't rendered yet.
-    expect(btn.getAttribute('aria-controls')).toBeNull();
-
+describe('MultiPicker — open / close', () => {
+  it('clicking the chevron toggles the menu', async () => {
+    const container = setup({ options: ['Headache'] });
+    expect(menu(container)).toBeNull();
     chevron(container).click();
-    flushSync();
-    const opened = chevron(container);
-    expect(opened.getAttribute('aria-expanded')).toBe('true');
-    expect(opened.getAttribute('aria-label')).toContain('Close');
-    const listboxIdAttr = opened.getAttribute('aria-controls');
-    expect(listboxIdAttr).toBeTruthy();
-    expect(menu(container)?.id).toBe(listboxIdAttr);
-  });
-
-  it('chevron does not carry aria-describedby (hint lives on the listbox)', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    expect(chevron(container).getAttribute('aria-describedby')).toBeNull();
-  });
-
-  it('listbox has role="listbox", aria-multiselectable="true", and a context-specific aria-label', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    chevron(container).click();
-    flushSync();
-    const m = menu(container)!;
-    expect(m.getAttribute('role')).toBe('listbox');
-    expect(m.getAttribute('aria-multiselectable')).toBe('true');
-    // "Add ..." disambiguates from the pill group ("Selected ...") so screen
-    // readers describe each region's purpose distinctly.
-    expect(m.getAttribute('aria-label')).toBe('Add symptoms');
-  });
-
-  it('dropdown options have role="option" with aria-selected="false" and are not <button> elements', () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    dropdownOptions(container).forEach((opt) => {
-      expect(opt.getAttribute('role')).toBe('option');
-      expect(opt.getAttribute('aria-selected')).toBe('false');
-      // Buttons are a stronger interactive role than option; avoid the downgrade.
-      expect(opt.tagName).not.toBe('BUTTON');
-    });
-  });
-
-  it('listbox carries the keyboard-hint aria-describedby with arrow/Enter/typeahead guidance', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    chevron(container).click();
-    flushSync();
-    const describedBy = menu(container)!.getAttribute('aria-describedby');
-    expect(describedBy).toBeTruthy();
-    const hint = container.querySelector(`#${describedBy}`);
-    expect(hint).toBeTruthy();
-    const text = hint!.textContent?.toLowerCase() ?? '';
-    expect(text).toContain('arrow keys');
-    expect(text).toContain('enter');
-  });
-
-  it('selected pills are grouped under a labeled role="group" with a Backspace-aware description', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    const group = container.querySelector('.multi-picker-values')!;
-    expect(group.getAttribute('role')).toBe('group');
-    expect(group.getAttribute('aria-label')).toBe('Selected symptoms');
-    const describedBy = group.getAttribute('aria-describedby');
-    expect(describedBy).toBeTruthy();
-    const hint = container.querySelector(`#${describedBy}`);
-    expect(hint?.textContent?.toLowerCase()).toContain('backspace');
-  });
-
-  it('pill container drops the group landmark when no pills are present', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    const group = container.querySelector('.multi-picker-values')!;
-    expect(group.getAttribute('role')).toBeNull();
-    expect(group.getAttribute('aria-label')).toBeNull();
-    expect(group.getAttribute('aria-describedby')).toBeNull();
-  });
-
-  it('"All selected" empty placeholder is not announced as a live region', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    const empty = container.querySelector('.multi-picker-empty');
-    expect(empty).toBeTruthy();
-    expect(empty?.getAttribute('role')).toBeNull();
-    expect(empty?.getAttribute('aria-live')).toBeNull();
-  });
-
-  it('roving tabindex: only the focused option has tabindex 0', () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    const opts = dropdownOptions(container);
-    expect(opts.map((o) => o.getAttribute('tabindex'))).toEqual(['0', '-1', '-1']);
-  });
-
-  it('pill aria-label flips between bare value (closed) and "Remove X" (open)', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    expect(selectedPills(container)[0].getAttribute('aria-label')).toBeNull();
-    chevron(container).click();
-    flushSync();
-    expect(selectedPills(container)[0].getAttribute('aria-label')).toBe('Remove Headache');
-  });
-
-  it('exposes a polite live region for announcements', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    const region = liveRegion(container);
-    expect(region).toBeTruthy();
-    expect(region.getAttribute('aria-live')).toBe('polite');
-    expect(region.getAttribute('aria-atomic')).toBe('true');
-  });
-});
-
-describe('MultiPicker — keyboard interaction', () => {
-  it('ArrowDown on chevron opens the menu', async () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    keydown(chevron(container), 'ArrowDown');
     await settle();
     expect(menu(container)).not.toBeNull();
-  });
-
-  it('ArrowUp on chevron opens the menu', async () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    keydown(chevron(container), 'ArrowUp');
+    chevron(container).click();
     await settle();
-    expect(menu(container)).not.toBeNull();
-  });
-
-  it('ignores non-special keys on the chevron', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
-    keydown(chevron(container), 'Enter');
-    flushSync();
     expect(menu(container)).toBeNull();
   });
 
-  it('ArrowDown on the chevron while the menu is already open focuses the first option', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'ArrowDown'); // move focus to second item
-    flushSync();
-    keydown(chevron(container), 'ArrowDown');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
+  it('ArrowDown / Enter / Space on the chevron open the menu', async () => {
+    for (const key of ['ArrowDown', 'Enter', ' ']) {
+      const container = setup({ options: ['Headache'] });
+      keydown(chevron(container), key);
+      await settle();
+      expect(menu(container), `key ${key}`).not.toBeNull();
+      unmount(active!.component);
+      active!.container.remove();
+      active = null;
+    }
   });
 
-  it('ArrowUp on the chevron while the menu is already open focuses the last option', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(chevron(container), 'ArrowUp');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[2]);
-  });
-
-  it('ArrowUp on the chevron when no options remain leaves focus alone', async () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).focus();
-    keydown(chevron(container), 'ArrowUp');
-    await settle();
-    expect(menu(container)).not.toBeNull();
-    expect(document.activeElement).toBe(chevron(container));
-  });
-
-  it('ignores arrow keys inside an empty menu', async () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    await settle();
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    expect(menu(container)).not.toBeNull();
-  });
-
-  it('ignores unrelated keys on a selected pill', () => {
+  it('Enter on a focused option closes the menu via onRequestClose (does NOT toggle)', async () => {
     const onToggle = vi.fn();
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    keydown(selectedPills(container)[0], 'a');
-    expect(onToggle).not.toHaveBeenCalled();
-    expect(menu(container)).toBeNull();
-  });
-
-  it('Escape on a pill when the menu is closed does nothing', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    keydown(selectedPills(container)[0], 'Escape');
-    flushSync();
-    expect(menu(container)).toBeNull();
-  });
-
-  it('Escape on chevron closes the menu and returns focus to the chevron', () => {
-    const container = setup({ values: [], options: ['Headache'], onToggle: vi.fn() });
+    const onRequestClose = vi.fn();
+    const container = setup({ values: [], options: ['Headache'], onToggle, onRequestClose });
     chevron(container).click();
-    flushSync();
-    keydown(chevron(container), 'Escape');
-    flushSync();
+    await settle();
+    keydown(dropdownOptions(container)[0], 'Enter');
+    await settle();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(onRequestClose).toHaveBeenCalledTimes(1);
     expect(menu(container)).toBeNull();
   });
 
-  it('ArrowDown in the open menu moves focus to the next option', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
+  it('Escape inside the menu closes it via onRequestClose', async () => {
+    const onRequestClose = vi.fn();
+    const container = setup({ options: ['Headache'], onRequestClose });
+    chevron(container).click();
     await settle();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[1]);
-
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[2]);
+    keydown(menu(container)!, 'Escape');
+    await settle();
+    expect(onRequestClose).toHaveBeenCalledTimes(1);
+    expect(menu(container)).toBeNull();
   });
 
-  it('ArrowDown at the last option wraps to the first', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
+  it('Tab inside the menu closes it via onRequestClose', async () => {
+    const onRequestClose = vi.fn();
+    const container = setup({ options: ['Headache'], onRequestClose });
+    chevron(container).click();
     await settle();
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
+    keydown(menu(container)!, 'Tab');
+    await settle();
+    expect(onRequestClose).toHaveBeenCalledTimes(1);
+    expect(menu(container)).toBeNull();
+  });
+
+  it('outside pointerdown closes the menu via onRequestClose', async () => {
+    const onRequestClose = vi.fn();
+    const container = setup({ options: ['Headache'], onRequestClose });
+    chevron(container).click();
+    await settle();
+    document.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    await settle();
+    expect(onRequestClose).toHaveBeenCalledTimes(1);
+    expect(menu(container)).toBeNull();
+  });
+
+  it('forceOpen opens the menu and focuses a selected option first', async () => {
+    const container = setup({ values: ['Nausea'], options: ['Headache', 'Nausea'], forceOpen: true });
+    await settle();
+    expect(menu(container)).not.toBeNull();
+    expect(document.activeElement).toBe(dropdownOptions(container)[1]);
+  });
+});
+
+describe('MultiPicker — keyboard navigation', () => {
+  it('ArrowDown moves to the next option and wraps at the end', async () => {
+    const container = setup({ options: ['Headache', 'Nausea'] });
+    chevron(container).click();
+    await settle();
+    const opts = dropdownOptions(container);
+    opts[0].focus();
+    keydown(opts[0], 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+    keydown(opts[1], 'ArrowDown');
+    expect(document.activeElement).toBe(opts[0]);
   });
 
   it('ArrowUp from the first option wraps to the last', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
+    const container = setup({ options: ['Headache', 'Nausea'] });
+    chevron(container).click();
     await settle();
-    keydown(menu(container)!, 'ArrowUp');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[2]);
+    const opts = dropdownOptions(container);
+    opts[0].focus();
+    keydown(opts[0], 'ArrowUp');
+    expect(document.activeElement).toBe(opts[1]);
   });
 
   it('Home jumps to the first option, End to the last', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'End');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[2]);
-    keydown(menu(container)!, 'Home');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-  });
-
-  it('Escape inside the menu closes it and returns focus to the chevron', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'Escape');
-    flushSync();
-    expect(menu(container)).toBeNull();
-    expect(document.activeElement).toBe(chevron(container));
-  });
-
-  it('Tab inside the menu closes the menu and returns focus to the chevron', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'Tab');
-    flushSync();
-    expect(menu(container)).toBeNull();
-    // Focus must anchor on the chevron so the browser's default Tab advances
-    // from a real element rather than the option we just unmounted.
-    expect(document.activeElement).toBe(chevron(container));
-  });
-
-  it('Enter on a focused option selects it', async () => {
-    const onToggle = vi.fn();
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(document.activeElement!, 'Enter');
-    flushSync();
-    expect(onToggle).toHaveBeenCalledWith('Headache');
-  });
-
-  it('Space on a focused option selects it', async () => {
-    const onToggle = vi.fn();
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'ArrowDown');
-    flushSync();
-    keydown(document.activeElement!, ' ');
-    flushSync();
-    expect(onToggle).toHaveBeenCalledWith('Fatigue');
-  });
-
-  it('Backspace on a selected pill calls onToggle to remove it', () => {
-    const onToggle = vi.fn();
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    keydown(selectedPills(container)[0], 'Backspace');
-    expect(onToggle).toHaveBeenCalledWith('Headache');
-  });
-
-  it('Delete on a selected pill calls onToggle to remove it', () => {
-    const onToggle = vi.fn();
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle,
-    });
-    keydown(selectedPills(container)[0], 'Delete');
-    expect(onToggle).toHaveBeenCalledWith('Headache');
-  });
-
-  it('Escape on a focused pill closes an open menu', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    chevron(container).click();
-    flushSync();
-    keydown(selectedPills(container)[0], 'Escape');
-    flushSync();
-    expect(menu(container)).toBeNull();
-  });
-});
-
-describe('MultiPicker — focus management', () => {
-  it('clicking the chevron moves focus to the first menu option', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
+    const container = setup({ options: ['Headache', 'Nausea', 'Fatigue'] });
     chevron(container).click();
     await settle();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
+    const opts = dropdownOptions(container);
+    opts[1].focus();
+    keydown(opts[1], 'End');
+    expect(document.activeElement).toBe(opts[2]);
+    keydown(opts[2], 'Home');
+    expect(document.activeElement).toBe(opts[0]);
   });
 
-  it('opening via empty-area trigger click does NOT move focus', async () => {
-    const container = setup({
-      values: [],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    const before = document.activeElement;
-    trigger(container).click();
-    await settle();
-    expect(document.activeElement).toBe(before);
-  });
-
-  it('keyboard-activated pill (event.detail===0) opens menu and moves focus to first option', async () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    selectedPills(container)[0].dispatchEvent(
-      new MouseEvent('click', { bubbles: true, detail: 0 }),
-    );
-    await settle();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-  });
-});
-
-describe('MultiPicker — live region announcements', () => {
-  it('announces when a symptom is added', () => {
-    const container = setup({
-      values: [],
-      options: ['Headache'],
-      onToggle: vi.fn(),
-    });
+  it('typeahead jumps to the next option starting with the typed letter', async () => {
+    const container = setup({ options: ['Headache', 'Nausea', 'Numbness'] });
     chevron(container).click();
-    flushSync();
-    dropdownOptions(container)[0].click();
-    flushSync();
-    expect(liveRegion(container).textContent).toBe('Headache added. 1 selected.');
+    await settle();
+    const opts = dropdownOptions(container);
+    opts[0].focus();
+    keydown(menu(container)!, 'n');
+    expect(document.activeElement).toBe(opts[1]);
+    keydown(menu(container)!, 'n');
+    expect(document.activeElement).toBe(opts[2]);
   });
+});
 
-  it('announces when a symptom is removed (with plural count)', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue', 'Nausea'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
+describe('MultiPicker — ARIA & announcements', () => {
+  it('the listbox is multiselectable with a context label', async () => {
+    const container = setup({ options: ['Headache'] });
     chevron(container).click();
-    flushSync();
-    selectedPills(container)[1].click();
-    flushSync();
-    expect(liveRegion(container).textContent).toBe('Fatigue removed. 2 selected.');
-  });
-});
-
-describe('MultiPicker — typeahead', () => {
-  it('typing a letter inside the listbox jumps to the next option starting with it', async () => {
-    const container = setup({
-      values: [],
-      options: ['Apple', 'Banana', 'Cherry'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
     await settle();
-    keydown(menu(container)!, 'c');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[2]);
+    const list = menu(container)!;
+    expect(list.getAttribute('role')).toBe('listbox');
+    expect(list.getAttribute('aria-multiselectable')).toBe('true');
+    expect(list.getAttribute('aria-label')).toMatch(/symptoms/i);
   });
 
-  it('matching is case-insensitive', async () => {
-    const container = setup({
-      values: [],
-      options: ['Apple', 'Banana'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    keydown(menu(container)!, 'B');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[1]);
-  });
-
-  it('typing the same letter cycles through matching options', async () => {
-    const container = setup({
-      values: [],
-      options: ['Apple', 'Apricot', 'Banana'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-    keydown(menu(container)!, 'a');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[1]);
-    keydown(menu(container)!, 'a');
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-  });
-
-  it('ignores typeahead when a modifier key is held', async () => {
-    const container = setup({
-      values: [],
-      options: ['Apple', 'Banana'],
-      onToggle: vi.fn(),
-    });
-    keydown(chevron(container), 'ArrowDown');
-    await settle();
-    menu(container)!.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true }),
-    );
-    flushSync();
-    expect(document.activeElement).toBe(dropdownOptions(container)[0]);
-  });
-});
-
-describe('MultiPicker — pill keyboard navigation', () => {
-  it('ArrowRight on a pill moves focus to the next pill', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue', 'Nausea'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    selectedPills(container)[0].focus();
-    keydown(selectedPills(container)[0], 'ArrowRight');
-    flushSync();
-    expect(document.activeElement).toBe(selectedPills(container)[1]);
-  });
-
-  it('ArrowLeft on the first pill wraps to the last', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    selectedPills(container)[0].focus();
-    keydown(selectedPills(container)[0], 'ArrowLeft');
-    flushSync();
-    expect(document.activeElement).toBe(selectedPills(container)[1]);
-  });
-
-  it('Home/End on a pill jump to the first/last pill', () => {
-    const container = setup({
-      values: ['Headache', 'Fatigue', 'Nausea'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-      onToggle: vi.fn(),
-    });
-    selectedPills(container)[1].focus();
-    keydown(selectedPills(container)[1], 'End');
-    flushSync();
-    expect(document.activeElement).toBe(selectedPills(container)[2]);
-    keydown(selectedPills(container)[2], 'Home');
-    flushSync();
-    expect(document.activeElement).toBe(selectedPills(container)[0]);
-  });
-});
-
-describe('MultiPicker — contrast-aware pill text color', () => {
-  it('chooses light text on a dark background', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      optionColor: () => 'rgb(0, 0, 0)',
-      onToggle: vi.fn(),
-    });
-    const pill = selectedPills(container)[0];
-    expect(pill.style.color).toBeTruthy();
-    // Light text: white (#ffffff) — accept either hex or rgb form.
-    const c = pill.style.color.replace(/\s+/g, '').toLowerCase();
-    expect(['#ffffff', 'rgb(255,255,255)', 'white']).toContain(c);
-  });
-
-  it('chooses dark text on a light background', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      optionColor: () => 'rgb(255, 255, 255)',
-      onToggle: vi.fn(),
-    });
-    const pill = selectedPills(container)[0];
-    const c = pill.style.color.replace(/\s+/g, '').toLowerCase();
-    expect(c).not.toBe('');
-    expect(c).not.toBe('rgb(255,255,255)');
-    expect(c).not.toBe('#ffffff');
-    expect(c).not.toBe('white');
-  });
-
-  it('applies contrast color to dropdown options too', () => {
-    const container = setup({
-      values: [],
-      options: ['Headache'],
-      optionColor: () => '#000000',
-      onToggle: vi.fn(),
-    });
+  it('options use role="option" with aria-selected reflecting state', async () => {
+    const container = setup({ values: ['Nausea'], options: ['Headache', 'Nausea'] });
     chevron(container).click();
-    flushSync();
-    const opt = dropdownOptions(container)[0];
-    expect(opt.style.color).toBeTruthy();
-    const c = opt.style.color.replace(/\s+/g, '').toLowerCase();
-    expect(['#ffffff', 'rgb(255,255,255)', 'white']).toContain(c);
+    await settle();
+    const opts = dropdownOptions(container);
+    expect(opts.every((o) => o.getAttribute('role') === 'option')).toBe(true);
+    expect(opts[0].getAttribute('aria-selected')).toBe('false');
+    expect(opts[1].getAttribute('aria-selected')).toBe('true');
   });
 
-  it('skips foreground color when optionColor is not provided', () => {
-    const container = setup({
-      values: ['Headache'],
-      options: ['Headache', 'Fatigue'],
-      onToggle: vi.fn(),
-    });
-    const pill = selectedPills(container)[0];
-    expect(pill.style.color).toBe('');
+  it('roving tabindex: only the focused option has tabindex 0', async () => {
+    const container = setup({ options: ['Headache', 'Nausea'] });
+    chevron(container).click();
+    await settle();
+    const opts = dropdownOptions(container);
+    const zeros = opts.filter((o) => o.getAttribute('tabindex') === '0');
+    expect(zeros).toHaveLength(1);
   });
-});
 
-describe('MultiPicker — reactive parent (harness)', () => {
-  it('selecting the last available option focuses the chevron', async () => {
-    const container = setupHarness({
-      initialValues: [],
-      options: ['Headache'],
-    });
+  it('announces additions and removals on the live region', async () => {
+    const container = setupHarness({ initialValues: [], options: ['Headache'] });
     chevron(container).click();
     await settle();
     dropdownOptions(container)[0].click();
     await settle();
-    expect(menu(container)?.querySelector('.multi-picker-empty')).toBeTruthy();
-    expect(document.activeElement).toBe(chevron(container));
-  });
-
-  it('removing the last pill focuses the chevron', async () => {
-    const container = setupHarness({
-      initialValues: ['Headache'],
-      options: ['Headache'],
-    });
-    chevron(container).click();
+    expect(liveRegion(container).textContent).toMatch(/Headache added\. 1 selected/);
+    dropdownOptions(container)[0].click();
     await settle();
-    selectedPills(container)[0].click();
-    await settle();
-    expect(selectedPills(container).length).toBe(0);
-    expect(document.activeElement).toBe(chevron(container));
-  });
-
-  it('selecting a middle option moves focus to the next remaining option', async () => {
-    const container = setupHarness({
-      initialValues: [],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-    });
-    chevron(container).click();
-    await settle();
-    dropdownOptions(container)[1].click();
-    await settle();
-    const remaining = dropdownOptions(container);
-    expect(remaining.map((r) => r.textContent)).toEqual(['Headache', 'Nausea']);
-    expect(document.activeElement).toBe(remaining[1]);
-  });
-
-  it('removing a middle pill moves focus to the next remaining pill', async () => {
-    const container = setupHarness({
-      initialValues: ['Headache', 'Fatigue', 'Nausea'],
-      options: ['Headache', 'Fatigue', 'Nausea'],
-    });
-    chevron(container).click();
-    await settle();
-    selectedPills(container)[1].click();
-    await settle();
-    const pills = selectedPills(container);
-    expect(pills.map((p) => p.textContent)).toEqual(['Headache', 'Nausea']);
-    expect(document.activeElement).toBe(pills[1]);
+    expect(liveRegion(container).textContent).toMatch(/Headache removed\. 0 selected/);
   });
 });

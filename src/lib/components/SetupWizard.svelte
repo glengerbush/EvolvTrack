@@ -6,8 +6,8 @@
   import { importTrackingFile, importResultSummary } from '$lib/importExport/importer';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { claimLicense, fetchLicenseStatus, type LicenseStatusRow } from '$lib/sync/license';
-  import { bulkUpdateInjections, bulkUpdatePrescriptions } from '$lib/domain/repo';
-  import { MEDICATIONS, type Medication, type InjectionEntry, type Prescription } from '$lib/domain/types';
+  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/repo';
+  import { MEDICATIONS, type Medication, type HealthEntry, type Prescription } from '$lib/domain/types';
 
   type Step = 'license' | 'e2ee' | 'import' | 'medication' | 'done';
 
@@ -152,9 +152,9 @@
       const warningText = result.warnings.length ? ` ${result.warnings.slice(0, 2).join(' ')}` : '';
       importStatus = `${importResultSummary(result)}${warningText}`;
 
-      const missingIds = result.data.injections
-        .filter((entry: InjectionEntry) => !entry.medication)
-        .map((entry: InjectionEntry) => entry.id);
+      const missingIds = result.data.entries
+        .filter((entry: HealthEntry) => entry.amountMg != null && entry.amountMg > 0 && !entry.medication)
+        .map((entry: HealthEntry) => entry.id);
       const missingVialIds = result.data.prescriptions
         .filter((entry: Prescription) => !entry.type)
         .map((entry: Prescription) => entry.id);
@@ -181,7 +181,7 @@
     busy = true;
     try {
       await Promise.all([
-        bulkUpdateInjections(injectionsMissingMed, { medication: pickedMedication }),
+        bulkUpdateEntries(injectionsMissingMed, { medication: pickedMedication }),
         bulkUpdatePrescriptions(prescriptionsMissingMed, { type: pickedMedication }),
       ]);
       const parts: string[] = [];
@@ -448,7 +448,7 @@
     background: var(--surface, white);
     color: var(--text);
     border-radius: 14px;
-    border: 3px solid color-mix(in oklab, var(--text) 18%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 18%, transparent);
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
     display: grid;
     grid-template-rows: auto auto 1fr auto;
@@ -459,7 +459,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 0.9rem 1.1rem;
-    border-bottom: 2px solid color-mix(in oklab, var(--text) 12%, transparent);
+    border-bottom: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
   }
 
   .wizard-header h2 {
@@ -527,7 +527,7 @@
   input[type='text'] {
     padding: 0.65rem;
     border-radius: 10px;
-    border: 2px solid color-mix(in oklab, var(--text) 28%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 28%, transparent);
     background: var(--surface);
     color: var(--text);
     font: inherit;
@@ -576,7 +576,7 @@
     border-radius: 999px;
     background: color-mix(in oklab, var(--text) 12%, transparent);
     color: var(--text);
-    border: 2px solid color-mix(in oklab, var(--text) 22%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 22%, transparent);
     font-weight: 700;
     padding: 0.55rem 1.1rem;
   }
@@ -629,7 +629,7 @@
     gap: 0.6rem;
     justify-content: flex-end;
     padding: 0.85rem 1.1rem;
-    border-top: 2px solid color-mix(in oklab, var(--text) 12%, transparent);
+    border-top: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
   }
 
   .btn {
@@ -639,7 +639,7 @@
     font-weight: 700;
     cursor: pointer;
     font-size: 0.95rem;
-    border: 2px solid color-mix(in oklab, var(--text) 22%, transparent);
+    border: 1px solid color-mix(in oklab, var(--text) 22%, transparent);
   }
 
   .btn:disabled {

@@ -1,17 +1,9 @@
-import {
-  addInjection,
-  addWeight,
-  getProfile,
-  saveProfile,
-  updateInjection,
-  updateWeight,
-} from '$lib/domain/repo';
+import { addEntry, getProfile, saveProfile, updateEntry } from '$lib/domain/repo';
 import type { HealthColKey, IsoDate, IsoDateTime, Medication } from '$lib/domain/types';
 import { localDateKey } from '$lib/utils/dateKeys';
 
 export type HealthInputRowSaveInput = {
-  weightId?: string;
-  injectionId?: string;
+  entryId?: string;
   date: IsoDate;
   weightLbs?: number;
   wellness?: number;
@@ -23,16 +15,16 @@ export type HealthInputRowSaveInput = {
   doseSkipped?: boolean;
   medication?: Medication | '';
   shotLocation?: string;
+  prescriptionId?: string;
 };
 
 export type SavedHealthInputRow = {
-  weightId?: string;
-  injectionId?: string;
-  injectionSaved: boolean;
+  entryId?: string;
   medication?: Medication | '';
   dosePlanned?: boolean;
   doseConfirmedAt?: IsoDateTime;
   doseSkipped?: boolean;
+  prescriptionId?: string;
 };
 
 export type SaveInputRowsOptions = {
@@ -45,74 +37,52 @@ export type InputTableSettings = {
   hiddenColumns?: HealthColKey[];
 };
 
-function hasWeightData(row: HealthInputRowSaveInput): boolean {
-  return (
-    row.weightLbs != null ||
-    row.wellness != null ||
-    row.symptoms.length > 0 ||
-    row.notes != null
-  );
-}
-
+// One row = one HealthEntry. No weight/injection split, so editing a row only
+// ever touches its own record — a note (or anything else) can't leak onto a
+// sibling row that merely shares the date.
 async function saveInputRow(
   row: HealthInputRowSaveInput,
   options: Required<SaveInputRowsOptions>,
 ): Promise<SavedHealthInputRow> {
-  const { weightId: initialWeightId, injectionId: initialInjectionId } = row;
+  const hasDose = row.doseMg != null && Number.isFinite(row.doseMg);
 
-  const weightOp: Promise<string | undefined> = hasWeightData(row)
-    ? (async () => {
-        const weightData = {
-          date: row.date,
-          weightLbs: row.weightLbs,
-          wellness: row.wellness,
-          symptoms: row.symptoms,
-          notes: row.notes,
-        };
-        if (initialWeightId) {
-          await updateWeight(initialWeightId, weightData);
-          return initialWeightId;
-        }
-        const entry = await addWeight(weightData);
-        return entry.id;
-      })()
-    : Promise.resolve(initialWeightId);
-
-  if (row.doseMg == null || !Number.isFinite(row.doseMg)) {
-    const weightId = await weightOp;
-    return { weightId, injectionId: initialInjectionId, injectionSaved: false };
-  }
-
-  const medication = row.medication || options.defaultMedication;
-  const doseSkipped = row.doseSkipped === true;
+  const medication = hasDose ? row.medication || options.defaultMedication : '';
+  const doseSkipped = hasDose && row.doseSkipped === true;
   const explicitlyConfirmed = row.dosePlanned === false && row.doseConfirmedAt != null;
-  const dosePlanned = !doseSkipped && !explicitlyConfirmed && (row.dosePlanned === true || row.date > options.today);
-  const doseConfirmedAt = dosePlanned || doseSkipped ? undefined : row.doseConfirmedAt;
-  const injectionData = {
+  const dosePlanned =
+    hasDose && !doseSkipped && !explicitlyConfirmed && (row.dosePlanned === true || row.date > options.today);
+  const doseConfirmedAt = !hasDose || dosePlanned || doseSkipped ? undefined : row.doseConfirmedAt;
+
+  const data = {
     date: row.date,
-    amountMg: row.doseMg,
-    medication,
-    site: row.shotLocation ?? '',
+    weightLbs: row.weightLbs,
+    wellness: row.wellness,
+    symptoms: row.symptoms,
     notes: row.notes,
-    planned: dosePlanned,
+    amountMg: hasDose ? (row.doseMg as number) : undefined,
+    medication: hasDose ? medication : undefined,
+    site: hasDose ? row.shotLocation ?? '' : undefined,
+    prescriptionId: hasDose ? row.prescriptionId || undefined : undefined,
+    planned: hasDose ? dosePlanned : undefined,
     confirmedAt: doseConfirmedAt,
-    skipped: doseSkipped,
+    skipped: hasDose ? doseSkipped : undefined,
   };
 
-  const injectionOp: Promise<string> = initialInjectionId
-    ? updateInjection(initialInjectionId, injectionData).then(() => initialInjectionId)
-    : addInjection({ ...injectionData, symptoms: [] }).then((entry) => entry.id);
-
-  const [weightId, injectionId] = await Promise.all([weightOp, injectionOp]);
+  let entryId = row.entryId;
+  if (entryId) {
+    await updateEntry(entryId, data);
+  } else {
+    const created = await addEntry(data);
+    entryId = created.id;
+  }
 
   return {
-    weightId,
-    injectionId,
-    injectionSaved: true,
-    medication,
-    dosePlanned,
+    entryId,
+    medication: hasDose ? medication : undefined,
+    dosePlanned: hasDose ? dosePlanned : undefined,
     doseConfirmedAt,
-    doseSkipped,
+    doseSkipped: hasDose ? doseSkipped : undefined,
+    prescriptionId: hasDose ? row.prescriptionId || undefined : undefined,
   };
 }
 

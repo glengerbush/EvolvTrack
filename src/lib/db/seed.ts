@@ -1,4 +1,4 @@
-import { addWeight, addInjection, addPrescription, clearAllData } from '$lib/domain/repo';
+import { addEntry, addPrescription, clearAllData } from '$lib/domain/repo';
 import type { IsoDate } from '$lib/domain/types';
 import { addDays, asIsoDate, dateKeyFromDate, enumerateDateKeys, localDateKey } from '$lib/utils/dateKeys';
 
@@ -59,28 +59,32 @@ export async function seedDemoData(): Promise<void> {
     }
   });
 
-  // ── Health entries ────────────────────────────────────────────────────────
+  // ── Health entries (one record per row) ─────────────────────────────────────
+  // Each date gets a weigh-in entry; dose dates merge the dose onto that same
+  // row (matching the old combined view) so a dosing day reads as one row.
+  const doseByDate = new Map<IsoDate, { amountMg: number; site: string }>();
+  doseDates.forEach((date, index) => {
+    doseByDate.set(date, { amountMg: index < 2 ? 2.5 : 5, site: DOSE_SITES[index % DOSE_SITES.length] });
+  });
+
   await Promise.all(dates.map((date, index) => {
     const symptoms = symptomsByDate.get(date) ?? [];
-    return addWeight({
+    const dose = doseByDate.get(date);
+    return addEntry({
       date,
       weightLbs: weightForDay(index, symptoms.length > 0),
       wellness: symptoms.length > 0 ? 2 : index % 6 === 0 ? 4 : 5,
       symptoms,
+      ...(dose
+        ? {
+            amountMg: dose.amountMg,
+            site: dose.site,
+            medication: MEDICATION,
+            ...(date === today ? { planned: true } : { confirmedAt: confirmedAtForDate(date) }),
+          }
+        : {}),
     });
   }));
-
-  // ── Injections ────────────────────────────────────────────────────────────
-  await Promise.all(doseDates.map((date, index) => addInjection({
-    date,
-    amountMg: index < 2 ? 2.5 : 5,
-    site: DOSE_SITES[index % DOSE_SITES.length],
-    medication: MEDICATION,
-    symptoms: [],
-    ...(date === today
-      ? { planned: true }
-      : { confirmedAt: confirmedAtForDate(date) }),
-  })));
 
   // ── Prescriptions (vials) ─────────────────────────────────────────────────
   await addPrescription({ type: 'Semaglutide (Ozempic / Wegovy)',     concentrationMgMl: 5,  additive: 'B12', vialMl: 2, prescribedDoseMg: 2.5, dosesLeft: 0,   costUsd: 179.83, pharmacy: 'Greenwich', compoundDate: addDays(today, -240), bud: addDays(today, -60),  lotNumber: '031225-04', status: 'warning'  });

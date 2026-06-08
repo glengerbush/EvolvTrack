@@ -240,7 +240,7 @@
     </details>
 
     <details class="faq-item" id="faq-vials">
-      <summary><span class="faq-chevron" aria-hidden="true">▸</span>How does EvolvTrack track what&rsquo;s left in each vial?</summary>
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>How does EvolvTrack track what&rsquo;s left in each vial, and which vial a dose comes from?</summary>
       <div class="faq-answer">
         <p>
           In the <strong>Medications</strong> tab, the amount left in each vial is
@@ -264,25 +264,36 @@
 
         <h3 class="faq-subhead">Which vial a dose comes from</h3>
         <p>
-          Doses come out of the <strong>vial highest on the table</strong> first
-          (for that medication), not by date. When a dose is larger than
-          what&rsquo;s left in that vial, the remainder is taken from the next one
-          down, the same split the
-          <a href="#faq-calculators">vial transition calculator</a> helps you draw.
-          So a vial only starts being used once the one above it is empty. To change
-          which vial is drawn from first, <strong>reorder the rows</strong>, drag the
-          vial you want used next to the top.
+          Every dose is drawn from a <strong>single vial</strong>, a dose is never
+          split across two. By default EvolvTrack attributes each dose to the vial
+          <strong>highest on the table</strong> (for that medication) that still has
+          room, working down the list as each vial fills up. This goes by
+          <strong>table position, not by date</strong>, so to change which vial is
+          drawn from first, <strong>reorder the rows</strong>, drag the vial you want
+          used next up to the top.
+        </p>
+        <p>
+          You can also set the vial for an <strong>individual dose</strong> yourself.
+          On the <strong>Health</strong> tab&rsquo;s inputs table, the
+          <strong>Dose</strong> column lets you pick exactly which vial that dose came
+          from, which is how you correct a dose that actually came from a different
+          vial than the automatic guess. A dose you assign by hand stays pinned to
+          that vial even if you reorder the list later; only the doses you
+          haven&rsquo;t set follow the automatic table order.
         </p>
 
         <h3 class="faq-subhead">Overfill</h3>
         <p>
           The count is based on the <strong>labeled</strong> fill (the mL you
-          entered). Compounded vials are often slightly overfilled, so you may get
-          an extra partial, or even full, dose beyond what the label
-          says. When that happens the vial shows <strong>0 left</strong> with an
+          entered). Because a dose is never split, a dose larger than what&rsquo;s
+          left in its vial doesn&rsquo;t spill into the next one, the vial simply
+          goes <strong>past its labeled fill</strong>. The same thing happens with
+          compounded vials, which are often slightly overfilled, so you may get an
+          extra partial, or even full, dose beyond what the label says. Either way
+          the vial shows <strong>0 left</strong> with an
           <strong>&ldquo;over&rdquo;</strong> marker rather than pretending it holds
-          more. We don&rsquo;t guess at overfill; the numbers you can rely on are
-          the ones from the label.
+          more. We don&rsquo;t guess at overfill; the numbers you can rely on are the
+          ones from the label.
         </p>
 
         <h3 class="faq-subhead">What you can override</h3>
@@ -742,7 +753,7 @@ This number is best used as a trend line: a way to compare your levels day to da
   }
 
   .faq-nav a {
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 999px;
     padding: 0.28rem 0.7rem;
     font-size: 0.85rem;
@@ -783,7 +794,7 @@ This number is best used as a trend line: a way to compare your levels day to da
   }
 
   .faq-item {
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 12px;
     background: color-mix(in oklab, var(--surface) 86%, transparent);
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.12);
@@ -873,7 +884,7 @@ This number is best used as a trend line: a way to compare your levels day to da
     font-family: 'Courier New', monospace;
     font-size: 1rem;
     background: color-mix(in oklab, var(--surface) 55%, transparent);
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 28%, #e0e0e0 72%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 28%, #e0e0e0 72%);
     border-radius: 10px;
     padding: 0.6rem 0.8rem;
   }
@@ -945,7 +956,7 @@ This number is best used as a trend line: a way to compare your levels day to da
   }
 
   .faq-note {
-    border-left: 4px solid var(--cardBorder);
+    border-left: 1px solid var(--cardBorder);
     padding: 0.5rem 0.75rem;
     background: color-mix(in oklab, var(--surface) 60%, transparent);
     border-radius: 0 8px 8px 0;

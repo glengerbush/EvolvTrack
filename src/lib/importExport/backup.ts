@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { APP_VERSION } from '$lib/version';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
-import { getAllInjections, getAllPrescriptions, getAllWeights, getProfile } from '$lib/domain/repo';
-import type { InjectionEntry, Prescription, ProfileSettings, WeightEntry } from '$lib/domain/types';
+import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import type { HealthEntry, Prescription, ProfileSettings } from '$lib/domain/types';
 import { dateStamp, downloadText } from '$lib/importExport/download';
 
 export const BACKUP_FORMAT_VERSION = 1;
@@ -17,8 +17,7 @@ export type EvolvTrackBackup = {
   dbSchemaVersion: number;
   exportedAt: string;
   data: {
-    weights: WeightEntry[];
-    injections: InjectionEntry[];
+    entries: HealthEntry[];
     prescriptions: Prescription[];
     profile?: ProfileSettings;
   };
@@ -38,17 +37,15 @@ const backupSchema = z.object({
   dbSchemaVersion: z.number(),
   exportedAt: z.string(),
   data: z.object({
-    weights: z.array(entitySchema),
-    injections: z.array(entitySchema),
+    entries: z.array(entitySchema),
     prescriptions: z.array(entitySchema),
     profile: entitySchema.optional(),
   }),
 });
 
 export async function createBackup(): Promise<EvolvTrackBackup> {
-  const [weights, injections, prescriptions, profile] = await Promise.all([
-    getAllWeights(),
-    getAllInjections(),
+  const [entries, prescriptions, profile] = await Promise.all([
+    getAllEntries(),
     getAllPrescriptions(),
     getProfile(),
   ]);
@@ -61,8 +58,7 @@ export async function createBackup(): Promise<EvolvTrackBackup> {
     dbSchemaVersion: DB_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     data: {
-      weights,
-      injections,
+      entries,
       prescriptions,
       profile,
     },

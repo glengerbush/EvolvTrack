@@ -1,11 +1,10 @@
 import Dexie, { type Table } from 'dexie';
 import type {
-  InjectionEntry,
+  HealthEntry,
   MigrationBackfillEntry,
   OutboxEntry,
   Prescription,
   ProfileSettings,
-  WeightEntry,
   WrappedKeyBundle,
 } from '$lib/domain/types';
 import { defineDatabaseVersions } from '$lib/db/migrations';
@@ -22,8 +21,7 @@ export interface EncryptedRecord {
 }
 
 export class EvolvTrackDB extends Dexie {
-  weights!: Table<WeightEntry, string>;
-  injections!: Table<InjectionEntry, string>;
+  entries!: Table<HealthEntry, string>;
   prescriptions!: Table<Prescription, string>;
   profile!: Table<ProfileSettings, string>;
   encrypted!: Table<EncryptedRecord, string>;

@@ -288,7 +288,7 @@
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
-    border-bottom: 3px solid color-mix(in oklab, var(--cardBorder) 55%, white 45%);
+    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 55%, white 45%);
     background: color-mix(in oklab, var(--bgTint) 60%, white 40%);
   }
 
@@ -320,7 +320,7 @@
     width: 2.35rem;
     height: 2.35rem;
     border-radius: 8px;
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     flex: 0 0 auto;
     display: inline-block;
     position: relative;
@@ -354,7 +354,7 @@
     align-items: center;
     gap: 1rem;
     padding: 0.75rem 1.2rem 0;
-    border-bottom: 4px solid var(--cardBorder);
+    border-bottom: 1px solid var(--cardBorder);
     position: sticky;
     top: 0;
     z-index: 3;
@@ -374,7 +374,7 @@
 
   .logout-button,
   .signup-button {
-    border: 3px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 12px;
     background: color-mix(in oklab, var(--headerBg) 60%, white 40%);
     color: var(--headerText);
@@ -408,7 +408,7 @@
     align-items: center;
     justify-content: center;
     gap: 0.38rem;
-    border: 3px solid transparent;
+    border: 1px solid transparent;
     border-bottom: 0;
     border-top-left-radius: 14px;
     border-top-right-radius: 14px;
@@ -541,7 +541,7 @@
       height: 2.2rem;
       font-size: 0.82rem;
       padding: 0 0.6rem;
-      border-width: 2px;
+      border-width: 1px;
       border-radius: 10px;
     }
   }

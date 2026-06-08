@@ -320,8 +320,8 @@ export function buildChartModel(
       medication: series.medication,
       color: series.color,
       shape: series.shape,
-      actualPath: toPolyline(split.actual),
-      predictionPath: toPolyline(split.projected),
+      actualPath: toBrokenLinePath(split.actual),
+      predictionPath: toBrokenLinePath(split.projected),
       dosePoints: toMarkers(takenDoses),
       plannedDosePoints: toMarkers(plannedDoses),
     };
@@ -706,6 +706,39 @@ function buildTicks(min: number, max: number, count: number) {
 
 function toPolyline(points: NumberPoint[]) {
   return points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+}
+
+// Like toPolyline, but emits an SVG path that lifts the pen across *interior*
+// runs of zero-value points. Used for the mg-in-system lines so a drug that's
+// inactive (0 mg in system) for a stretch doesn't draw a flat line along the
+// x-axis — with several drug changes those baseline runs otherwise pile up.
+//
+// Boundary zeros (a zero adjacent to a non-zero point) are kept: they're the
+// foot where the curve meets the axis, e.g. a drug's first dose contributes 0
+// on its own day (same-day-zero rule) so its marker sits on the axis — keeping
+// that zero lets the line connect up from the dot to the next day's value.
+// Dose markers are rendered separately, so the dots always appear on the axis.
+function toBrokenLinePath(points: NumberPoint[]) {
+  const segments: string[] = [];
+  let penDown = false;
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    const prev = points[i - 1];
+    const next = points[i + 1];
+    // Keep a zero only when it's the foot of a curve (a neighbour is non-zero);
+    // drop interior zeros so flat baseline runs don't draw and the pen lifts.
+    const isBoundaryZero =
+      (prev !== undefined && prev.value !== 0) ||
+      (next !== undefined && next.value !== 0);
+    if (point.value === 0 && !isBoundaryZero) {
+      penDown = false;
+      continue;
+    }
+    const coord = `${point.x.toFixed(1)},${point.y.toFixed(1)}`;
+    segments.push((penDown ? 'L' : 'M') + coord);
+    penDown = true;
+  }
+  return segments.join(' ');
 }
 
 function formatAxisNumber(value: number, step?: number) {

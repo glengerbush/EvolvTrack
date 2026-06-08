@@ -2,19 +2,8 @@ import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
-import {
-  addInjection,
-  addWeight,
-  getAllInjections,
-  getAllPrescriptions,
-  getAllWeights,
-  getProfile,
-} from '$lib/domain/repo';
-import {
-  BACKUP_APP_ID,
-  BACKUP_FORMAT_VERSION,
-  BACKUP_KIND,
-} from './backup';
+import { addEntry, getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import { BACKUP_APP_ID, BACKUP_FORMAT_VERSION, BACKUP_KIND } from './backup';
 import {
   dedupeAgainstExisting,
   emptyImportData,
@@ -23,7 +12,7 @@ import {
   parseTrackingFile,
 } from './importer';
 import type { ImportData } from './shared';
-import type { InjectionEntry, WeightEntry } from '$lib/domain/types';
+import type { HealthEntry } from '$lib/domain/types';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 
@@ -35,7 +24,10 @@ function csvFile(name: string, content: string): File {
   return new File([content], name, { type: 'text/csv' });
 }
 
-function backupPayload(overrides: { formatVersion?: number; weights?: unknown[]; injections?: unknown[]; prescriptions?: unknown[] } = {}) {
+const weighInEntries = (data: ImportData) => data.entries.filter((e) => e.weightLbs != null);
+const doseEntries = (data: ImportData) => data.entries.filter((e) => e.amountMg != null);
+
+function backupPayload(overrides: { formatVersion?: number; entries?: unknown[]; prescriptions?: unknown[] } = {}) {
   return {
     app: BACKUP_APP_ID,
     kind: BACKUP_KIND,
@@ -44,7 +36,7 @@ function backupPayload(overrides: { formatVersion?: number; weights?: unknown[];
     dbSchemaVersion: 1,
     exportedAt: '2026-05-10T12:00:00.000Z',
     data: {
-      weights: overrides.weights ?? [
+      entries: overrides.entries ?? [
         {
           id: 'w-1',
           date: '2026-05-10',
@@ -52,8 +44,6 @@ function backupPayload(overrides: { formatVersion?: number; weights?: unknown[];
           createdAt: '2026-05-10T12:00:00.000Z',
           updatedAt: '2026-05-10T12:00:00.000Z',
         },
-      ],
-      injections: overrides.injections ?? [
         {
           id: 'i-1',
           date: '2026-05-10',
@@ -75,8 +65,7 @@ describe('parseTrackingFile — backup JSON', () => {
     const result = await parseTrackingFile(jsonFile('backup.json', backupPayload()));
     expect(result.source).toBe('EvolvTrack backup');
     expect(result.sourceDetail).toContain('backup v1');
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.injections).toHaveLength(1);
+    expect(result.data.entries).toHaveLength(2);
     expect(result.warnings).toEqual([]);
   });
 
@@ -89,22 +78,20 @@ describe('parseTrackingFile — backup JSON', () => {
 });
 
 describe('parseTrackingFile — external JSON', () => {
-  it('extracts weights and injections from a flat array of rows', async () => {
+  it('extracts weigh-in and dose entries from a flat array of rows', async () => {
     const payload = [
       { Date: '2026-05-09', Weight: 181, Wellness: 4, Symptoms: 'nausea, fatigue' },
       { Date: '2026-05-10', 'Dose (mg)': 5, Medication: 'Ozempic', 'Shot Location': 'belly' },
     ];
     const result = await parseTrackingFile(jsonFile('export.json', payload));
     expect(result.source).toBe('External JSON');
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.weights[0]).toMatchObject({
+    expect(weighInEntries(result.data)[0]).toMatchObject({
       date: '2026-05-09',
       weightLbs: 181,
       wellness: 4,
       symptoms: ['nausea', 'fatigue'],
     });
-    expect(result.data.injections).toHaveLength(1);
-    expect(result.data.injections[0]).toMatchObject({
+    expect(doseEntries(result.data)[0]).toMatchObject({
       date: '2026-05-10',
       amountMg: 5,
       medication: SEMA,
@@ -118,15 +105,15 @@ describe('parseTrackingFile — external JSON', () => {
       { Date: '2026-05-10', Weight: 180 },
     ];
     const result = await parseTrackingFile(jsonFile('mixed.json', payload));
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.weights[0].date).toBe('2026-05-10');
+    expect(result.data.entries).toHaveLength(1);
+    expect(result.data.entries[0].date).toBe('2026-05-10');
   });
 
   it('emits a warning for an unrecognized medication and drops the medication value', async () => {
     const payload = [{ Date: '2026-05-10', 'Dose (mg)': 1, Medication: 'MysteryGLP' }];
     const result = await parseTrackingFile(jsonFile('weird.json', payload));
-    expect(result.data.injections).toHaveLength(1);
-    expect(result.data.injections[0].medication).toBe('');
+    expect(doseEntries(result.data)).toHaveLength(1);
+    expect(doseEntries(result.data)[0].medication).toBe('');
     expect(result.warnings.join(' ')).toMatch(/Unrecognized medication "MysteryGLP"/);
   });
 
@@ -138,21 +125,19 @@ describe('parseTrackingFile — external JSON', () => {
 });
 
 describe('parseTrackingFile — CSV', () => {
-  it('parses a CSV with weight and injection columns', async () => {
+  it('parses a CSV with weight and dose columns', async () => {
     const csv =
       'Date,Weight (lbs),Wellness,Dose (mg),Medication,Shot Location,Symptoms,Notes\n' +
       '2026-05-09,181,4,,,,,first day\n' +
       '2026-05-10,,,5,Ozempic,belly,nausea,after dinner\n';
     const result = await parseTrackingFile(csvFile('shotsy.csv', csv));
     expect(result.source).toBe('External CSV');
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.weights[0]).toMatchObject({
+    expect(weighInEntries(result.data)[0]).toMatchObject({
       date: '2026-05-09',
       weightLbs: 181,
       notes: 'first day',
     });
-    expect(result.data.injections).toHaveLength(1);
-    expect(result.data.injections[0]).toMatchObject({
+    expect(doseEntries(result.data)[0]).toMatchObject({
       date: '2026-05-10',
       amountMg: 5,
       medication: SEMA,
@@ -161,16 +146,14 @@ describe('parseTrackingFile — CSV', () => {
   });
 
   it('rejects an empty CSV', async () => {
-    await expect(parseTrackingFile(csvFile('blank.csv', '   '))).rejects.toThrow(
-      /No compatible/,
-    );
+    await expect(parseTrackingFile(csvFile('blank.csv', '   '))).rejects.toThrow(/No compatible/);
   });
 
   it('converts a weight column tagged with kg to stored lbs', async () => {
     const csv = 'Date,Weight (kg)\n2026-05-10,80\n';
     const result = await parseTrackingFile(csvFile('kg.csv', csv));
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.weights[0].weightLbs).toBeCloseTo(176.37, 1);
+    expect(result.data.entries).toHaveLength(1);
+    expect(result.data.entries[0].weightLbs).toBeCloseTo(176.37, 1);
   });
 });
 
@@ -186,137 +169,93 @@ describe('parseTrackingFile — unsupported / malformed', () => {
 
 describe('importTrackingFile — merge mode', () => {
   it('adds rows alongside existing data', async () => {
-    await addWeight({ date: iso('2026-05-01'), weightLbs: 200 });
-    await addInjection({
-      date: iso('2026-05-01'),
-      amountMg: 2,
-      medication: SEMA,
-      site: 'thigh',
-      symptoms: [],
-    });
+    await addEntry({ date: iso('2026-05-01'), weightLbs: 200 });
+    await addEntry({ date: iso('2026-05-01'), amountMg: 2, medication: SEMA, site: 'thigh' });
 
     const result = await importTrackingFile(jsonFile('b.json', backupPayload()), 'merge');
     expect(result.mode).toBe('merge');
     expect(result.source).toBe('EvolvTrack backup');
 
-    const weights = await getAllWeights();
-    const injections = await getAllInjections();
-    expect(weights).toHaveLength(2);
-    expect(injections).toHaveLength(2);
-    expect(weights.map((w) => w.date).sort()).toEqual(['2026-05-01', '2026-05-10']);
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(4);
+    expect([...new Set(entries.map((e) => e.date))].sort()).toEqual(['2026-05-01', '2026-05-10']);
   });
 
   it('skips rows that duplicate existing data and reports them in the warnings', async () => {
-    // Same day + same weight, and same day + same dose + same drug as the import.
-    await addWeight({ date: iso('2026-05-10'), weightLbs: 180 });
-    await addInjection({
-      date: iso('2026-05-10'),
-      amountMg: 5,
-      medication: SEMA,
-      site: 'belly',
-      symptoms: [],
-    });
+    await addEntry({ date: iso('2026-05-10'), weightLbs: 180 });
+    await addEntry({ date: iso('2026-05-10'), amountMg: 5, medication: SEMA, site: 'belly' });
 
     const result = await importTrackingFile(jsonFile('b.json', backupPayload()), 'merge');
 
-    const weights = await getAllWeights();
-    const injections = await getAllInjections();
-    expect(weights).toHaveLength(1); // the imported duplicate was dropped
-    expect(injections).toHaveLength(1);
-    expect(result.data.weights).toHaveLength(0); // reported counts reflect what was added
-    expect(result.data.injections).toHaveLength(0);
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(2); // the imported duplicates were dropped
+    expect(result.data.entries).toHaveLength(0); // reported counts reflect what was added
     expect(result.warnings.some((w) => /duplicate/i.test(w))).toBe(true);
   });
 });
 
 describe('dedupeAgainstExisting', () => {
-  const weight = (date: string, weightLbs?: number): WeightEntry =>
-    ({ id: `w-${date}-${weightLbs ?? 'x'}`, date: iso(date), weightLbs, createdAt: 'c', updatedAt: 'u' }) as WeightEntry;
-  const dose = (date: string, amountMg: number, medication: string): InjectionEntry =>
-    ({ id: `i-${date}-${amountMg}-${medication}`, date: iso(date), amountMg, medication, site: '', symptoms: [], createdAt: 'c', updatedAt: 'u' }) as InjectionEntry;
-  const data = (over: Partial<ImportData>): ImportData => ({ weights: [], injections: [], prescriptions: [], ...over });
+  const weighIn = (date: string, weightLbs?: number): HealthEntry =>
+    ({ id: `w-${date}-${weightLbs ?? 'x'}`, date: iso(date), weightLbs, symptoms: [], createdAt: 'c', updatedAt: 'u' });
+  const dose = (date: string, amountMg: number, medication: string): HealthEntry =>
+    ({ id: `i-${date}-${amountMg}-${medication}`, date: iso(date), amountMg, medication: medication as HealthEntry['medication'], site: '', symptoms: [], createdAt: 'c', updatedAt: 'u' });
+  const data = (over: Partial<ImportData>): ImportData => ({ entries: [], prescriptions: [], ...over });
 
-  it('drops a weight matching an existing day + value, keeps a different value', async () => {
+  it('drops an entry matching an existing day + value, keeps a different value', () => {
     const result = dedupeAgainstExisting(
-      data({ weights: [weight('2026-05-10', 180), weight('2026-05-10', 190)] }),
-      { weights: [weight('2026-05-10', 180)], injections: [] },
+      data({ entries: [weighIn('2026-05-10', 180), weighIn('2026-05-10', 190)] }),
+      { entries: [weighIn('2026-05-10', 180)] },
     );
-    expect(result.skippedWeights).toBe(1);
-    expect(result.data.weights.map((w) => w.weightLbs)).toEqual([190]);
+    expect(result.skipped).toBe(1);
+    expect(result.data.entries.map((e) => e.weightLbs)).toEqual([190]);
   });
 
-  it('drops an exact dose duplicate (day + amount + drug)', async () => {
+  it('drops an exact dose duplicate (day + amount + drug)', () => {
     const result = dedupeAgainstExisting(
-      data({ injections: [dose('2026-05-10', 5, SEMA)] }),
-      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
+      data({ entries: [dose('2026-05-10', 5, SEMA)] }),
+      { entries: [dose('2026-05-10', 5, SEMA)] },
     );
-    expect(result.skippedInjections).toBe(1);
-    expect(result.data.injections).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+    expect(result.data.entries).toHaveLength(0);
   });
 
-  it('treats a blank-drug import as the same drug logged that day at the same dose', async () => {
-    const result = dedupeAgainstExisting(
-      data({ injections: [dose('2026-05-10', 5, '')] }),
-      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
-    );
-    expect(result.skippedInjections).toBe(1);
-    expect(result.data.injections).toHaveLength(0);
-  });
-
-  it('keeps two different known drugs at the same dose on the same day', async () => {
+  it('keeps a dose with a different medication on the same day at the same amount', () => {
     const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
     const result = dedupeAgainstExisting(
-      data({ injections: [dose('2026-05-10', 5, TIRZ)] }),
-      { weights: [], injections: [dose('2026-05-10', 5, SEMA)] },
+      data({ entries: [dose('2026-05-10', 5, TIRZ)] }),
+      { entries: [dose('2026-05-10', 5, SEMA)] },
     );
-    expect(result.skippedInjections).toBe(0);
-    expect(result.data.injections).toHaveLength(1);
+    expect(result.skipped).toBe(0);
+    expect(result.data.entries).toHaveLength(1);
   });
 
-  it('dedupes within the same import batch, not just against existing data', async () => {
+  it('dedupes identical entries within the same import batch', () => {
     const result = dedupeAgainstExisting(
-      data({
-        weights: [weight('2026-05-10', 180), weight('2026-05-10', 180)],
-        injections: [dose('2026-05-10', 5, SEMA), dose('2026-05-10', 5, '')],
-      }),
-      { weights: [], injections: [] },
+      data({ entries: [weighIn('2026-05-10', 180), weighIn('2026-05-10', 180)] }),
+      { entries: [] },
     );
-    expect(result.data.weights).toHaveLength(1);
-    expect(result.data.injections).toHaveLength(1); // 2nd dose (blank drug) collapses into the 1st
+    expect(result.data.entries).toHaveLength(1);
+    expect(result.skipped).toBe(1);
   });
 });
 
 describe('importTrackingFile — replace mode', () => {
   it('clears existing rows before applying the import', async () => {
-    await addWeight({ date: iso('2026-05-01'), weightLbs: 200 });
-    await addInjection({
-      date: iso('2026-05-01'),
-      amountMg: 2,
-      medication: SEMA,
-      site: 'thigh',
-      symptoms: [],
-    });
+    await addEntry({ date: iso('2026-05-01'), weightLbs: 200 });
+    await addEntry({ date: iso('2026-05-01'), amountMg: 2, medication: SEMA, site: 'thigh' });
 
     const result = await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');
     expect(result.mode).toBe('replace');
 
-    const weights = await getAllWeights();
-    const injections = await getAllInjections();
-    expect(weights).toHaveLength(1);
-    expect(weights[0].date).toBe('2026-05-10');
-    expect(injections).toHaveLength(1);
-    expect(injections[0].date).toBe('2026-05-10');
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.date === '2026-05-10')).toBe(true);
   });
 
   it('writes parsed prescriptions into the DB', async () => {
     const payload = backupPayload({
       prescriptions: [
-        {
-          id: 'rx-1',
-          type: SEMA,
-          createdAt: '2026-05-01T00:00:00.000Z',
-          updatedAt: '2026-05-01T00:00:00.000Z',
-        },
+        { id: 'rx-1', type: SEMA, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
       ],
     });
     await importTrackingFile(jsonFile('b.json', payload), 'replace');
@@ -326,14 +265,11 @@ describe('importTrackingFile — replace mode', () => {
   });
 
   it('leaves the profile untouched when the import has no profile and is not an EvolvTrack source', async () => {
-    // Seed a profile so we can confirm replace mode preserves it for external imports.
     const csv = 'Date,Weight (lbs)\n2026-05-10,180\n';
-    // Start with a profile in the DB via a backup import...
     const seedPayload = {
       ...backupPayload(),
       data: {
-        weights: [],
-        injections: [],
+        entries: [],
         prescriptions: [],
         profile: {
           id: 'profile',
@@ -347,35 +283,19 @@ describe('importTrackingFile — replace mode', () => {
     await importTrackingFile(jsonFile('seed.json', seedPayload), 'replace');
     expect(await getProfile()).toBeTruthy();
 
-    // ...then replace from a CSV which carries no profile data and is not an
-    // EvolvTrack-branded source. The profile should remain.
     await importTrackingFile(csvFile('plain.csv', csv), 'replace');
     expect(await getProfile()).toBeTruthy();
   });
 });
 
 describe('importTrackingFile — outbox enqueue', () => {
-  it('merge mode enqueues an upsert for every imported weight, injection, prescription, and the profile', async () => {
+  it('merge mode enqueues an upsert for every imported entry, prescription, and the profile', async () => {
     const payload = {
-      ...backupPayload({
-        prescriptions: [
-          {
-            id: 'rx-1',
-            type: SEMA,
-            createdAt: '2026-05-01T00:00:00.000Z',
-            updatedAt: '2026-05-01T00:00:00.000Z',
-          },
-        ],
-      }),
+      ...backupPayload(),
       data: {
         ...backupPayload().data,
         prescriptions: [
-          {
-            id: 'rx-1',
-            type: SEMA,
-            createdAt: '2026-05-01T00:00:00.000Z',
-            updatedAt: '2026-05-01T00:00:00.000Z',
-          },
+          { id: 'rx-1', type: SEMA, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
         ],
         profile: {
           id: 'profile',
@@ -388,36 +308,24 @@ describe('importTrackingFile — outbox enqueue', () => {
     };
     await importTrackingFile(jsonFile('b.json', payload), 'merge');
 
-    // Without these enqueue calls, imported rows live only locally and never
-    // reach the cloud — every other device on the account would be blind to
-    // the import. That's the bug this test pins down.
-    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
-    expect(await db.outbox.get('injection:i-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('entry:w-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('entry:i-1')).toMatchObject({ op: 'upsert' });
     expect(await db.outbox.get('prescription:rx-1')).toMatchObject({ op: 'upsert' });
     const profileEntry = await db.outbox.get('profile:profile');
     expect(profileEntry).toMatchObject({ op: 'upsert' });
-    // Profile payload must have device-local fields stripped on the wire.
     expect((profileEntry!.payload as { passphraseEnabled: boolean }).passphraseEnabled).toBe(false);
   });
 
   it('replace mode enqueues delete tombstones for pre-existing rows that are not in the import', async () => {
-    // Pre-existing local rows that the import will wipe.
-    const oldWeight = await addWeight({ date: iso('2026-04-01'), weightLbs: 220 });
-    const oldInjection = await addInjection({
-      date: iso('2026-04-01'),
-      amountMg: 1,
-      medication: SEMA,
-      site: 'thigh',
-      symptoms: [],
-    });
+    const oldWeight = await addEntry({ date: iso('2026-04-01'), weightLbs: 220 });
+    const oldDose = await addEntry({ date: iso('2026-04-01'), amountMg: 1, medication: SEMA, site: 'thigh' });
 
     await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');
 
-    expect(await db.outbox.get(`weight:${oldWeight.id}`)).toMatchObject({ op: 'delete', payload: null });
-    expect(await db.outbox.get(`injection:${oldInjection.id}`)).toMatchObject({ op: 'delete', payload: null });
-    // The imported rows still come through as upserts.
-    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
-    expect(await db.outbox.get('injection:i-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get(`entry:${oldWeight.id}`)).toMatchObject({ op: 'delete', payload: null });
+    expect(await db.outbox.get(`entry:${oldDose.id}`)).toMatchObject({ op: 'delete', payload: null });
+    expect(await db.outbox.get('entry:w-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('entry:i-1')).toMatchObject({ op: 'upsert' });
   });
 
   it('registers symptoms not in the default palette so imported rows show in the dropdown and persist to the profile', async () => {
@@ -427,7 +335,7 @@ describe('importTrackingFile — outbox enqueue', () => {
     const { get } = await import('svelte/store');
 
     const payload = backupPayload({
-      weights: [
+      entries: [
         {
           id: 'w-sym',
           date: '2026-05-10',
@@ -446,24 +354,18 @@ describe('importTrackingFile — outbox enqueue', () => {
     expect(opts).toContain('Brain fog');
     expect(colors['Fatigue']).toMatch(/^#[0-9a-f]{6}$/);
     expect(colors['Brain fog']).toMatch(/^#[0-9a-f]{6}$/);
-    // Known symptoms keep their original color.
     expect(colors['Nausea']).toBe(DEFAULT_SYMPTOM_COLORS['Nausea']);
 
-    // Survives a reload — persisted to the profile, not just the in-memory store.
     const profile = await getProfile();
     expect(profile?.symptomOptions).toEqual(expect.arrayContaining(['Fatigue', 'Brain fog']));
   });
 
   it('an import with both a profile block and new symptoms produces exactly one profile outbox entry', async () => {
-    // Atomicity guarantee: the imported profile and any newly-registered
-    // symptoms collapse into a single profile:profile outbox row, so the
-    // server never briefly sees a profile whose symptomOptions lag behind
-    // the rows that reference them.
     const payload = {
       ...backupPayload(),
       data: {
         ...backupPayload().data,
-        weights: [
+        entries: [
           {
             id: 'w-sym',
             date: '2026-05-10',
@@ -484,37 +386,27 @@ describe('importTrackingFile — outbox enqueue', () => {
     };
     await importTrackingFile(jsonFile('b.json', payload), 'merge');
 
-    const profileOutboxRows = await db.outbox
-      .where('aggregate')
-      .equals('profile')
-      .toArray();
+    const profileOutboxRows = await db.outbox.where('aggregate').equals('profile').toArray();
     expect(profileOutboxRows).toHaveLength(1);
 
-    // The single entry carries the imported profile fields AND the new symptom.
-    const wirePayload = profileOutboxRows[0].payload as {
-      weightUnit?: string;
-      symptomOptions?: string[];
-    };
+    const wirePayload = profileOutboxRows[0].payload as { weightUnit?: string; symptomOptions?: string[] };
     expect(wirePayload.weightUnit).toBe('lbs');
     expect(wirePayload.symptomOptions).toContain('Brain fog');
   });
 
   it('replace mode does not tombstone an id the import is re-inserting (the upsert wins)', async () => {
-    // Pre-seed a row with the same id the import carries. After replace, the
-    // outbox should hold an upsert, not a delete — outbox keys are
-    // `${aggregate}:${entityId}`, so a stale tombstone would just clobber the
-    // upsert on the cloud.
-    await db.weights.put({
+    await db.entries.put({
       id: 'w-1',
       date: iso('2026-04-01'),
       weightLbs: 999,
+      symptoms: [],
       createdAt: '2026-04-01T00:00:00.000Z',
       updatedAt: '2026-04-01T00:00:00.000Z',
     });
 
     await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');
 
-    expect(await db.outbox.get('weight:w-1')).toMatchObject({ op: 'upsert' });
+    expect(await db.outbox.get('entry:w-1')).toMatchObject({ op: 'upsert' });
   });
 });
 
@@ -525,8 +417,11 @@ describe('importResultSummary', () => {
       source: 'EvolvTrack backup',
       sourceDetail: 'app 0.0.3, backup v1',
       data: {
-        weights: [{} as never],
-        injections: [{} as never, {} as never],
+        entries: [
+          { weightLbs: 1 } as never,
+          { amountMg: 1 } as never,
+          { amountMg: 1 } as never,
+        ],
         prescriptions: [],
       },
     });
@@ -543,8 +438,7 @@ describe('importResultSummary', () => {
       mode: 'replace',
       source: 'EvolvTrack spreadsheet',
       data: {
-        weights: [],
-        injections: [],
+        entries: [],
         prescriptions: [{} as never],
         profile: { id: 'profile' } as never,
       },
@@ -558,9 +452,8 @@ describe('importResultSummary', () => {
 describe('emptyImportData', () => {
   it('returns an independent, empty ImportData shape', () => {
     const data = emptyImportData();
-    expect(data).toEqual({ weights: [], injections: [], prescriptions: [] });
-    data.weights.push({} as never);
-    // A second call returns a fresh object that isn't polluted by the mutation.
-    expect(emptyImportData().weights).toEqual([]);
+    expect(data).toEqual({ entries: [], prescriptions: [] });
+    data.entries.push({} as never);
+    expect(emptyImportData().entries).toEqual([]);
   });
 });

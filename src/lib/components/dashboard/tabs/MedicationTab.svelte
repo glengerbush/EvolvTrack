@@ -1,11 +1,10 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import EditIcon from '$lib/components/icons/EditIcon.svelte';
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
   import { columnDecimals, fmtNum } from '$lib/utils/format';
   import type { MedicationInputRow } from '$lib/stores/medicationStore';
-  import { rawPrescriptions, rawInjections, isConsumingDose, vialLevels } from '$lib/stores/medicationStore';
+  import { rawPrescriptions, rawEntries, isConsumingDose, vialLevels } from '$lib/stores/medicationStore';
   import { computeVialLevels, manualMgUsedForDesiredLeft, type VialLevel } from '$lib/utils/vialLevels';
   import { vialUnit } from '$lib/stores/vialUnitStore';
   import { dismissedReminders } from '$lib/stores/dismissedRemindersStore';
@@ -13,6 +12,14 @@
   import { currentWeight, startWeight } from '$lib/stores/progressStore';
   import { addPrescription, updatePrescription, deletePrescription, getProfile, saveProfile } from '$lib/domain/repo';
   import DateInput from '$lib/components/dashboard/tables/DateInput.svelte';
+  import CustomPicker from '$lib/components/dashboard/tables/CustomPicker.svelte';
+  import ConfirmDialog from '$lib/components/dashboard/tables/ConfirmDialog.svelte';
+  import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
+  import SaveIcon from '$lib/components/icons/SaveIcon.svelte';
+  import TrashIcon from '$lib/components/icons/TrashIcon.svelte';
+  import ArchiveIcon from '$lib/components/icons/ArchiveIcon.svelte';
+  import { GridSelection } from '$lib/grid/gridSelection.svelte';
+  import { isMobile } from '$lib/stores/viewport';
   import { addDays, daysBetween, formatLocaleDate, formatShortDate, localDateKey } from '$lib/utils/dateKeys';
   import {
     MEDICATIONS,
@@ -49,7 +56,7 @@
   let dosageCols = $state<TableColumn<DosageColKey>[]>([...DEFAULT_DOSAGE_COLS]);
   let savedDosageCols = $state<TableColumn<DosageColKey>[]>([...DEFAULT_DOSAGE_COLS]);
 
-  const peptideOptions: readonly Medication[] = MEDICATIONS;
+  const typeOptions: string[] = ['', ...MEDICATIONS];
 
   let {
     active = true,
@@ -61,7 +68,10 @@
     onUnsavedChange?: (hasUnsavedChanges: boolean) => void;
   } = $props();
 
-  let editable = $state(false);
+  // The tables are always editable now (auto-save, like the inputs table). This
+  // flag stays `true`; structural ops (row/column drag, delete, archive) live
+  // behind the settings gear instead.
+  const editable = true;
   let settingsOpen = $state(false);
   let activeMedTab = $state<'dosage' | 'vial'>('dosage');
   let showArchivedVials = $state(false);
@@ -105,6 +115,7 @@
     medicationInputRows = medicationInputRows.map((r) =>
       r.id === id ? { ...r, [field]: value } : r
     );
+    scheduleMedSave();
   }
 
   let dosageDragIndex = $state<number | null>(null);
@@ -158,13 +169,128 @@
   const archivedRowIds = $derived(
     new Set(sourceMedicationInputRows.filter((r) => r.archived).map((r) => r.id)),
   );
+  // Newest vials on top, vial #1 at the bottom — matching the inputs table and
+  // efficacy card (earlier items at the bottom). Render-only: the underlying
+  // arrays stay in canonical #1→N order, and rows are looked up by id for
+  // drag/save/attribution, so only the visual order flips.
   const displayedMedicationInputRows = $derived(
-    showArchivedVials ? sourceMedicationInputRows : sourceMedicationInputRows.filter((r) => !r.archived),
+    (showArchivedVials ? sourceMedicationInputRows : sourceMedicationInputRows.filter((r) => !r.archived))
+      .slice()
+      .reverse(),
   );
   const displayedVialTrackingRows = $derived(
-    showArchivedVials ? sourceVialTrackingRows : sourceVialTrackingRows.filter((r) => !archivedRowIds.has(r.vialId)),
+    (showArchivedVials
+      ? sourceVialTrackingRows
+      : sourceVialTrackingRows.filter((r) => !archivedRowIds.has(r.vialId)))
+      .slice()
+      .reverse(),
   );
   const archivedVialCount = $derived(archivedRowIds.size);
+
+  // ── Mobile per-card edit ───────────────────────────────────────────────────
+  // At ≤640px both med tables re-flow to one card per vial and the desktop
+  // keyboard grid is disabled. Each card carries its own Edit button: it opens
+  // that vial (all fields shown) with Save / Cancel / Delete / Archive. Edits are
+  // buffered — Cancel reverts from a snapshot of BOTH the dosage row and the vial
+  // row (they share id), and autosave is suppressed while a card is open, so only
+  // Save persists. (cloneMedicationRow/cloneVialRow are hoisted declarations.)
+  let mobileEditId = $state<number | null>(null);
+  let mobileMedSnapshot: MedicationInputRow | null = null;
+  let mobileVialSnapshot: VialTrackingRow | null = null;
+  let vialDeleteRequest = $state<number | null>(null);
+  const mobileEditingActive = $derived($isMobile && mobileEditId !== null);
+  function isRowMobileEditing(id: number): boolean {
+    return $isMobile && mobileEditId === id;
+  }
+  function vialArchivable(id: number): boolean {
+    const m = getMedRowById(id);
+    return !!m && (m.archived || isVialEmpty(m));
+  }
+  function startMobileEdit(id: number) {
+    mobileEditId = id;
+    const med = medicationInputRows.find((r) => r.id === id);
+    const vial = vialTrackingRows.find((r) => r.vialId === id);
+    mobileMedSnapshot = med ? cloneMedicationRow(med) : null;
+    mobileVialSnapshot = vial ? cloneVialRow(vial) : null;
+  }
+  function saveMobileEdit() {
+    // Clear edit state first so the autosave guard no longer suppresses the save.
+    mobileEditId = null;
+    mobileMedSnapshot = null;
+    mobileVialSnapshot = null;
+    scheduleMedSave();
+  }
+  function cancelMobileEdit() {
+    const id = mobileEditId;
+    if (id != null) {
+      if (mobileMedSnapshot) {
+        const snap = mobileMedSnapshot;
+        medicationInputRows = medicationInputRows.map((r) => (r.id === id ? snap : r));
+      }
+      if (mobileVialSnapshot) {
+        const snap = mobileVialSnapshot;
+        vialTrackingRows = vialTrackingRows.map((r) => (r.vialId === id ? snap : r));
+      }
+    }
+    mobileEditId = null;
+    mobileMedSnapshot = null;
+    mobileVialSnapshot = null;
+  }
+  function confirmVialDelete() {
+    const id = vialDeleteRequest;
+    vialDeleteRequest = null;
+    // Clear edit state so the delete's scheduleMedSave isn't suppressed.
+    mobileEditId = null;
+    mobileMedSnapshot = null;
+    mobileVialSnapshot = null;
+    if (id != null) deleteMedicationRow(id);
+  }
+
+  // ── Auto-save ──────────────────────────────────────────────────────────────
+  // Reuse the existing save-all (`commitVialOrder`, debounced) so every edit /
+  // structural change persists without an explicit save button. The persistence
+  // logic is unchanged — only *when* it runs.
+  let medSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleMedSave() {
+    // While a mobile card is open, edits are buffered — only its Save button
+    // persists (it clears mobileEditId first, so this guard then passes).
+    if (mobileEditingActive) return;
+    if (medSaveTimer) clearTimeout(medSaveTimer);
+    medSaveTimer = setTimeout(() => {
+      // Defer while a cell is actively being edited — `commitVialOrder` rebuilds
+      // the row objects, which would otherwise disrupt an in-progress edit in
+      // another cell. Retry shortly; the editor's commit/blur fires another
+      // schedule once editing ends.
+      if (dosageGrid.editing || vialGrid.editing) {
+        scheduleMedSave();
+        return;
+      }
+      medSaveTimer = undefined;
+      void commitVialOrder();
+    }, 400);
+  }
+
+  // ── Spreadsheet selection for the two tables (shared engine) ────────────────
+  // Each cell is two-state (display → editor on click/Enter); arrows navigate,
+  // Tab leaves the grid, commit auto-saves. One controller per table.
+  const dosageGrid = new GridSelection({
+    rowCount: () => displayedMedicationInputRows.length,
+    colCount: () => activeDosageCols.length,
+    isEditable: () => true,
+    cellRef: (r, c) =>
+      medTableCardRegion?.querySelector<HTMLElement>(`[data-dose-cell="${r}-${c}"]`) ?? null,
+    commit: () => scheduleMedSave(),
+    stickyTopSelector: '.tabbar',
+  });
+  const vialGrid = new GridSelection({
+    rowCount: () => displayedVialTrackingRows.length,
+    colCount: () => activeVialCols.length,
+    isEditable: () => true,
+    cellRef: (r, c) =>
+      medTableCardRegion?.querySelector<HTMLElement>(`[data-vial-cell="${r}-${c}"]`) ?? null,
+    commit: () => scheduleMedSave(),
+    stickyTopSelector: '.tabbar',
+  });
 
   // ── Computed vial levels (doses / mg left) ────────────────────────────────
   // The remaining column is derived, not stored: capacity (concentration × mL)
@@ -172,11 +298,15 @@
   // vials, with a per-vial manual correction. Computed from the *current* rows
   // (so editing concentration/mL/dose updates it live) plus the logged doses.
   const doseEvents = $derived(
-    $rawInjections.filter(isConsumingDose).map((i) => ({
-      medication: i.medication || '',
-      amountMg: i.amountMg,
-      date: i.date,
-      createdAt: i.createdAt,
+    $rawEntries.filter(isConsumingDose).map((e) => ({
+      id: e.id,
+      medication: e.medication || '',
+      amountMg: e.amountMg as number,
+      date: e.date,
+      createdAt: e.createdAt,
+      // Vial levels are driven purely by each dose's stored attribution now
+      // (see computeVialLevels); the vial specs below are keyed by `dbId` to match.
+      prescriptionId: e.prescriptionId,
     })),
   );
   const compoundDateByVialId = $derived(
@@ -185,7 +315,9 @@
   const computedVialLevels = $derived(
     computeVialLevels(
       sourceMedicationInputRows.map((row, index) => ({
-        id: String(row.id),
+        // Key by the prescription id so each dose's stored `prescriptionId`
+        // attribution matches; unsaved rows fall back to a synthetic id.
+        id: row.dbId || `unsaved:${row.id}`,
         medication: row.type || '',
         concentrationMgMl: row.concentrationMg,
         vialMl: row.mlInVial,
@@ -199,7 +331,7 @@
     ),
   );
   function levelOf(row: MedicationInputRow): VialLevel | undefined {
-    return computedVialLevels.get(String(row.id));
+    return computedVialLevels.get(row.dbId || `unsaved:${row.id}`);
   }
   /** Remaining in the active unit, or null when specs are incomplete. */
   function remainingValue(row: MedicationInputRow): number | null {
@@ -227,6 +359,7 @@
       medicationInputRows = medicationInputRows.map((r) =>
         r.id === row.id ? { ...r, manualMgUsed: undefined } : r,
       );
+      scheduleMedSave();
       return;
     }
     const lvl = levelOf(row);
@@ -245,6 +378,7 @@
     medicationInputRows = medicationInputRows.map((r) =>
       r.id === row.id ? { ...r, manualMgUsed: manual } : r,
     );
+    scheduleMedSave();
   }
   /**
    * Editing a vial's concentration / mL / dose changes what the vial *is*, so a
@@ -259,6 +393,29 @@
         r.id === row.id ? { ...r, manualMgUsed: undefined } : r,
       );
     }
+  }
+
+  // Patch one field of a medication/vial row and schedule an auto-save. Used by
+  // the two-state cell editors.
+  function setMedField<K extends keyof MedicationInputRow>(
+    id: number,
+    field: K,
+    value: MedicationInputRow[K],
+  ) {
+    medicationInputRows = medicationInputRows.map((r) =>
+      r.id === id ? { ...r, [field]: value } : r,
+    );
+    scheduleMedSave();
+  }
+  function setVialField<K extends keyof VialTrackingRow>(
+    vialId: number,
+    field: K,
+    value: VialTrackingRow[K],
+  ) {
+    vialTrackingRows = vialTrackingRows.map((r) =>
+      r.vialId === vialId ? { ...r, [field]: value } : r,
+    );
+    scheduleMedSave();
   }
 
   /** Computed doses-left for a saved prescription (store map), with a fallback. */
@@ -362,10 +519,6 @@
     copySet(draftBaseHiddenVialCols, hiddenVialCols);
   }
 
-  function arraysMatch<T>(left: T[], right: T[]): boolean {
-    return left.length === right.length && left.every((value, index) => value === right[index]);
-  }
-
   function rowsMatch(left: unknown[], right: unknown[]): boolean {
     return JSON.stringify(left) === JSON.stringify(right);
   }
@@ -398,13 +551,6 @@
     });
   }
 
-  const hasUnsavedDosageChanges = $derived.by(() =>
-    !rowsMatch(dosageComparableRows(medicationInputRows), dosageComparableRows(draftBaseMedicationInputRows)),
-  );
-  const hasUnsavedVialTrackingChanges = $derived.by(() =>
-    !rowsMatch(vialComparableRows(vialTrackingRows, medicationInputRows), vialComparableRows(draftBaseVialTrackingRows, draftBaseMedicationInputRows)),
-  );
-  const hasUnsavedChanges = $derived(hasUnsavedDosageChanges || hasUnsavedVialTrackingChanges);
 
   $effect(() => {
     if (colSettingsLoaded) return;
@@ -505,14 +651,15 @@
 
   $effect(() => {
     if (active) return;
-    editable = false;
     settingsOpen = false;
   });
 
+  // Auto-save: tables persist continuously now, so never report unsaved changes
+  // to the parent (no navigation-away warning for the always-saved tables).
   $effect(() => {
-    if (hasUnsavedChanges === lastNotifiedUnsavedChanges) return;
-    lastNotifiedUnsavedChanges = hasUnsavedChanges;
-    onUnsavedChange?.(hasUnsavedChanges);
+    if (lastNotifiedUnsavedChanges) return;
+    lastNotifiedUnsavedChanges = true;
+    onUnsavedChange?.(false);
   });
 
   $effect(() => {
@@ -674,17 +821,20 @@
   function deleteMedicationRow(id: number) {
     medicationInputRows = medicationInputRows.filter((r) => r.id !== id);
     vialTrackingRows = vialTrackingRows.filter((r) => r.vialId !== id);
+    scheduleMedSave();
   }
 
   function addMedicationRow() {
-    editable = true;
-
     const newId = Math.max(...medicationInputRows.map((r) => r.id), 0) + 1;
     medicationInputRows = [
       ...medicationInputRows,
       { id: newId, dbId: '', type: '', cost: 0, pharmacy: '', concentrationMg: 0, additive: '', mlInVial: 0, prescribedDosage: 0, dosesLeft: 0, status: 'neutral', archived: false },
     ];
     syncTrackingRowsToInputOrder();
+    // On mobile open the fresh vial card in edit mode so all fields are ready to
+    // fill (this also buffers it — it persists when the user taps Save).
+    if ($isMobile) startMobileEdit(newId);
+    scheduleMedSave();
   }
 
   function reorderVisibleColumns<Key extends string>(
@@ -727,6 +877,7 @@
     rows.splice(from < to ? to - 1 : to, 0, moved);
     medicationInputRows = rows;
     syncTrackingRowsToInputOrder();
+    scheduleMedSave();
   }
 
   function reorderVialRows(from: number, to: number) {
@@ -740,6 +891,7 @@
         medicationInputRows.find((inputRow) => inputRow.id === trackingRow.vialId)
       )
       .filter((row): row is MedicationInputRow => Boolean(row));
+    scheduleMedSave();
   }
 
   async function commitVialOrder() {
@@ -806,21 +958,6 @@
     markRowsAsBaseline();
   }
 
-  async function persistEdits() {
-    await commitVialOrder();
-    editable = false;
-    settingsOpen = false;
-  }
-
-  function toggleEditable() {
-    if (editable) {
-      void persistEdits();
-      return;
-    }
-    editable = true;
-    settingsOpen = false;
-  }
-
   function toggleSettings() {
     settingsOpen = !settingsOpen;
     if (!settingsOpen) {
@@ -829,11 +966,11 @@
     }
   }
 
+  // Revert any in-flight (not-yet-autosaved) edits to the last saved baseline.
   function discardMedicationEdits() {
     medicationInputRows = savedMedicationInputRows.map(cloneMedicationRow);
     vialTrackingRows = savedVialTrackingRows.map(cloneVialRow);
     markRowsAsBaseline();
-    editable = false;
     settingsOpen = false;
   }
 
@@ -960,6 +1097,7 @@
     rows.splice(to, 0, moved);
     medicationInputRows = rows;
     syncTrackingRowsToInputOrder();
+    scheduleMedSave();
   }
 
   function kbReorderVialRows(from: number, to: number) {
@@ -970,6 +1108,7 @@
     medicationInputRows = [...rows]
       .map((vr) => medicationInputRows.find((ir) => ir.id === vr.vialId))
       .filter((r): r is MedicationInputRow => Boolean(r));
+    scheduleMedSave();
   }
 
   function dosageRowKeydown(e: KeyboardEvent, index: number) {
@@ -1116,29 +1255,27 @@
     }
   }
 
-  function isPlainEnter(event: KeyboardEvent) {
-    return (
-      event.key === 'Enter' &&
-      !event.isComposing &&
-      !event.altKey &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.shiftKey
-    );
-  }
-
-  function handleMedicationCommitKeydown(event: KeyboardEvent) {
-    if (!isPlainEnter(event)) return;
-    if (!(event.target instanceof Node)) return;
-
-    if (editable && medTableCardRegion?.contains(event.target)) {
-      event.preventDefault();
-      void persistEdits();
-    }
-  }
 </script>
 
-<svelte:document onkeydown={handleMedicationCommitKeydown} />
+<!-- Mobile-only per-card controls, rendered in the card's header ("Vial N") row
+     (display:none on desktop). Shared by the Dosage and Vial tabs since a vial
+     card on either tab edits the same vial: pencil (read) ↔ Save/Cancel/Archive/
+     Delete (edit). -->
+{#snippet cardActions(id: number)}
+  {@const archived = getMedRowById(id)?.archived ?? false}
+  <span class="card-header-actions">
+    {#if isRowMobileEditing(id)}
+      <button type="button" class="card-action-btn card-save" aria-label="Save" title="Save" onclick={saveMobileEdit}><SaveIcon size="1.1rem" /></button>
+      <button type="button" class="card-action-btn card-cancel" onclick={cancelMobileEdit}>Cancel</button>
+      {#if vialArchivable(id)}
+        <button type="button" class="card-action-btn card-archive" aria-label={archived ? 'Restore' : 'Archive'} title={archived ? 'Restore' : 'Archive'} onclick={() => setVialArchived(id, !archived)}><ArchiveIcon size="1.15rem" /></button>
+      {/if}
+      <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => (vialDeleteRequest = id)}><TrashIcon size="1.15rem" /></button>
+    {:else}
+      <EditPencil ariaLabel={`Edit vial ${id}`} onclick={() => startMobileEdit(id)} />
+    {/if}
+  </span>
+{/snippet}
 
 <main class="content">
   <section class="medication-layout">
@@ -1171,40 +1308,22 @@
           onclick={addMedicationRow}
         >+</button>
         <button
+          type="button"
           class="mini-icon"
-          class:active={editable}
-          aria-label="Toggle medication editing"
-          onclick={toggleEditable}
+          class:active={settingsOpen}
+          aria-label={settingsOpen ? 'Hide table settings' : 'Show table settings'}
+          title={settingsOpen ? 'Hide table settings' : 'Show table settings'}
+          aria-pressed={settingsOpen}
+          onclick={toggleSettings}
         >
-          <EditIcon size="var(--edit-icon-scale)" color="white" active={editable} />
+          <GearIcon size="var(--edit-icon-scale)" color="white" />
         </button>
-        {#if editable}
-          <button
-            type="button"
-            class="mini-icon"
-            class:active={settingsOpen}
-            aria-label={settingsOpen ? 'Hide table settings' : 'Show table settings'}
-            title={settingsOpen ? 'Hide table settings' : 'Show table settings'}
-            aria-pressed={settingsOpen}
-            onclick={toggleSettings}
-          >
-            <GearIcon size="var(--edit-icon-scale)" color="white" />
-          </button>
-        {/if}
-        {#if hasUnsavedChanges}
-          <button
-            type="button"
-            class="discard-btn"
-            aria-label="Cancel unsaved changes"
-            onclick={discardMedicationEdits}
-          >Cancel</button>
-        {/if}
       </div>
       <div class="tab-panel" role="tabpanel" aria-labelledby={activeMedTab === 'dosage' ? 'med-tab-dosage' : 'med-tab-vial'}>
       {#if activeMedTab === 'dosage'}
       {#if dosageSettingsActive}
         <section class="column-manager" aria-label="Dosage hidden columns">
-          <fieldset>
+          <fieldset class="hidden-columns-fieldset">
             <legend class="hidden-columns-legend">
               <span>Hidden columns</span>
               <button
@@ -1264,7 +1383,7 @@
                         aria-label="Reorder {col.label} column"
                         aria-pressed={dosageColKbIndex === colIndex}
                         ondragstart={(e) => e.preventDefault()}
-                        onkeydown={(e) => dosageColKeydown(e, colIndex)}
+                        onkeydown={$isMobile ? undefined : (e) => dosageColKeydown(e, colIndex)}
                       >⠿</button>
                       <span class="th-label">{col.label}</span>
                       <button
@@ -1294,9 +1413,10 @@
               <tr
                 class={vialStatusClass(row)}
                 class:row-archived={row.archived}
-                class:row-dragging={editable && (dosageDragIndex === index || dosageKbIndex === index)}
-                class:row-dragover={editable && dosageDragoverIndex === index && dosageDragIndex !== index}
-                draggable={editable}
+                class:row-dragging={settingsOpen && (dosageDragIndex === index || dosageKbIndex === index)}
+                class:row-dragover={settingsOpen && dosageDragoverIndex === index && dosageDragIndex !== index}
+                class:mobile-card-editing={isRowMobileEditing(row.id)}
+                draggable={settingsOpen}
                 ondragstart={() => (dosageDragIndex = index)}
                 ondragover={(e) => { e.preventDefault(); dosageDragoverIndex = index; }}
                 ondragleave={() => { if (dosageDragoverIndex === index) dosageDragoverIndex = null; }}
@@ -1305,7 +1425,7 @@
               >
                 <td>
                   <div class="reorder-cell">
-                    {#if editable}
+                    {#if settingsOpen}
                       <button
                         type="button"
                         class="drag-handle"
@@ -1318,7 +1438,7 @@
                       >⠿</button>
                     {/if}
                     <span>{row.id}</span>
-                    {#if editable}
+                    {#if settingsOpen}
                       {#if row.archived || isVialEmpty(row)}
                         <button
                           type="button"
@@ -1338,58 +1458,65 @@
                       >×</button>
                     {/if}
                   </div>
+                  {@render cardActions(row.id)}
                 </td>
                 {#each activeDosageCols as col, colIndex (col.key)}
+                  {@const dEditing = $isMobile ? isRowMobileEditing(row.id) : dosageGrid.isCellEditing(displayIndex, colIndex)}
+                  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
                   <td
                     data-label={col.label}
+                    data-dose-cell="{displayIndex}-{colIndex}"
+                    class="med-cell"
                     class:col-type={col.key === 'type'}
                     class:col-narrow={col.key === 'additive' || col.key === 'mlInVial' || col.key === 'dosesLeft'}
                     class:col-compact={col.key === 'additive' || col.key === 'mlInVial' || col.key === 'dosesLeft'}
+                    class:cell-editing={dEditing && !$isMobile}
                     class:col-indicator-left={dosageSettingsActive && dosageColIndicator?.col === colIndex && dosageColIndicator?.side === 'left'}
                     class:col-indicator-right={dosageSettingsActive && dosageColIndicator?.col === colIndex && dosageColIndicator?.side === 'right'}
+                    tabindex={$isMobile ? undefined : dosageGrid.tabIndexFor(displayIndex, colIndex, displayIndex === 0 && colIndex === 0)}
+                    onclick={$isMobile ? undefined : () => dosageGrid.selectCell(displayIndex, colIndex, true)}
+                    onkeydown={$isMobile ? undefined : (e) => dosageGrid.cellKeydown(e, displayIndex, colIndex)}
+                    onfocusin={$isMobile ? undefined : () => { if (dosageGrid.selRow === null) { dosageGrid.selRow = displayIndex; dosageGrid.selCol = colIndex; } }}
                   >
                     {#if col.key === 'type'}
-                      {#if editable}
-                        <select bind:value={row.type}>
-                          <option value="">— select —</option>
-                          {#each peptideOptions as opt (opt)}
-                            <option value={opt}>{opt}</option>
-                          {/each}
-                        </select>
+                      {#if !$isMobile || isRowMobileEditing(row.id)}
+                      <CustomPicker
+                        value={row.type}
+                        options={typeOptions}
+                        forceOpen={!$isMobile && dEditing}
+                        onRequestClose={() => dosageGrid.exitToCell(displayIndex, colIndex)}
+                        onSelect={(v) => { setMedField(row.id, 'type', v as Medication | ''); clearOverrideOnSpecEdit(row); }}
+                        ariaLabel={`Medication type for vial ${row.id}`}
+                      />
                       {:else}
-                        {row.type}
+                        {row.type || ''}
                       {/if}
                     {:else if col.key === 'concentration'}
-                      {#if editable}
-                        <input type="number" bind:value={row.concentrationMg} onchange={() => clearOverrideOnSpecEdit(row)} />
-                      {:else}
-                        {fmtNum(row.concentrationMg, concentrationDecimals)}
-                      {/if}
+                      {#if dEditing}
+                        <input class="med-input" type="number" bind:value={row.concentrationMg} onkeydown={$isMobile ? undefined : dosageGrid.editorKeydown} onblur={() => { clearOverrideOnSpecEdit(row); dosageGrid.stopEditing(); scheduleMedSave(); }} />
+                      {:else}{fmtNum(row.concentrationMg, concentrationDecimals)}{/if}
                     {:else if col.key === 'additive'}
-                      {#if editable}
-                        <input type="text" bind:value={row.additive} />
-                      {:else}
-                        {row.additive}
-                      {/if}
+                      {#if dEditing}
+                        <input class="med-input" type="text" bind:value={row.additive} onkeydown={$isMobile ? undefined : dosageGrid.editorKeydown} onblur={() => { dosageGrid.stopEditing(); scheduleMedSave(); }} />
+                      {:else}{row.additive}{/if}
                     {:else if col.key === 'mlInVial'}
-                      {#if editable}
-                        <input type="number" bind:value={row.mlInVial} step="0.1" onchange={() => clearOverrideOnSpecEdit(row)} />
-                      {:else}
-                        {row.mlInVial}
-                      {/if}
+                      {#if dEditing}
+                        <input class="med-input" type="number" step="0.1" bind:value={row.mlInVial} onkeydown={$isMobile ? undefined : dosageGrid.editorKeydown} onblur={() => { clearOverrideOnSpecEdit(row); dosageGrid.stopEditing(); scheduleMedSave(); }} />
+                      {:else}{row.mlInVial}{/if}
                     {:else if col.key === 'prescribedDosage'}
-                      {#if editable}
-                        <input type="number" bind:value={row.prescribedDosage} step="0.1" onchange={() => clearOverrideOnSpecEdit(row)} />
-                      {:else}
-                        {fmtNum(row.prescribedDosage, prescribedDosageDecimals)}
-                      {/if}
+                      {#if dEditing}
+                        <input class="med-input" type="number" step="0.1" bind:value={row.prescribedDosage} onkeydown={$isMobile ? undefined : dosageGrid.editorKeydown} onblur={() => { clearOverrideOnSpecEdit(row); dosageGrid.stopEditing(); scheduleMedSave(); }} />
+                      {:else}{fmtNum(row.prescribedDosage, prescribedDosageDecimals)}{/if}
                     {:else if col.key === 'dosesLeft'}
-                      {#if editable}
+                      {#if dEditing}
                         <input
+                          class="med-input"
                           type="number"
                           step="0.1"
                           value={remainingValue(row) ?? ''}
+                          onkeydown={$isMobile ? undefined : dosageGrid.editorKeydown}
                           onchange={(e) => setRemainingOverride(row, e.currentTarget.value)}
+                          onblur={() => dosageGrid.stopEditing()}
                         />
                         {#if isVialOver(row)}<span class="vial-over" title="Used past the labeled fill (overfill)">over</span>{/if}
                       {:else}
@@ -1400,7 +1527,7 @@
                 {/each}
               </tr>
             {/each}
-            {#if editable}
+            {#if settingsOpen}
               <tr
                 class="drop-sentinel"
                 class:drop-sentinel-active={dosageDragoverIndex === medicationInputRows.length && dosageDragIndex !== null}
@@ -1417,7 +1544,7 @@
       {:else}
       {#if vialSettingsActive}
         <section class="column-manager" aria-label="Vial info hidden columns">
-          <fieldset>
+          <fieldset class="hidden-columns-fieldset">
             <legend class="hidden-columns-legend">
               <span>Hidden columns</span>
               <button
@@ -1479,7 +1606,7 @@
                         aria-label="Reorder {col.label} column"
                         aria-pressed={vialColKbIndex === colIndex}
                         ondragstart={(e) => e.preventDefault()}
-                        onkeydown={(e) => vialColKeydown(e, colIndex)}
+                        onkeydown={$isMobile ? undefined : (e) => vialColKeydown(e, colIndex)}
                       >⠿</button>
                       <span class="th-label">{col.label}</span>
                       <button
@@ -1502,9 +1629,10 @@
               {@const medRow = getMedRowById(row.vialId)}
               <tr
                 class:row-archived={medRow?.archived}
-                class:row-dragging={editable && (vialDragIndex === index || vialKbIndex === index)}
-                class:row-dragover={editable && vialDragoverIndex === index && vialDragIndex !== index}
-                draggable={editable}
+                class:row-dragging={settingsOpen && (vialDragIndex === index || vialKbIndex === index)}
+                class:row-dragover={settingsOpen && vialDragoverIndex === index && vialDragIndex !== index}
+                class:mobile-card-editing={isRowMobileEditing(row.vialId)}
+                draggable={settingsOpen}
                 ondragstart={() => (vialDragIndex = index)}
                 ondragover={(e) => { e.preventDefault(); vialDragoverIndex = index; }}
                 ondragleave={() => { if (vialDragoverIndex === index) vialDragoverIndex = null; }}
@@ -1513,7 +1641,7 @@
               >
                 <td>
                   <div class="reorder-cell">
-                    {#if editable}
+                    {#if settingsOpen}
                       <button
                         type="button"
                         class="drag-handle"
@@ -1526,7 +1654,7 @@
                       >⠿</button>
                     {/if}
                     <span>{row.vialId}</span>
-                    {#if editable}
+                    {#if settingsOpen}
                       {#if medRow?.archived || (medRow?.dosesLeft ?? 0) <= 0}
                         <button
                           type="button"
@@ -1546,64 +1674,54 @@
                       >×</button>
                     {/if}
                   </div>
+                  {@render cardActions(row.vialId)}
                 </td>
                 {#each activeVialCols as col, colIndex (col.key)}
+                  {@const vEditing = $isMobile ? isRowMobileEditing(row.vialId) : vialGrid.isCellEditing(displayIndex, colIndex)}
+                  {@const vMed = getMedRowById(row.vialId)}
+                  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
                   <td
                     data-label={col.label}
+                    data-vial-cell="{displayIndex}-{colIndex}"
+                    class="med-cell"
                     class:col-pharmacy={col.key === 'pharmacy'}
                     class:col-narrow={col.key === 'compoundDate' || col.key === 'lotNumber' || col.key === 'costPerMg'}
+                    class:cell-editing={vEditing && col.key !== 'costPerMg' && !$isMobile}
                     class:col-indicator-left={vialSettingsActive && vialColIndicator?.col === colIndex && vialColIndicator?.side === 'left'}
                     class:col-indicator-right={vialSettingsActive && vialColIndicator?.col === colIndex && vialColIndicator?.side === 'right'}
+                    tabindex={$isMobile ? undefined : vialGrid.tabIndexFor(displayIndex, colIndex, displayIndex === 0 && colIndex === 0)}
+                    onclick={$isMobile ? undefined : () => vialGrid.selectCell(displayIndex, colIndex, true)}
+                    onkeydown={$isMobile ? undefined : (e) => vialGrid.cellKeydown(e, displayIndex, colIndex)}
+                    onfocusin={$isMobile ? undefined : () => { if (vialGrid.selRow === null) { vialGrid.selRow = displayIndex; vialGrid.selCol = colIndex; } }}
                   >
                     {#if col.key === 'compoundDate'}
-                      {#if editable}
-                        <DateInput bind:value={row.compoundDate} />
-                      {:else}
-                        {formatLocaleDate(row.compoundDate)}
-                      {/if}
+                      {#if vEditing}
+                        <DateInput value={row.compoundDate} onchange={(v) => setVialField(row.vialId, 'compoundDate', v as IsoDate | '')} onkeydown={$isMobile ? undefined : vialGrid.editorKeydown} onblur={() => vialGrid.stopEditing()} />
+                      {:else}{formatLocaleDate(row.compoundDate)}{/if}
                     {:else if col.key === 'bud'}
-                      {#if editable}
-                        <DateInput bind:value={row.bud} />
-                      {:else}
-                        {formatLocaleDate(row.bud)}
-                      {/if}
+                      {#if vEditing}
+                        <DateInput value={row.bud} onchange={(v) => setVialField(row.vialId, 'bud', v as IsoDate | '')} onkeydown={$isMobile ? undefined : vialGrid.editorKeydown} onblur={() => vialGrid.stopEditing()} />
+                      {:else}{formatLocaleDate(row.bud)}{/if}
                     {:else if col.key === 'lotNumber'}
-                      {#if editable}
-                        <input type="text" bind:value={row.lotNumber} />
-                      {:else}
-                        {row.lotNumber}
-                      {/if}
+                      {#if vEditing}
+                        <input class="med-input" type="text" bind:value={row.lotNumber} onkeydown={$isMobile ? undefined : vialGrid.editorKeydown} onblur={() => { vialGrid.stopEditing(); scheduleMedSave(); }} />
+                      {:else}{row.lotNumber}{/if}
                     {:else if col.key === 'pharmacy'}
-                      {#if editable && getMedRowById(row.vialId)}
-                        <input
-                          type="text"
-                          value={getMedRowById(row.vialId)?.pharmacy ?? ''}
-                          oninput={(e) => updateMedRowField(row.vialId, 'pharmacy', e.currentTarget.value)}
-                        />
-                      {:else}
-                        {getMedRowById(row.vialId)?.pharmacy ?? ''}
-                      {/if}
+                      {#if vEditing && vMed}
+                        <input class="med-input" type="text" value={vMed.pharmacy ?? ''} oninput={(e) => updateMedRowField(row.vialId, 'pharmacy', e.currentTarget.value)} onkeydown={$isMobile ? undefined : vialGrid.editorKeydown} onblur={() => vialGrid.stopEditing()} />
+                      {:else}{vMed?.pharmacy ?? ''}{/if}
                     {:else if col.key === 'cost'}
-                      {#if editable && getMedRowById(row.vialId)}
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={getMedRowById(row.vialId)?.cost ?? 0}
-                          oninput={(e) => updateMedRowField(row.vialId, 'cost', parseFloat(e.currentTarget.value) || 0)}
-                        />
-                      {:else}
-                        {formatCurrency(getMedRowById(row.vialId)?.cost)}
-                      {/if}
+                      {#if vEditing && vMed}
+                        <input class="med-input" type="number" step="0.01" value={vMed.cost ?? 0} oninput={(e) => updateMedRowField(row.vialId, 'cost', parseFloat(e.currentTarget.value) || 0)} onkeydown={$isMobile ? undefined : vialGrid.editorKeydown} onblur={() => vialGrid.stopEditing()} />
+                      {:else}{formatCurrency(vMed?.cost)}{/if}
                     {:else if col.key === 'costPerMg'}
-                      {#if getMedRowById(row.vialId)}
-                        {formatCurrency(calculatedCostPerMg(getMedRowById(row.vialId)!))}
-                      {/if}
+                      {#if vMed}{formatCurrency(calculatedCostPerMg(vMed))}{/if}
                     {/if}
                   </td>
                 {/each}
               </tr>
             {/each}
-            {#if editable}
+            {#if settingsOpen}
               <tr
                 class="drop-sentinel"
                 class:drop-sentinel-active={vialDragoverIndex === vialTrackingRows.length && vialDragIndex !== null}
@@ -1712,6 +1830,17 @@
     </section>
   </section>
 </main>
+
+{#if vialDeleteRequest !== null}
+  <ConfirmDialog
+    title="Delete this vial?"
+    message="This permanently removes this vial and its tracking info. This cannot be undone. (To hide a spent vial instead, use Archive.)"
+    confirmLabel="Delete"
+    onConfirm={confirmVialDelete}
+    onCancel={() => (vialDeleteRequest = null)}
+  />
+{/if}
+
 <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement}</div>
 
 <style>
@@ -1724,7 +1853,7 @@
   }
 
   .card {
-    border: 4px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 14px;
     background: color-mix(in oklab, var(--surface) 86%, transparent);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.16);
@@ -1745,7 +1874,7 @@
   }
 
   .section-chip {
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-bottom-width: 0;
     border-top-left-radius: 12px;
     border-top-right-radius: 12px;
@@ -1821,7 +1950,7 @@
   }
 
   .column-manager {
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 36%, white 64%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 36%, white 64%);
     border-radius: 12px;
     padding: 0.55rem;
     margin-bottom: 0.65rem;
@@ -1946,7 +2075,7 @@
 
   /* Action buttons share the inactive-tab look: a chip on the table's line. */
   .add-row-btn {
-    border: 2px solid transparent;
+    border: 1px solid transparent;
     border-radius: 12px 12px 0 0;
     width: 2.5rem;
     /* Same skirt as the tabs so a rightmost button's bottom corner tucks behind
@@ -1968,25 +2097,9 @@
     background: color-mix(in oklab, var(--headerBg) 82%, white 18%);
   }
 
-  .discard-btn {
-    align-self: center;
-    border: 1.5px solid color-mix(in oklab, var(--warning) 70%, black 30%);
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--warning) 22%, white 78%);
-    color: color-mix(in oklab, var(--warning) 30%, black 70%);
-    font-size: 0.82rem;
-    font-weight: 800;
-    line-height: 1;
-    padding: 0.46rem 0.58rem;
-    cursor: pointer;
-  }
-
-  .discard-btn:hover {
-    background: color-mix(in oklab, var(--warning) 38%, white 62%);
-  }
 
   .mini-icon {
-    border: 2px solid transparent;
+    border: 1px solid transparent;
     border-radius: 12px 12px 0 0;
     width: 2.5rem;
     padding: 0 0 var(--tab-skirt);
@@ -2013,7 +2126,7 @@
   th,
   td {
     padding: 0.4rem 0.45rem;
-    border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 42%, #f2f2f2 58%);
+    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 42%, #f2f2f2 58%);
   }
 
   .inputs-table thead tr {
@@ -2027,7 +2140,7 @@
 
   .inputs-table th,
   .inputs-table td {
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
   }
 
   .inputs-table th,
@@ -2108,6 +2221,45 @@
     min-width: 950px;
   }
 
+  /* Two-state spreadsheet cells (shared model with the inputs table): a faint
+     always-on affordance signals editability; the selection ring follows real
+     :focus (so only one selector shows on the page); a stronger inner shadow
+     while editing. The type cell renders a picker that owns its own indicator,
+     so it's excluded from the edit ring. */
+  .medication-table td.med-cell {
+    position: relative;
+    cursor: pointer;
+    outline: none;
+  }
+  .medication-table td.med-cell:focus {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-radius: 4px;
+  }
+  .medication-table td.med-cell.cell-editing:not(.col-type) {
+    box-shadow:
+      inset 0 0 0 2.5px color-mix(in oklab, var(--accent) 30%, var(--text) 70%),
+      inset 0 0 18px 4px color-mix(in oklab, var(--accent) 60%, transparent);
+    border-radius: 4px;
+  }
+  /* Overlay the cell instead of sitting in flow, so the editor's intrinsic width
+     can't widen the column — the cell keeps its static-text width and the editor
+     fills it (identical footprint, only the selector differs). .med-cell is
+     already position:relative. Reverted to in-flow on mobile (≤640px block). */
+  .medication-table .med-input {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    text-align: inherit;
+    outline: none;
+    padding: 0.2rem 0.3rem;
+  }
+
   /* Cost + Reminders sit side by side when there's room, and wrap to a single
    * column when there isn't — no hard breakpoint, stays fluid at any width. */
   .med-summary-row {
@@ -2126,7 +2278,7 @@
   .med-tab {
     /* Transparent border: the table (painted in front) draws the one border
      * line; the selected tab adds its own top/side outline above it. */
-    border: 2px solid transparent;
+    border: 1px solid transparent;
     border-top-left-radius: 12px;
     border-top-right-radius: 12px;
     background: color-mix(in oklab, var(--headerBg) 92%, transparent);
@@ -2320,7 +2472,7 @@
 
   .inputs-table :global(input) {
     width: 100%;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
     border-radius: 8px;
     font-size: 0.98rem;
     padding: 0.2rem 0.34rem;
@@ -2336,6 +2488,12 @@
     .medication-table {
       min-width: 760px;
     }
+  }
+
+  /* Per-card controls live in the card header ("Vial N") row on mobile only; the
+     desktop spreadsheet never shows them. */
+  .card-header-actions {
+    display: none;
   }
 
   /* ── Phone layout (≤640px): both tabs render one card per vial. ───────────
@@ -2383,7 +2541,7 @@
 
     .med-table-card .medication-table tbody tr {
       display: block;
-      border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+      border: 1px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
       border-radius: 12px;
       padding: 0.35rem 0.6rem 0.5rem;
       margin-bottom: 0.6rem;
@@ -2398,8 +2556,10 @@
       background: var(--surface);
     }
 
+    /* No zebra striping in the card layout — every card is the same surface
+       (status tints below still apply). */
     .med-table-card .medication-table tbody tr:nth-child(even) {
-      background: linear-gradient(var(--rowAlt), var(--rowAlt)), var(--surface);
+      background: var(--surface);
     }
 
     .med-table-card .medication-table tbody tr.vial-status-active {
@@ -2442,10 +2602,14 @@
       color: color-mix(in oklab, currentColor 60%, transparent);
     }
 
-    /* The Vial cell becomes the card header: "⠿ Vial 1 ×". */
+    /* The Vial cell is the card header row: "Vial N" on the left, per-card
+       controls (pencil, or Save/Cancel/Delete/Archive) on the right. */
     .med-table-card .medication-table td:first-child {
-      justify-content: flex-start;
-      border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      column-gap: 0.5rem;
+      border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
       padding-top: 0.1rem;
       margin-bottom: 0.15rem;
       font-weight: 700;
@@ -2461,6 +2625,12 @@
     }
 
     /* Inputs/selects share the row with their label instead of filling it. */
+    /* The desktop overlay (position:absolute) doesn't apply to the card layout —
+       here the editor is an in-flow flex item beside its label. */
+    .med-table-card .medication-table :global(.med-input) {
+      position: static;
+    }
+
     .med-table-card .medication-table td :global(input),
     .med-table-card .medication-table td :global(select) {
       width: auto;
@@ -2475,6 +2645,60 @@
 
     /* Drag-to-reorder is a pointer affordance; the empty drop row is noise here. */
     .med-table-card .medication-table tr.drop-sentinel {
+      display: none;
+    }
+
+    /* ── Per-card controls in the header row ──
+     * The desktop keyboard grid is disabled at this width; each card carries its
+     * own pencil (Save / Cancel / Delete / Archive once open). The gear's
+     * Hidden-columns manager and its per-row gutter drag/delete/archive are
+     * redundant on mobile (delete/archive live in the card), so hide them. */
+    .card-header-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.4rem;
+      font-weight: 400;
+    }
+
+    /* Icon buttons (Save/Archive/Delete) are compact squares; Cancel keeps text. */
+    .card-action-btn {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      padding: 0.35rem 0.55rem;
+      font-weight: 700;
+      font-size: 0.9rem;
+      line-height: 0;
+      cursor: pointer;
+      border: 1.5px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
+      background: color-mix(in oklab, var(--surface) 82%, transparent);
+      color: var(--text);
+    }
+
+    .card-action-btn.card-save {
+      border-color: transparent;
+      background: var(--accent, var(--text));
+      color: var(--surface);
+    }
+
+    .card-action-btn.card-delete {
+      border-color: transparent;
+      background: var(--danger);
+      color: white;
+    }
+
+    .hidden-columns-fieldset {
+      display: none;
+    }
+
+    /* Keep the "Vial N" header but drop the gear gutter's drag/delete/archive. */
+    .med-table-card .reorder-cell .drag-handle,
+    .med-table-card .reorder-cell .delete-btn,
+    .med-table-card .reorder-cell .archive-btn {
       display: none;
     }
   }

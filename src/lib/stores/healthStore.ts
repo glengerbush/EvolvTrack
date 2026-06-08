@@ -2,12 +2,16 @@ import { browser } from '$app/environment';
 import { derived, writable } from 'svelte/store';
 import { db } from '$lib/db/schema';
 import { onHealthDataChange, type HealthDataChange } from '$lib/domain/repo';
-import type { WeightEntry, InjectionEntry } from '$lib/domain/types';
+import type { HealthEntry } from '$lib/domain/types';
 import type { HealthInputRow, HealthSystemAmount } from '$lib/stores/healthTypes';
 import { calculateSystemMgByDrug, KG_PER_LB, type WeighIn } from '$lib/utils/pharmacokinetics';
-import { enrichSystemAmounts, formatSystemAmounts } from '$lib/utils/healthRowDerived';
+import {
+  averageWeightLbsByDate,
+  enrichSystemAmounts,
+  formatSystemAmounts,
+} from '$lib/utils/healthRowDerived';
 
-export type RawHealthData = { weights: WeightEntry[]; injections: InjectionEntry[] };
+export type RawHealthData = { entries: HealthEntry[] };
 
 function upsert<T extends { id: string }>(arr: T[], entity: T): T[] {
   const idx = arr.findIndex((e) => e.id === entity.id);
@@ -18,49 +22,28 @@ function upsert<T extends { id: string }>(arr: T[], entity: T): T[] {
 }
 
 export function applyHealthChange(state: RawHealthData, change: HealthDataChange): RawHealthData {
-  if (change.kind === 'weight') {
-    switch (change.action) {
-      case 'add':
-        return { ...state, weights: upsert(state.weights, change.entity) };
-      case 'patch':
-        return {
-          ...state,
-          weights: state.weights.map((w) => (w.id === change.id ? { ...w, ...change.patch } : w)),
-        };
-      case 'delete':
-        return { ...state, weights: state.weights.filter((w) => w.id !== change.id) };
-      case 'reset':
-        return { ...state, weights: [] };
-    }
-  }
   switch (change.action) {
     case 'add':
-      return { ...state, injections: upsert(state.injections, change.entity) };
+      return { entries: upsert(state.entries, change.entity) };
     case 'patch':
       return {
-        ...state,
-        injections: state.injections.map((i) =>
-          i.id === change.id ? { ...i, ...change.patch } : i,
-        ),
+        entries: state.entries.map((e) => (e.id === change.id ? { ...e, ...change.patch } : e)),
       };
     case 'bulkPatch': {
       if (change.ids.length === 0) return state;
       const targets = new Set(change.ids);
       return {
-        ...state,
-        injections: state.injections.map((i) =>
-          targets.has(i.id) ? { ...i, ...change.patch } : i,
-        ),
+        entries: state.entries.map((e) => (targets.has(e.id) ? { ...e, ...change.patch } : e)),
       };
     }
     case 'delete':
-      return { ...state, injections: state.injections.filter((i) => i.id !== change.id) };
+      return { entries: state.entries.filter((e) => e.id !== change.id) };
     case 'reset':
-      return { ...state, injections: [] };
+      return { entries: [] };
   }
 }
 
-const rawHealthData = writable<RawHealthData>({ weights: [], injections: [] });
+const rawHealthData = writable<RawHealthData>({ entries: [] });
 
 // Resolves once the initial Dexie load has populated `rawHealthData`.
 // Callers (tests, UI spinners, SSR skeletons) can `await` this instead of
@@ -81,9 +64,10 @@ if (browser) {
     rawHealthData.update((s) => applyHealthChange(s, change));
   });
 
-  healthStoreReady = Promise.all([db.weights.toArray(), db.injections.toArray()])
-    .then(([weights, injections]) => {
-      let next: RawHealthData = { weights, injections };
+  healthStoreReady = db.entries
+    .toArray()
+    .then((entries) => {
+      let next: RawHealthData = { entries };
       for (const change of pendingChanges) next = applyHealthChange(next, change);
       pendingChanges.length = 0;
       loaded = true;
@@ -94,103 +78,86 @@ if (browser) {
     });
 }
 
-function normalizeInjections(injections: InjectionEntry[]) {
+// Dose events (amountMg > 0, not skipped) carried forward with the last-known
+// medication so older locally-saved doses still attribute to a drug.
+function normalizeDoses(entries: HealthEntry[]) {
   let lastKnownMedication = '';
-  return [...injections]
+  return [...entries]
     .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
-    .filter((inj) => Number.isFinite(inj.amountMg) && inj.amountMg > 0 && inj.skipped !== true)
-    .map((inj) => {
-      const medication = inj.medication || lastKnownMedication;
-      if (inj.medication) lastKnownMedication = inj.medication;
-      return { date: inj.date, amountMg: inj.amountMg, medication };
+    .filter((e) => e.amountMg != null && Number.isFinite(e.amountMg) && e.amountMg > 0 && e.skipped !== true)
+    .map((e) => {
+      const medication = e.medication || lastKnownMedication;
+      if (e.medication) lastKnownMedication = e.medication;
+      return { date: e.date, amountMg: e.amountMg as number, medication };
     })
-    .filter((inj) => inj.medication);
+    .filter((d) => d.medication);
 }
 
-function buildRows(weights: WeightEntry[], injections: InjectionEntry[]): HealthInputRow[] {
-  const orderedWeights = [...weights].sort(
+// One row per entry (no merge-by-date). `mg in system` is a date-level quantity,
+// so it's computed once per date and shown on each of that date's rows; weigh-in
+// personalisation uses the per-date *average* weight.
+function buildRows(entries: HealthEntry[]): HealthInputRow[] {
+  const ordered = [...entries].sort(
     (a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
   );
-  const orderedInjections = [...injections].sort(
-    (a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt),
-  );
-  const weightsByDate = new Map<string, WeightEntry[]>();
-  for (const weight of orderedWeights) {
-    const dateWeights = weightsByDate.get(weight.date) ?? [];
-    dateWeights.push(weight);
-    weightsByDate.set(weight.date, dateWeights);
-  }
 
-  const injectionsByDate = new Map<string, InjectionEntry[]>();
-  for (const inj of orderedInjections) {
-    const dateInjections = injectionsByDate.get(inj.date) ?? [];
-    dateInjections.push(inj);
-    injectionsByDate.set(inj.date, dateInjections);
-  }
+  const doseSnapshot = normalizeDoses(entries);
+  const showMedicationLetters = new Set(doseSnapshot.map((d) => d.medication)).size > 1;
 
-  const dates = new Set([...weights.map((w) => w.date), ...injections.map((i) => i.date)]);
-  const injectionSnapshot = normalizeInjections(injections);
-  const showMedicationLetters = new Set(injectionSnapshot.map((inj) => inj.medication)).size > 1;
+  const avgByDate = averageWeightLbsByDate(entries);
+  const weighIns: WeighIn[] = [...avgByDate].map(([date, lbs]) => ({ date, weightKg: lbs * KG_PER_LB }));
 
-  const weighIns: WeighIn[] = [];
-  for (const w of weights) {
-    if (w.weightLbs != null) weighIns.push({ date: w.date, weightKg: w.weightLbs * KG_PER_LB });
-  }
+  const systemByDate = new Map<string, HealthSystemAmount[]>();
+  const systemForDate = (date: HealthEntry['date']) => {
+    let s = systemByDate.get(date);
+    if (!s) {
+      s = enrichSystemAmounts(calculateSystemMgByDrug(doseSnapshot, date, weighIns));
+      systemByDate.set(date, s);
+    }
+    return s;
+  };
 
-  return [...dates].sort().flatMap((date) => {
-    const dateWeights = weightsByDate.get(date) ?? [];
-    const dateInjections = injectionsByDate.get(date) ?? [];
-    const systemAmounts = enrichSystemAmounts(calculateSystemMgByDrug(injectionSnapshot, date, weighIns));
-
-    const makeRow = (inj?: InjectionEntry, w?: WeightEntry): HealthInputRow => ({
-      weightId: w?.id,
-      injectionId: inj?.id,
+  return ordered.map((e): HealthInputRow => {
+    const systemAmounts = e.skipped === true ? [] : systemForDate(e.date);
+    return {
+      entryId: e.id,
       day: '',
-      date,
-      system: inj?.skipped === true ? '' : formatSystemAmounts(systemAmounts, showMedicationLetters),
-      systemAmounts: inj?.skipped === true ? [] : systemAmounts,
-      dose: inj?.amountMg != null ? String(inj.amountMg) : '',
-      dosePlanned: inj?.planned === true,
-      doseConfirmedAt: inj?.confirmedAt,
-      doseSkipped: inj?.skipped === true,
-      medication: inj?.medication ?? '',
-      weight: w?.weightLbs != null ? String(w.weightLbs) : '',
-      wellness: w?.wellness != null ? String(w.wellness) : '',
+      date: e.date,
+      system: e.skipped === true ? '' : formatSystemAmounts(systemAmounts, showMedicationLetters),
+      systemAmounts,
+      dose: e.amountMg != null ? String(e.amountMg) : '',
+      dosePlanned: e.planned === true,
+      doseConfirmedAt: e.confirmedAt,
+      doseSkipped: e.skipped === true,
+      medication: e.medication ?? '',
+      prescriptionId: e.prescriptionId,
+      weight: e.weightLbs != null ? String(e.weightLbs) : '',
+      wellness: e.wellness != null ? String(e.wellness) : '',
       loss: '',
-      symptoms: w ? w.symptoms ?? inj?.symptoms ?? [] : inj?.symptoms ?? [],
-      shotLocation: inj?.site ?? '',
-      notes: w ? w.notes ?? inj?.notes ?? '' : inj?.notes ?? '',
-    });
-
-    const rowCount = Math.max(dateWeights.length, dateInjections.length, 1);
-    return Array.from({ length: rowCount }, (_, index) =>
-      makeRow(dateInjections[index], dateWeights[index]),
-    );
+      symptoms: e.symptoms ?? [],
+      shotLocation: e.site ?? '',
+      notes: e.notes ?? '',
+    };
   });
 }
 
-export const healthEntries = derived(rawHealthData, ($d) =>
-  buildRows($d.weights, $d.injections),
-);
+export const healthEntries = derived(rawHealthData, ($d) => buildRows($d.entries));
 
-export const latestWeightLbs = derived(rawHealthData, ($d) => {
-  // `$d.weights` is in insertion order, not date order (it's seeded from
-  // `db.weights.toArray()` and `upsert` appends), so we can't just take the
-  // last element. Pick the weighed entry with the latest date, tie-broken by
-  // `createdAt`. Symmetric with `earliestWeightLbs` below.
-  const weighed = $d.weights.filter((w) => w.weightLbs != null);
-  if (weighed.length === 0) return null;
-  const latest = weighed.reduce((acc, w) =>
-    w.date > acc.date || (w.date === acc.date && w.createdAt > acc.createdAt) ? w : acc,
-  );
-  return latest.weightLbs ?? null;
-});
+// Latest/earliest body weight = the per-date average of the latest/earliest
+// dated day that has any weigh-in (so multiple weigh-ins on a day are smoothed).
+function pickEdgeWeight(entries: HealthEntry[], edge: 'latest' | 'earliest'): number | null {
+  const avgByDate = averageWeightLbsByDate(entries);
+  let best: { date: string; lbs: number } | null = null;
+  for (const [date, lbs] of avgByDate) {
+    if (
+      !best ||
+      (edge === 'latest' ? date > best.date : date < best.date)
+    ) {
+      best = { date, lbs };
+    }
+  }
+  return best?.lbs ?? null;
+}
 
-export const earliestWeightLbs = derived(rawHealthData, ($d) => {
-  const weighed = $d.weights.filter((w) => w.weightLbs != null);
-  if (weighed.length === 0) return null;
-  const earliest = weighed.reduce((acc, w) =>
-    w.date < acc.date || (w.date === acc.date && w.createdAt < acc.createdAt) ? w : acc,
-  );
-  return earliest.weightLbs ?? null;
-});
+export const latestWeightLbs = derived(rawHealthData, ($d) => pickEdgeWeight($d.entries, 'latest'));
+export const earliestWeightLbs = derived(rawHealthData, ($d) => pickEdgeWeight($d.entries, 'earliest'));

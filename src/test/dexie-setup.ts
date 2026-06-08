@@ -7,8 +7,7 @@ import { db } from '$lib/db/schema';
 async function resetDb() {
   // Clear every table; cheaper than db.delete() + re-open between tests.
   await Promise.all([
-    db.weights.clear(),
-    db.injections.clear(),
+    db.entries.clear(),
     db.prescriptions.clear(),
     db.profile.clear(),
     db.encrypted.clear(),

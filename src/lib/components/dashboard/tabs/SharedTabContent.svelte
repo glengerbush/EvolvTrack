@@ -6,6 +6,7 @@
   import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
   import HelpBadge from '$lib/components/icons/HelpBadge.svelte';
   import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
+  import { GridSelection } from '$lib/grid/gridSelection.svelte';
   import {
     startWeight,
     currentWeight,
@@ -122,13 +123,11 @@
   } = $props();
 
   let isEditingLegend = $state(false);
-  let isEditingProgress = $state(false);
-  let isEditingInputs = $state(false);
+  // The inputs table is a single always-editable spreadsheet now (auto-save);
+  // the gear toggles its settings (column manager + option managers + the
+  // per-row trash gutter), independent of any edit mode.
   let inputSettingsOpen = $state(false);
-  let hasUnsavedInputRows = $state(false);
   let addInputRowSignal = $state(0);
-  let saveInputSignal = $state(0);
-  let discardInputSignal = $state(0);
   let draftStartWeight = $state<number | ''>(lbsToDraftInput($startWeight, $weightUnit));
   let draftGoalWeight = $state<number | ''>(lbsToDraftInput($goalWeight, $weightUnit));
   let progressBaseStartWeightLbs = $state<number | null>($startWeight);
@@ -136,6 +135,48 @@
   let progressDraftUnit = $state<WeightUnit>($weightUnit);
   let progressCardRegion: HTMLElement | null = null;
   let legendRegion: HTMLElement | null = null;
+
+  // Progress card editable cells modelled as a one-column grid: Start Weight is
+  // row 0, Goal Weight row 2 of the key/value table; the computed rows between
+  // and after aren't navigable. Always-editable two-state cells with auto-save,
+  // sharing the spreadsheet engine with the inputs/medication tables.
+  const PROGRESS_START_ROW = 0;
+  const PROGRESS_GOAL_ROW = 2;
+  const progressFieldEditable = (r: number) => r === PROGRESS_START_ROW || r === PROGRESS_GOAL_ROW;
+  function commitProgressFields() {
+    const startLbs = progressDraftValueToLbs(draftStartWeight, $weightUnit);
+    const goalLbs = progressDraftValueToLbs(draftGoalWeight, $weightUnit);
+    setStartAndGoalWeight(startLbs, goalLbs);
+    progressBaseStartWeightLbs = startLbs;
+    progressBaseGoalWeightLbs = goalLbs;
+  }
+  const progressGrid = new GridSelection({
+    rowCount: () => 3,
+    colCount: () => 1,
+    isEditable: (r) => progressFieldEditable(r),
+    isSelectable: (r) => progressFieldEditable(r),
+    cellRef: (r, c) =>
+      progressCardRegion?.querySelector<HTMLElement>(`[data-cell="${r}-${c}"]`) ?? null,
+    commit: () => commitProgressFields(),
+    clear: (r) => {
+      if (r === PROGRESS_START_ROW) draftStartWeight = '';
+      else if (r === PROGRESS_GOAL_ROW) draftGoalWeight = '';
+      commitProgressFields();
+    },
+    beginEditSeed: (r, _c, seed) => {
+      const typed = seed !== null && Number.isFinite(Number(seed)) ? Number(seed) : '';
+      if (r === PROGRESS_START_ROW) {
+        draftStartWeight = seed !== null ? typed : lbsToDraftInput($startWeight, $weightUnit);
+      } else if (r === PROGRESS_GOAL_ROW) {
+        draftGoalWeight = seed !== null ? typed : lbsToDraftInput($goalWeight, $weightUnit);
+      }
+    },
+    cancelEdit: (r) => {
+      if (r === PROGRESS_START_ROW) draftStartWeight = lbsToDraftInput($startWeight, $weightUnit);
+      else if (r === PROGRESS_GOAL_ROW) draftGoalWeight = lbsToDraftInput($goalWeight, $weightUnit);
+    },
+    stickyTopSelector: '.tabbar',
+  });
   let dataScrollEl: HTMLDivElement | null = null;
   let hasAutoScrolled = false;
   let lastNotifiedUnsavedChanges = false;
@@ -158,8 +199,7 @@
   $effect(() => {
     if (active) return;
     isEditingLegend = false;
-    isEditingProgress = false;
-    isEditingInputs = false;
+    progressGrid.editing = false;
     inputSettingsOpen = false;
   });
 
@@ -173,7 +213,6 @@
     if (discardSignal === lastDiscardSignal) return;
     lastDiscardSignal = discardSignal;
     if (hasUnsavedProgress) discardProgressEdits();
-    if (hasUnsavedInputRows) discardInputEdits();
   });
 
   const sortedHealthRows = $derived([...$healthEntries].sort((a, b) => a.date.localeCompare(b.date)));
@@ -371,7 +410,7 @@
         Math.abs(draftGoalWeightLbs - progressBaseGoalWeightLbs) > 0.0001;
     return startChanged || goalChanged;
   });
-  const hasUnsavedChanges = $derived(hasUnsavedProgress || hasUnsavedInputRows);
+  const hasUnsavedChanges = $derived(hasUnsavedProgress);
 
   type EfficacyRow = {
     week: number;
@@ -500,34 +539,13 @@
     progressDraftUnit = unit;
   }
 
-  function beginProgressEdits() {
-    if (!hasUnsavedProgress) {
-      progressBaseStartWeightLbs = $startWeight;
-      progressBaseGoalWeightLbs = $goalWeight;
-      syncProgressDraftsFromSaved();
-    }
-    isEditingProgress = true;
-  }
-
-  function saveProgressEdits() {
-    const savedStartLbs = progressDraftValueToLbs(draftStartWeight, progressDraftUnit);
-    const savedGoalLbs = progressDraftValueToLbs(draftGoalWeight, progressDraftUnit);
-    setStartAndGoalWeight(savedStartLbs, savedGoalLbs);
-    progressBaseStartWeightLbs = savedStartLbs;
-    progressBaseGoalWeightLbs = savedGoalLbs;
-    syncProgressDraftsFromSaved(savedStartLbs, savedGoalLbs, $weightUnit);
-    isEditingProgress = false;
-  }
-
-  function toggleProgressEdits() {
-    isEditingProgress ? saveProgressEdits() : beginProgressEdits();
-  }
-
+  // Progress fields auto-save on commit now (the inputs-table model), so the
+  // only remaining "discard unsaved" path is reverting an in-progress edit.
   function discardProgressEdits() {
     progressBaseStartWeightLbs = $startWeight;
     progressBaseGoalWeightLbs = $goalWeight;
     syncProgressDraftsFromSaved();
-    isEditingProgress = false;
+    progressGrid.editing = false;
   }
 
   function handleProgressCommitKeydown(event: KeyboardEvent) {
@@ -544,12 +562,6 @@
 
     if (!(event.target instanceof Node)) return;
 
-    if (isEditingProgress && progressCardRegion?.contains(event.target)) {
-      event.preventDefault();
-      saveProgressEdits();
-      return;
-    }
-
     // Legend toggles save live, so Enter just closes edit mode.
     if (isEditingLegend && legendRegion?.contains(event.target)) {
       event.preventDefault();
@@ -559,35 +571,6 @@
 
   function requestInputRow() {
     addInputRowSignal += 1;
-  }
-
-  function saveInputEdits() {
-    saveInputSignal += 1;
-  }
-
-  function saveInputDraftRows() {
-    saveInputSignal += 1;
-  }
-
-  function finishInputEdits() {
-    isEditingInputs = false;
-    inputSettingsOpen = false;
-  }
-
-  function discardInputEdits() {
-    discardInputSignal += 1;
-    isEditingInputs = false;
-    inputSettingsOpen = false;
-  }
-
-  function toggleInputEdits() {
-    if (isEditingInputs) {
-      saveInputEdits();
-      return;
-    }
-
-    isEditingInputs = true;
-    inputSettingsOpen = false;
   }
 
   function toggleInputSettings() {
@@ -727,7 +710,9 @@
           >
             <defs>
               <clipPath id="health-chart-clip">
-                <rect x={PLOT.left} y={PLOT.top} width={chartModel.plotWidth} height={PLOT.height} />
+                <!-- Extend the clip a few px below the baseline so dose markers
+                     sitting at 0mg (on the x-axis) aren't sliced in half. -->
+                <rect x={PLOT.left} y={PLOT.top} width={chartModel.plotWidth} height={PLOT.height + 6} />
               </clipPath>
             </defs>
 
@@ -756,6 +741,12 @@
               />
             {/if}
 
+            <!-- x-axis baseline drawn before the data so markers (especially
+                 0mg dose dots on the axis) paint on top of it, not behind. -->
+            <g class="axes">
+              <line x1={PLOT.left} x2={chartModel.plotRight} y1={PLOT.bottom} y2={PLOT.bottom} />
+            </g>
+
             <g clip-path="url(#health-chart-clip)">
               {#if !hiddenGraphSeries.has('wellness')}
                 {#each chartModel.wellnessStacks as stack (stack.date)}
@@ -778,8 +769,8 @@
 
               {#each chartModel.systemSeries as series (series.key)}
                 {#if !hiddenGraphSeries.has(series.key)}
-                  <polyline points={series.actualPath} class="system-line" style:--system-color={series.color} />
-                  <polyline points={series.predictionPath} class="system-line dashed" style:--system-color={series.color} />
+                  <path d={series.actualPath} class="system-line" style:--system-color={series.color} />
+                  <path d={series.predictionPath} class="system-line dashed" style:--system-color={series.color} />
                   {#each series.dosePoints as dot (dot.date)}
                     <path
                       class="dose-point"
@@ -848,10 +839,6 @@
                 {/each}
               </g>
             {/if}
-
-            <g class="axes">
-              <line x1={PLOT.left} x2={chartModel.plotRight} y1={PLOT.bottom} y2={PLOT.bottom} />
-            </g>
 
             <g class="axis-labels">
               {#each chartModel.dateTicks as tick (tick.date)}
@@ -1047,27 +1034,34 @@
       <article class="card" bind:this={progressCardRegion}>
         <div class="chip-row">
           <h2 class="section-chip">Progress</h2>
-          <EditPencil
-            ariaLabel={isEditingProgress ? 'Save progress' : 'Edit progress'}
-            active={isEditingProgress}
-            onclick={toggleProgressEdits}
-          />
-          {#if hasUnsavedProgress}
-            <button
-              type="button"
-              class="discard-btn"
-              aria-label="Cancel unsaved progress changes"
-              onclick={discardProgressEdits}
-            >Cancel</button>
-          {/if}
         </div>
         <table class="kv-table">
           <tbody>
             <tr>
               <th>Start Weight</th>
-              <td>
-                {#if isEditingProgress}
-                  <input class="progress-input" type="number" min="0" step="any" bind:value={draftStartWeight} />
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <td
+                data-cell="0-0"
+                class="kv-cell"
+                title="Click to edit"
+                tabindex={progressGrid.tabIndexFor(0, 0, true)}
+                class:cell-editing={progressGrid.isCellEditing(0, 0)}
+                onclick={() => progressGrid.selectCell(0, 0, true)}
+                onkeydown={(e) => progressGrid.cellKeydown(e, 0, 0)}
+              >
+                {#if progressGrid.isCellEditing(0, 0)}
+                  <input
+                    class="progress-input cell-input"
+                    type="number"
+                    min="0"
+                    step="any"
+                    bind:value={draftStartWeight}
+                    onkeydown={progressGrid.editorKeydown}
+                    onblur={() => {
+                      commitProgressFields();
+                      progressGrid.stopEditing();
+                    }}
+                  />
                 {:else if startWeightDisplay != null}
                   {startWeightDisplay.toFixed(1)} {$weightUnit}
                 {:else}
@@ -1087,9 +1081,29 @@
             </tr>
             <tr>
               <th>Goal Weight</th>
-              <td>
-                {#if isEditingProgress}
-                  <input class="progress-input" type="number" min="0" step="any" bind:value={draftGoalWeight} />
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <td
+                data-cell="2-0"
+                class="kv-cell"
+                title="Click to edit"
+                tabindex={progressGrid.tabIndexFor(2, 0, false)}
+                class:cell-editing={progressGrid.isCellEditing(2, 0)}
+                onclick={() => progressGrid.selectCell(2, 0, true)}
+                onkeydown={(e) => progressGrid.cellKeydown(e, 2, 0)}
+              >
+                {#if progressGrid.isCellEditing(2, 0)}
+                  <input
+                    class="progress-input cell-input"
+                    type="number"
+                    min="0"
+                    step="any"
+                    bind:value={draftGoalWeight}
+                    onkeydown={progressGrid.editorKeydown}
+                    onblur={() => {
+                      commitProgressFields();
+                      progressGrid.stopEditing();
+                    }}
+                  />
                 {:else if goalWeightDisplay != null}
                   {goalWeightDisplay.toFixed(1)} {$weightUnit}
                 {:else}
@@ -1144,49 +1158,22 @@
       >
         +
       </button>
-      {#if hasUnsavedInputRows && !isEditingInputs}
-        <EditPencil
-          ariaLabel="Save inputs"
-          active={true}
-          onclick={saveInputDraftRows}
-        />
-      {/if}
-      <EditPencil
-        ariaLabel={isEditingInputs ? 'Save inputs' : 'Edit inputs'}
-        active={isEditingInputs}
-        onclick={toggleInputEdits}
-      />
-      {#if isEditingInputs}
-        <button
-          type="button"
-          class={['settings-btn', { active: inputSettingsOpen }]}
-          aria-label={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
-          title={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
-          aria-pressed={inputSettingsOpen}
-          onclick={toggleInputSettings}
-        >
-          <GearIcon size="60%" color="white" />
-        </button>
-      {/if}
-      {#if hasUnsavedInputRows}
-        <button
-          type="button"
-          class="discard-btn"
-          aria-label="Cancel unsaved input changes"
-          onclick={discardInputEdits}
-        >Cancel</button>
-      {/if}
+      <button
+        type="button"
+        class={['settings-btn', { active: inputSettingsOpen }]}
+        aria-label={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
+        title={inputSettingsOpen ? 'Hide input table settings' : 'Show input table settings'}
+        aria-pressed={inputSettingsOpen}
+        onclick={toggleInputSettings}
+      >
+        <GearIcon size="60%" color="white" />
+      </button>
     </div>
     <div class="inputs-panel">
       <InputsTable
         rows={$healthEntries}
-        isEditing={isEditingInputs}
         isSettingsOpen={inputSettingsOpen}
         addRowSignal={addInputRowSignal}
-        saveSignal={saveInputSignal}
-        discardSignal={discardInputSignal}
-        onSaveEdits={finishInputEdits}
-        onUnsavedChangesChange={(hasRows) => (hasUnsavedInputRows = hasRows)}
       />
     </div>
   </article>
@@ -1218,7 +1205,7 @@
   }
 
   .card {
-    border: 4px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 14px;
     background: color-mix(in oklab, var(--bgTint) 18%, white 82%);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.16);
@@ -1327,25 +1314,10 @@
     border-radius: 10px 10px 0 0;
   }
 
-  .discard-btn {
-    border: 1.5px solid var(--warning);
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--warning) 18%, white 82%);
-    color: color-mix(in oklab, var(--warning) 70%, black 30%);
-    font-size: 0.82rem;
-    font-weight: 800;
-    line-height: 1;
-    padding: 0.46rem 0.58rem;
-    cursor: pointer;
-  }
-
-  .discard-btn:hover {
-    background: color-mix(in oklab, var(--warning) 32%, white 68%);
-  }
 
   .chip,
   .section-chip {
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-bottom-width: 0;
     border-top-left-radius: 12px;
     border-top-right-radius: 12px;
@@ -1418,7 +1390,7 @@
   .swatch-line {
     width: 1.5rem;
     height: 0;
-    border-top: 3px solid var(--accent);
+    border-top: 1px solid var(--accent);
     display: inline-block;
   }
 
@@ -1672,7 +1644,7 @@
   th,
   td {
     padding: 0.4rem 0.45rem;
-    border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 42%, #f2f2f2 58%);
+    border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 42%, #f2f2f2 58%);
   }
 
   .efficacy-scroll {
@@ -1737,13 +1709,46 @@
     font-weight: 600;
   }
 
+  /* Editable progress cells share the inputs-table two-state look. A faint
+     always-on affordance signals they're editable; a selection ring shows while
+     the cell is focused, and a stronger inner shadow while editing. The ring is
+     driven by real :focus so it disappears when focus leaves (only one selector
+     on the page at a time). */
+  .kv-table td.kv-cell {
+    position: relative;
+    cursor: pointer;
+    border-radius: 6px;
+    outline: none;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 45%, transparent);
+  }
+  .kv-table td.kv-cell:hover {
+    background: color-mix(in oklab, var(--accent) 8%, transparent);
+  }
+  .kv-table td.kv-cell:focus {
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+  .kv-table td.kv-cell.cell-editing {
+    box-shadow:
+      inset 0 0 0 2.5px color-mix(in oklab, var(--accent) 30%, var(--text) 70%),
+      inset 0 0 18px 4px color-mix(in oklab, var(--accent) 60%, transparent);
+  }
+
   .progress-input {
     width: 6.5rem;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
     border-radius: 8px;
     padding: 0.2rem 0.35rem;
     font: inherit;
     text-align: right;
+  }
+  /* When the input is the in-cell editor, drop its own chrome so the cell ring
+     is the only indicator (matches the inputs table). */
+  .progress-input.cell-input {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    outline: none;
+    width: 100%;
   }
 
   .empty-value {
@@ -1752,6 +1757,14 @@
 
   .inputs-card {
     padding-top: 0.4rem;
+  }
+
+  /* Desktop only: nudge the inputs chip-row in slightly. On mobile the row
+   * renders as card-tab chips flush to the edge, so the margin is left off. */
+  @media (min-width: 641px) {
+    .inputs-card .chip-row {
+      margin-left: 0px;
+    }
   }
 
   /* ── Inputs header chip-strip (mobile card view only) ──
@@ -1798,11 +1811,6 @@
   .inputs-panel {
     position: relative;
     z-index: 1;
-  }
-
-  /* Cancel stays a centred pill above the line, matching Medication's discard. */
-  .inputs-card .discard-btn {
-    align-self: center;
   }
 
   @media (max-width: 1280px) {

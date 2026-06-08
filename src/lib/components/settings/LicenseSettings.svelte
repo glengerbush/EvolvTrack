@@ -256,7 +256,7 @@
     font-variant: small-caps;
     color: var(--headerText);
     background: color-mix(in oklab, var(--headerBg) 92%, white 8%);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-bottom: none;
     border-top-left-radius: 12px;
     border-top-right-radius: 12px;
@@ -268,7 +268,7 @@
   .panel {
     display: grid;
     gap: 0.65rem;
-    border: 4px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 0 14px 14px 14px;
     padding: 0.8rem;
     background: color-mix(in oklab, var(--surface) 86%, transparent);
@@ -277,7 +277,7 @@
 
   input {
     padding: 0.7rem;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
     border-radius: 10px;
     display: block;
     width: min(100%, 380px);
@@ -300,7 +300,7 @@
     display: inline-flex;
     align-items: center;
     min-height: 1.9rem;
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 999px;
     padding: 0.18rem 0.72rem;
     font-size: 0.85rem;
@@ -352,7 +352,7 @@
     margin: 0;
     padding: 0.6rem 0.75rem;
     background: color-mix(in oklab, var(--warning) 18%, white 82%);
-    border: 2px solid var(--warning);
+    border: 1px solid var(--warning);
     border-radius: 10px;
     font-size: 0.9rem;
     line-height: 1.4;
@@ -423,14 +423,14 @@
   .panel :global(.btn-primary) {
     background: var(--headerBg);
     color: var(--headerText);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     opacity: 1;
   }
 
   .panel :global(.btn-ghost) {
     background: color-mix(in oklab, var(--headerBg) 14%, var(--surface) 86%);
     color: var(--text);
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 65%, var(--surface) 35%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 65%, var(--surface) 35%);
     opacity: 1;
   }
 

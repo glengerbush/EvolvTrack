@@ -3,9 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import {
-  addInjection,
+  addEntry,
   addPrescription,
-  addWeight,
   saveProfile,
 } from '$lib/domain/repo';
 import { parseTrackingFile } from './importer';
@@ -161,8 +160,8 @@ describe('downloadOdsSpreadsheet — round-trip via importer', () => {
       body: { append: () => {} },
     };
 
-    await addWeight({ date: iso('2026-05-09'), weightLbs: 181, wellness: 4, symptoms: [] });
-    await addInjection({
+    await addEntry({ date: iso('2026-05-09'), weightLbs: 181, wellness: 4, symptoms: [] });
+    await addEntry({
       date: iso('2026-05-10'),
       amountMg: 5,
       medication: SEMA,
@@ -209,12 +208,12 @@ describe('downloadOdsSpreadsheet — round-trip via importer', () => {
     const result = await parseTrackingFile(file);
 
     expect(result.source).toBe('EvolvTrack spreadsheet');
-    // The Health Log sheet contains both weights and injections keyed by date.
-    const weightForDay = result.data.weights.find((w) => w.date === '2026-05-09');
+    // The Health Log sheet round-trips weigh-in and dose entries keyed by date.
+    const weightForDay = result.data.entries.find((e) => e.date === '2026-05-09');
     expect(weightForDay).toBeTruthy();
     expect(weightForDay!.weightLbs).toBe(181);
 
-    const injection = result.data.injections.find((i) => i.date === '2026-05-10');
+    const injection = result.data.entries.find((e) => e.date === '2026-05-10' && e.amountMg != null);
     expect(injection).toBeTruthy();
     expect(injection!.amountMg).toBe(5);
     expect(injection!.medication).toBe(SEMA);

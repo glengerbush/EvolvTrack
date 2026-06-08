@@ -83,12 +83,11 @@
   let hasLocalData = $state(true);
   $effect(() => {
     void (async () => {
-      const [w, i, p] = await Promise.all([
-        db.weights.count(),
-        db.injections.count(),
+      const [e, p] = await Promise.all([
+        db.entries.count(),
         db.prescriptions.count(),
       ]);
-      hasLocalData = w + i + p > 0;
+      hasLocalData = e + p > 0;
     })();
   });
 

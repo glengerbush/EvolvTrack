@@ -178,7 +178,7 @@ async function seedOutbox(id: string, overrides: Partial<OutboxEntry> = {}) {
   });
 }
 
-async function seedMigrationBackfill(id: string, aggregate: 'weight' | 'injection' = 'weight') {
+async function seedMigrationBackfill(id: string, aggregate: 'entry' | 'entry' = 'entry') {
   await db.migrationBackfill.put({
     id,
     aggregate,
@@ -220,7 +220,7 @@ describe('pushEncryptedChanges — guard conditions', () => {
 describe('pushEncryptedChanges — happy path', () => {
   it('maps migration-backfill rows to snake_case payload rows and upserts them', async () => {
     await seedMigrationBackfill('evt-1');
-    await seedMigrationBackfill('evt-2', 'injection');
+    await seedMigrationBackfill('evt-2', 'entry');
 
     const result = await pushEncryptedChanges();
 
@@ -276,7 +276,7 @@ describe('pushPlainChanges', () => {
     const result = await pushPlainChanges([
       {
         id: 'p-1',
-        aggregate: 'weight',
+        aggregate: 'entry',
         op: 'upsert',
         payload: { weightLbs: 180 },
         protocolVersion: SYNC_PROTOCOL_VERSION,
@@ -292,11 +292,11 @@ describe('pushPlainChanges', () => {
     expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
       id: 'p-1',
       user_id: 'user-1',
-      aggregate: 'weight',
+      aggregate: 'entry',
       // Wrapped in the same `{ aggregate, op, record }` envelope steady-state
       // uses, so `pullPlain` can recover the record (the bare-record shape was
       // the disable-migration bug that decoded back to a null upsert).
-      payload: { aggregate: 'weight', op: 'upsert', record: { weightLbs: 180 } },
+      payload: { aggregate: 'entry', op: 'upsert', record: { weightLbs: 180 } },
       protocol_version: SYNC_PROTOCOL_VERSION,
       schema_version: DB_SCHEMA_VERSION,
     });
@@ -310,8 +310,8 @@ describe('pushPlainChanges', () => {
     // canonical plain id; Postgres rejects an upsert batch with a repeated
     // (user_id, id), so pushPlainChanges must dedupe first.
     const change = (createdAt: string, weightLbs: number) => ({
-      id: 'weight:w1',
-      aggregate: 'weight' as const,
+      id: 'entry:w1',
+      aggregate: 'entry' as const,
       op: 'upsert' as const,
       payload: { id: 'w1', weightLbs },
       protocolVersion: SYNC_PROTOCOL_VERSION,
@@ -328,7 +328,7 @@ describe('pushPlainChanges', () => {
     const rows = h.upsertImpl.mock.calls[0][1] as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      id: 'weight:w1',
+      id: 'entry:w1',
       payload: { record: { id: 'w1', weightLbs: 190 } },
       created_at: '2026-05-09T00:00:00.000Z',
     });
@@ -374,10 +374,10 @@ describe('fetchRemotePlainChanges', () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
         {
-          id: 'weight:w1',
-          aggregate: 'weight',
+          id: 'entry:w1',
+          aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'weight', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
+          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
           created_at: '2026-05-01T00:00:00.000Z',
           inserted_at: '2026-05-01T00:00:01.000Z',
         },
@@ -388,8 +388,8 @@ describe('fetchRemotePlainChanges', () => {
     const changes = await fetchRemotePlainChanges();
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
-      id: 'weight:w1',
-      aggregate: 'weight',
+      id: 'entry:w1',
+      aggregate: 'entry',
       op: 'upsert',
       payload: { id: 'w1', weightLbs: 180 },
       createdAt: '2026-05-01T00:00:00.000Z', // the row's own clock, not inserted_at
@@ -461,7 +461,7 @@ describe('pushOutbox', () => {
 
   it('pauses with skipped=migration-in-progress during an E2EE migration', async () => {
     h.state.syncMode = 'migrating_to_e2ee';
-    await seedOutbox('weight:w1');
+    await seedOutbox('entry:w1');
 
     const result = await pushOutbox();
 
@@ -476,7 +476,7 @@ describe('pushOutbox', () => {
     // (Postgres 42501) refused the write. That's benign — the outbox must
     // survive so the edits re-push once the change finishes.
     h.state.syncMode = 'e2ee';
-    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
     h.upsertImpl.mockResolvedValueOnce({
       data: null,
       error: { code: '42501', message: 'new row violates row-level security policy' },
@@ -494,7 +494,7 @@ describe('pushOutbox', () => {
     // (license/permission), not a transition race. It must surface, and the
     // outbox must NOT be cleared.
     h.state.syncMode = 'e2ee';
-    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
     h.upsertImpl.mockResolvedValueOnce({
       data: null,
       error: { code: '42501', message: 'new row violates row-level security policy' },
@@ -507,8 +507,8 @@ describe('pushOutbox', () => {
 
   it('plain mode upserts enveloped payloads to sync_changes_plain and clears the outbox', async () => {
     h.state.syncMode = 'plain';
-    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
-    await seedOutbox('injection:i1', { aggregate: 'injection', op: 'delete', payload: null });
+    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:i1', { aggregate: 'entry', op: 'delete', payload: null });
 
     const result = await pushOutbox();
 
@@ -520,17 +520,17 @@ describe('pushOutbox', () => {
     const byId = Object.fromEntries(
       (rows as Array<Record<string, unknown>>).map((r) => [r.id, r]),
     );
-    expect(byId['weight:w1']).toMatchObject({
+    expect(byId['entry:w1']).toMatchObject({
       user_id: 'user-1',
-      aggregate: 'weight',
+      aggregate: 'entry',
       op: 'upsert',
-      payload: { aggregate: 'weight', op: 'upsert', record: { weightLbs: 180 } },
+      payload: { aggregate: 'entry', op: 'upsert', record: { weightLbs: 180 } },
     });
     // A delete tombstone still carries a non-null envelope (the remote
     // payload column is NOT NULL); the record inside it is null.
-    expect(byId['injection:i1']).toMatchObject({
+    expect(byId['entry:i1']).toMatchObject({
       op: 'delete',
-      payload: { aggregate: 'injection', op: 'delete', record: null },
+      payload: { aggregate: 'entry', op: 'delete', record: null },
     });
 
     expect(await db.outbox.count()).toBe(0);
@@ -542,7 +542,7 @@ describe('pushOutbox', () => {
 
   it('never encrypts or touches sync_changes_encrypted in plain mode', async () => {
     h.state.syncMode = 'plain';
-    await seedOutbox('weight:w1');
+    await seedOutbox('entry:w1');
     await pushOutbox();
     expect(h.encryptImpl).not.toHaveBeenCalled();
     expect(h.fromMock).not.toHaveBeenCalledWith('sync_changes_encrypted');
@@ -550,7 +550,7 @@ describe('pushOutbox', () => {
 
   it('e2ee mode encrypts each envelope and upserts ciphertext to sync_changes_encrypted', async () => {
     h.state.syncMode = 'e2ee';
-    await seedOutbox('weight:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
 
     const result = await pushOutbox();
 
@@ -558,12 +558,12 @@ describe('pushOutbox', () => {
     expect(h.encryptImpl).toHaveBeenCalledTimes(1);
     const [keyB64, envelope] = h.encryptImpl.mock.calls[0];
     expect(keyB64).toBe('pp');
-    expect(envelope).toEqual({ aggregate: 'weight', op: 'upsert', record: { weightLbs: 180 } });
+    expect(envelope).toEqual({ aggregate: 'entry', op: 'upsert', record: { weightLbs: 180 } });
 
     const [table, rows] = h.upsertImpl.mock.calls[0];
     expect(table).toBe('sync_changes_encrypted');
     const row = (rows as Array<Record<string, unknown>>)[0];
-    expect(row).toMatchObject({ id: 'weight:w1', user_id: 'user-1', iv: 'iv' });
+    expect(row).toMatchObject({ id: 'entry:w1', user_id: 'user-1', iv: 'iv' });
     expect(row.ciphertext).toContain('ct:');
     // The plaintext payload must never ride along on an encrypted row.
     expect(row).not.toHaveProperty('payload');
@@ -577,7 +577,7 @@ describe('pushOutbox', () => {
   it('pauses with skipped=locked in e2ee mode when the session has no key', async () => {
     h.state.syncMode = 'e2ee';
     h.state.sessionKey = null;
-    await seedOutbox('weight:w1');
+    await seedOutbox('entry:w1');
 
     const result = await pushOutbox();
 
@@ -589,7 +589,7 @@ describe('pushOutbox', () => {
 
   it('leaves the outbox intact and records no sync when the upsert fails', async () => {
     h.state.syncMode = 'plain';
-    await seedOutbox('weight:w1');
+    await seedOutbox('entry:w1');
     h.upsertImpl.mockResolvedValueOnce({ data: null, error: { message: 'rls-denied' } });
 
     await expect(pushOutbox()).rejects.toMatchObject({ message: 'rls-denied' });
@@ -599,13 +599,13 @@ describe('pushOutbox', () => {
 
   it('preserves a row re-edited mid-push via the rev guard', async () => {
     h.state.syncMode = 'plain';
-    await seedOutbox('weight:w1', { rev: 'rev-old' });
+    await seedOutbox('entry:w1', { rev: 'rev-old' });
     // Simulate a concurrent local edit landing while the upsert is in flight:
     // the same entity is re-enqueued with a fresh rev.
     h.upsertImpl.mockImplementationOnce(async () => {
       await db.outbox.put({
-        id: 'weight:w1',
-        aggregate: 'weight',
+        id: 'entry:w1',
+        aggregate: 'entry',
         entityId: 'w1',
         op: 'upsert',
         updatedAt: '2026-05-02T00:00:00.000Z',
@@ -620,7 +620,7 @@ describe('pushOutbox', () => {
 
     expect(result).toEqual({ pushed: 1 });
     // The re-edited row survived because its rev no longer matched.
-    const remaining = await db.outbox.get('weight:w1');
+    const remaining = await db.outbox.get('entry:w1');
     expect(remaining?.rev).toBe('rev-new');
   });
 });
@@ -658,18 +658,18 @@ describe('pullAndApply', () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
         {
-          id: 'weight:w1',
-          aggregate: 'weight',
+          id: 'entry:w1',
+          aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'weight', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
+          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
           created_at: '2026-05-10T00:00:00.000Z',
           inserted_at: '2026-05-10T00:00:01.000Z',
         },
         {
-          id: 'injection:i1',
-          aggregate: 'injection',
+          id: 'entry:i1',
+          aggregate: 'entry',
           op: 'delete',
-          payload: { aggregate: 'injection', op: 'delete', record: null },
+          payload: { aggregate: 'entry', op: 'delete', record: null },
           created_at: '2026-05-10T00:01:00.000Z',
           inserted_at: '2026-05-10T00:01:01.000Z',
         },
@@ -683,14 +683,14 @@ describe('pullAndApply', () => {
     expect(h.fromMock).toHaveBeenCalledWith('sync_changes_plain');
     expect(h.applyImpl).toHaveBeenCalledTimes(2);
     expect(h.applyImpl.mock.calls[0][0]).toMatchObject({
-      aggregate: 'weight',
+      aggregate: 'entry',
       entityId: 'w1',
       op: 'upsert',
       record: { id: 'w1', weightLbs: 180 },
       remoteUpdatedAt: '2026-05-10T00:00:00.000Z',
     });
     expect(h.applyImpl.mock.calls[1][0]).toMatchObject({
-      aggregate: 'injection',
+      aggregate: 'entry',
       entityId: 'i1',
       op: 'delete',
       record: null,
@@ -723,18 +723,18 @@ describe('pullAndApply', () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
         {
-          id: 'weight:w1',
-          aggregate: 'weight',
+          id: 'entry:w1',
+          aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'weight', op: 'upsert', record: { id: 'w1' } },
+          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1' } },
           created_at: '2026-05-10T00:00:00.000Z',
           inserted_at: '2026-05-10T00:00:01.000Z',
         },
         {
-          id: 'weight:w2',
-          aggregate: 'weight',
+          id: 'entry:w2',
+          aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'weight', op: 'upsert', record: { id: 'w2' } },
+          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w2' } },
           created_at: '2026-05-10T00:00:02.000Z',
           inserted_at: '2026-05-10T00:00:03.000Z',
         },
@@ -754,8 +754,8 @@ describe('pullAndApply', () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
         {
-          id: 'weight:w1',
-          aggregate: 'weight',
+          id: 'entry:w1',
+          aggregate: 'entry',
           op: 'upsert',
           ciphertext: 'ct',
           iv: 'iv',
@@ -766,7 +766,7 @@ describe('pullAndApply', () => {
       error: null,
     });
     h.decryptImpl.mockResolvedValueOnce({
-      aggregate: 'weight',
+      aggregate: 'entry',
       op: 'upsert',
       record: { id: 'w1', weightLbs: 200 },
     });
@@ -780,7 +780,7 @@ describe('pullAndApply', () => {
     expect(h.selectImpl.mock.calls.at(-1)?.[1]).toMatchObject({ dek_version: 1 });
     expect(h.decryptImpl).toHaveBeenCalledWith('pp', 'ct', 'iv');
     expect(h.applyImpl.mock.calls[0][0]).toMatchObject({
-      aggregate: 'weight',
+      aggregate: 'entry',
       entityId: 'w1',
       record: { id: 'w1', weightLbs: 200 },
     });
@@ -801,13 +801,13 @@ describe('reEncryptServerRows — server-side key rotation', () => {
   it('re-encrypts old-version rows under the new DEK and upserts them at the new version', async () => {
     h.selectImpl.mockResolvedValueOnce({
       data: [
-        { id: 'weight:w1', ciphertext: 'old-ct-1', iv: 'iv1', protocol_version: 1, schema_version: 2, created_at: '2026-05-10T00:00:00.000Z' },
-        { id: 'injection:i1', ciphertext: 'old-ct-2', iv: 'iv2', protocol_version: 1, schema_version: 2, created_at: '2026-05-11T00:00:00.000Z' },
+        { id: 'entry:w1', ciphertext: 'old-ct-1', iv: 'iv1', protocol_version: 1, schema_version: 2, created_at: '2026-05-10T00:00:00.000Z' },
+        { id: 'entry:i1', ciphertext: 'old-ct-2', iv: 'iv2', protocol_version: 1, schema_version: 2, created_at: '2026-05-11T00:00:00.000Z' },
       ],
       error: null,
     });
     // decrypt(old) → envelope; encrypt(new) → fresh ciphertext.
-    h.decryptImpl.mockResolvedValue({ aggregate: 'weight', op: 'upsert', record: { id: 'x' } });
+    h.decryptImpl.mockResolvedValue({ aggregate: 'entry', op: 'upsert', record: { id: 'x' } });
     h.encryptImpl.mockResolvedValue({ ciphertext: 'new-ct', iv: 'new-iv' });
 
     const converted = await reEncryptServerRows({ oldDek: 'OLD', oldVersion: 1, newDek: 'NEW', newVersion: 2 });
@@ -825,7 +825,7 @@ describe('reEncryptServerRows — server-side key rotation', () => {
     expect(upTable).toBe('sync_changes_encrypted');
     expect(opts).toEqual({ onConflict: 'user_id,id' });
     expect((rows as Array<Record<string, unknown>>)[0]).toMatchObject({
-      id: 'weight:w1',
+      id: 'entry:w1',
       user_id: 'user-1',
       ciphertext: 'new-ct',
       iv: 'new-iv',

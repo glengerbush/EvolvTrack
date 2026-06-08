@@ -3,9 +3,8 @@ import { iso } from '../../test/iso';
 import {
   cleanOptionalString,
   cleanString,
-  makeInjectionEntry,
+  makeHealthEntry,
   makePrescription,
-  makeWeightEntry,
   mapObjectByNormalizedHeaders,
   mergeWarnings,
   normalizeHeader,
@@ -293,9 +292,9 @@ describe('round', () => {
   });
 });
 
-describe('makeWeightEntry', () => {
+describe('makeHealthEntry — weigh-in fields', () => {
   it('fills defaults and preserves provided fields', () => {
-    const entry = makeWeightEntry({
+    const entry = makeHealthEntry({
       date: iso('2026-05-10'),
       weightLbs: 180,
       wellness: 5,
@@ -308,22 +307,23 @@ describe('makeWeightEntry', () => {
     expect(entry.wellness).toBe(5);
     expect(entry.symptoms).toEqual(['nausea']);
     expect(entry.notes).toBe('felt fine');
+    expect(entry.amountMg).toBeUndefined();
     expect(entry.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(entry.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('keeps a caller-provided id', () => {
-    const entry = makeWeightEntry({ id: 'fixed-id', date: iso('2026-05-10') });
+    const entry = makeHealthEntry({ id: 'fixed-id', date: iso('2026-05-10') });
     expect(entry.id).toBe('fixed-id');
   });
 
   it('defaults symptoms to []', () => {
-    const entry = makeWeightEntry({ date: iso('2026-05-10') });
+    const entry = makeHealthEntry({ date: iso('2026-05-10') });
     expect(entry.symptoms).toEqual([]);
   });
 
   it('parses createdAt / updatedAt overrides', () => {
-    const entry = makeWeightEntry({
+    const entry = makeHealthEntry({
       date: iso('2026-05-10'),
       createdAt: '2026-04-01T00:00:00Z',
       updatedAt: '2026-04-02T00:00:00Z',
@@ -333,9 +333,9 @@ describe('makeWeightEntry', () => {
   });
 });
 
-describe('makeInjectionEntry', () => {
+describe('makeHealthEntry — dose fields', () => {
   it('normalizes medication aliases and trims site', () => {
-    const entry = makeInjectionEntry({
+    const entry = makeHealthEntry({
       date: iso('2026-05-10'),
       amountMg: 5,
       medication: 'Ozempic',
@@ -347,25 +347,17 @@ describe('makeInjectionEntry', () => {
   });
 
   it('parses planned status from a string', () => {
-    const entry = makeInjectionEntry({
-      date: iso('2026-05-10'),
-      amountMg: 5,
-      planned: 'planned',
-    });
+    const entry = makeHealthEntry({ date: iso('2026-05-10'), amountMg: 5, planned: 'planned' });
     expect(entry.planned).toBe(true);
   });
 
   it('leaves planned undefined when unparseable', () => {
-    const entry = makeInjectionEntry({
-      date: iso('2026-05-10'),
-      amountMg: 5,
-      planned: 'maybe',
-    });
+    const entry = makeHealthEntry({ date: iso('2026-05-10'), amountMg: 5, planned: 'maybe' });
     expect(entry.planned).toBeUndefined();
   });
 
   it('parses confirmedAt to an ISO timestamp', () => {
-    const entry = makeInjectionEntry({
+    const entry = makeHealthEntry({
       date: iso('2026-05-10'),
       amountMg: 5,
       confirmedAt: '2026-05-10T08:00:00Z',
@@ -374,12 +366,15 @@ describe('makeInjectionEntry', () => {
   });
 
   it('defaults medication to empty string when unrecognized', () => {
-    const entry = makeInjectionEntry({
-      date: iso('2026-05-10'),
-      amountMg: 5,
-      medication: 'Aspirin',
-    });
+    const entry = makeHealthEntry({ date: iso('2026-05-10'), amountMg: 5, medication: 'Aspirin' });
     expect(entry.medication).toBe('');
+  });
+
+  it('leaves dose fields unset for a weigh-in-only row', () => {
+    const entry = makeHealthEntry({ date: iso('2026-05-10'), weightLbs: 180 });
+    expect(entry.amountMg).toBeUndefined();
+    expect(entry.medication).toBeUndefined();
+    expect(entry.site).toBeUndefined();
   });
 });
 
