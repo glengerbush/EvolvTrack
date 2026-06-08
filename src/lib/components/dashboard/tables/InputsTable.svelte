@@ -4,9 +4,15 @@
   import CustomPicker from '$lib/components/dashboard/tables/CustomPicker.svelte';
   import MultiPicker from '$lib/components/dashboard/tables/MultiPicker.svelte';
   import DateInput from '$lib/components/dashboard/tables/DateInput.svelte';
+  import DoseVialPicker from '$lib/components/dashboard/tables/DoseVialPicker.svelte';
+  import ConfirmDialog from '$lib/components/dashboard/tables/ConfirmDialog.svelte';
+  import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
+  import SaveIcon from '$lib/components/icons/SaveIcon.svelte';
+  import TrashIcon from '$lib/components/icons/TrashIcon.svelte';
+  import { isMobile } from '$lib/stores/viewport';
   import type { HealthInputRow, HealthSystemAmount } from '$lib/stores/healthTypes';
   import { weightUnit, displayWeight, toStoredLbs } from '$lib/stores/unitStore';
-  import { medicationRows } from '$lib/stores/medicationStore';
+  import { autoVialByEntryId, medicationRows, vialByEntryId } from '$lib/stores/medicationStore';
   import {
     addSymptomOption,
     removeSymptomOption,
@@ -29,12 +35,9 @@
     type SavedHealthInputRow,
   } from '$lib/domain/healthInputs';
   import {
-    deleteWeight,
-    deleteInjection,
-    getAllInjections,
-    getAllWeights,
-    updateInjection,
-    updateWeight,
+    deleteEntry,
+    getAllEntries,
+    updateEntry,
   } from '$lib/domain/repo';
   import {
     WELLNESS_SCORE_MAX,
@@ -51,7 +54,18 @@
     recalculateDerived as recalculateDerivedPure,
     type RecalcScope,
   } from '$lib/utils/healthRowDerived';
-  import type { HealthColKey, InjectionEntry, IsoDate, Medication, WeightEntry } from '$lib/domain/types';
+  import type { HealthColKey, HealthEntry, IsoDate, Medication } from '$lib/domain/types';
+  import {
+    colIndicator as computeColIndicator,
+    mergeColumnOrder as mergeColumnOrderShared,
+    reorderVisible,
+    sanitizeHidden,
+  } from '$lib/grid/columnReorder';
+  import {
+    buildPrefix,
+    computeVisibleRange,
+    indexAtOffset as indexAtOffsetShared,
+  } from '$lib/grid/virtualize';
 
   type ColumnKey = HealthColKey;
   type ManagedOptionKind = 'symptom' | 'shotLocation';
@@ -65,14 +79,8 @@
     draftId?: string;
   };
 
-  type PersistableInputRow = {
-    row: EditableInputRow;
-    tableIndex: number;
-  };
-
   type PersistedHealthRecords = {
-    weights: WeightEntry[];
-    injections: InjectionEntry[];
+    entries: HealthEntry[];
   };
 
   type OptionDeleteRequest = {
@@ -83,26 +91,13 @@
 
   let {
     rows = [],
-    isEditing = false,
     isSettingsOpen = false,
     addRowSignal = 0,
-    resetSignal = 0,
-    saveSignal = 0,
-    discardSignal = 0,
-    onSaveEdits,
-    onDraftRowsChange,
-    onUnsavedChangesChange,
   }: {
     rows?: HealthInputRow[];
-    isEditing?: boolean;
+    /** Gear toggle: opens the column/option managers and the trash-can gutter. */
     isSettingsOpen?: boolean;
     addRowSignal?: number;
-    resetSignal?: number;
-    saveSignal?: number;
-    discardSignal?: number;
-    onSaveEdits?: () => void;
-    onDraftRowsChange?: (hasDraftRows: boolean) => void;
-    onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
   } = $props();
 
   const DEFAULT_COL_ORDER: ColumnKey[] = ['day', 'date', 'weight', 'wellness', 'symptoms', 'system', 'loss', 'dose', 'shotLocation', 'notes'];
@@ -125,29 +120,18 @@
   let colDragoverIndex = $state<number | null>(null);
   let colKbIndex = $state<number | null>(null);
   let announcement = $state('');
-  const columnSettingsOpen = $derived(isEditing && isSettingsOpen);
+  // Single-mode: the gear opens settings (column reorder/hide + option managers)
+  // and reveals the per-row trash-can gutter. No longer tied to an edit mode.
+  const columnSettingsOpen = $derived(isSettingsOpen);
 
-  const colIndicator = $derived.by((): { col: number; side: 'left' | 'right' } | null => {
-    if (colDragIndex === null || colDragoverIndex === null) return null;
-    if (colDragIndex === colDragoverIndex) return null;
-    if (colDragIndex > colDragoverIndex) return { col: colDragoverIndex, side: 'left' };
-    const next = colDragoverIndex + 1;
-    return next < activeColumns.length ? { col: next, side: 'left' } : { col: colDragoverIndex, side: 'right' };
-  });
+  const colIndicator = $derived.by(() =>
+    computeColIndicator(colDragIndex, colDragoverIndex, activeColumns.length),
+  );
 
   function reorderColumns(from: number, to: number) {
     if (!columnSettingsOpen) return;
     if (from === to) return;
-    const visibleKeys = columnOrder.filter((key) => !hiddenColumns.has(key));
-    if (!visibleKeys[from] || !visibleKeys[to]) return;
-
-    const [moved] = visibleKeys.splice(from, 1);
-    visibleKeys.splice(to, 0, moved);
-
-    let visibleIndex = 0;
-    columnOrder = columnOrder.map((key) =>
-      hiddenColumns.has(key) ? key : visibleKeys[visibleIndex++],
-    );
+    columnOrder = reorderVisible(columnOrder, (key) => hiddenColumns.has(key), from, to);
     persistColumnSettings();
   }
 
@@ -230,34 +214,13 @@
     return Number.isFinite(dose) && dose > 0 && !row.medication;
   }
 
-function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
-    const validKeys = new Set<ColumnKey>(DEFAULT_COL_ORDER);
-    const merged = (savedOrder ?? []).filter((key): key is ColumnKey => validKeys.has(key as ColumnKey));
-
-    for (const key of DEFAULT_COL_ORDER) {
-      if (merged.includes(key)) continue;
-
-      const defaultIndex = DEFAULT_COL_ORDER.indexOf(key);
-      const previousKey = [...DEFAULT_COL_ORDER.slice(0, defaultIndex)]
-        .reverse()
-        .find((candidate) => merged.includes(candidate));
-
-      if (previousKey) {
-        merged.splice(merged.indexOf(previousKey) + 1, 0, key);
-      } else {
-        merged.unshift(key);
-      }
-    }
-
-    return merged;
+  function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
+    return mergeColumnOrderShared(savedOrder, DEFAULT_COL_ORDER);
   }
 
   function applyHiddenColumnSettings(target: SvelteSet<ColumnKey>, savedHidden: string[] | undefined) {
-    const validKeys = new Set<ColumnKey>(DEFAULT_COL_ORDER);
     target.clear();
-    for (const key of savedHidden ?? []) {
-      if (validKeys.has(key as ColumnKey)) target.add(key as ColumnKey);
-    }
+    for (const key of sanitizeHidden(savedHidden, DEFAULT_COL_ORDER)) target.add(key);
   }
 
   let colSettingsLoaded = $state(false);
@@ -319,35 +282,22 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   let tableRows = $state.raw<EditableInputRow[]>(getInitialTableRows());
   let draftBaseTableRows = $state.raw<EditableInputRow[]>(getInitialTableRows());
   let syncedRowsProp = getInitialRowsProp();
-  // While editing/saving, the saved snapshot isn't displayed (see displayedRows),
-  // so skip the heavy PK recompute and avoid taking a dependency on `rows`.
-  const savedTableRows = $derived.by<EditableInputRow[]>(() =>
-    isEditing ? [] : recalculateDerived(rows.map(cloneRow)),
-  );
-  const displayedRows = $derived.by(() =>
-    isEditing ? tableRows : [...tableRows.filter(isDraftRow), ...savedTableRows],
+  // Single always-editable grid: `tableRows` is the live source of truth.
+  // Incoming store updates are reconciled into it via syncRowsFromLiveQuery
+  // (skipped while the user has uncommitted local edits).
+  const displayedRows = $derived(tableRows);
+  // Indices (into displayedRows) of rows that currently show a due-action badge.
+  // Used to step the selector up/down between badges, skipping rows without one.
+  const dueRowIndices = $derived(
+    displayedRows.reduce<number[]>((acc, row, i) => {
+      if (isDueConfirmation(row)) acc.push(i);
+      return acc;
+    }, []),
   );
 
   // Keyed by stable row id — holds the raw typed string while the user is mid-entry
   // so we never clobber it with the lbs→display round-trip conversion on every keystroke.
   const weightDrafts = new SvelteMap<string, string>();
-
-  function commitWeightDrafts() {
-    if (weightDrafts.size === 0) return;
-    let earliestChangedDate: string | undefined;
-    const nextRows = tableRows.map((row, index) => {
-      const draft = weightDrafts.get(rowKey(row, index));
-      if (draft === undefined) return row;
-      const nextRow = cloneRow(row);
-      nextRow.weight = toStoredLbs(draft, $weightUnit);
-      if (nextRow.date && (earliestChangedDate === undefined || nextRow.date < earliestChangedDate)) {
-        earliestChangedDate = nextRow.date;
-      }
-      return nextRow;
-    });
-    tableRows = recalculateDerived(nextRows, false, earliestChangedDate, 'weight');
-    weightDrafts.clear();
-  }
 
   const shotLocationSelectOptions = $derived(['', ...$shotLocationOptions]);
   let newSymptomOption = $state('');
@@ -359,9 +309,569 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   let expandedDueId = $state<string | null>(null);
   const todayKey = $derived(localDateKey());
 
+  // ── Mobile per-card edit ───────────────────────────────────────────────────
+  // On phones (≤640px) the table re-flows to one card per row and the desktop
+  // keyboard-grid model is disabled entirely. Instead each card has its own Edit
+  // button: it opens THAT card (by row identity), reveals every field, and shows
+  // Save / Cancel / Delete. Edits are buffered (Cancel reverts from a snapshot;
+  // autosave is suppressed while a card is open) so only Save persists.
+  let mobileEditId = $state<string | null>(null);
+  let mobileEditSnapshot: EditableInputRow | null = null;
+  let rowDeleteRequest = $state<EditableInputRow | null>(null);
+  // True only while a mobile card is being edited — gates the autosave path so
+  // buffered edits don't persist until Save.
+  const mobileEditingActive = $derived($isMobile && mobileEditId !== null);
+  function isRowMobileEditing(row: EditableInputRow): boolean {
+    return $isMobile && mobileEditId !== null && rowIdentity(row) === mobileEditId;
+  }
+  function startMobileEdit(row: EditableInputRow) {
+    mobileEditId = rowIdentity(row) ?? null;
+    mobileEditSnapshot = mobileEditId ? cloneRow(row) : null;
+  }
+  function saveMobileEdit(row: EditableInputRow) {
+    // Clear edit state first so the autosave guard no longer suppresses the
+    // persist; `queueRowSaveFor` re-resolves the row by identity, so passing the
+    // (possibly stale after recalc) row object is safe.
+    mobileEditId = null;
+    mobileEditSnapshot = null;
+    queueRowSaveFor(row);
+  }
+  function cancelMobileEdit(row: EditableInputRow) {
+    const id = rowIdentity(row);
+    const snap = mobileEditSnapshot;
+    mobileEditId = null;
+    mobileEditSnapshot = null;
+    if (!snap) return;
+    weightDrafts.delete(rowKey(row, tableRows.findIndex((r) => rowIdentity(r) === id)));
+    tableRows = recalculateDerived(
+      tableRows.map((r) => (rowIdentity(r) === id ? snap : r)),
+      true,
+      snap.date || undefined,
+    );
+  }
+
+  // ── Spreadsheet selection + Excel-style two-state editing ──────────────────
+  // A cell is either *selected* (arrow keys move between cells; Enter / F2 /
+  // typing begins editing) or *editing* (its control is focused; Enter / Tab
+  // commit & move, Esc cancels). `selRow` is an absolute index into
+  // displayedRows (= tableRows); `selCol` indexes activeColumns.
+  let selRow = $state<number | null>(null);
+  let selCol = $state<number | null>(null);
+  let editing = $state(false);
+  // The vial-attribution chip lives inside the dose cell but is its own selector
+  // stop, immediately left of the dose number. When `selVial` is true the
+  // selection sits on that chip (selCol points at the dose column); the dose
+  // <td> still holds keyboard focus, but its edit ring is suppressed and the
+  // chip is highlighted instead.
+  let selVial = $state(false);
+  // The due-action badge sits left of the leftmost cell, on rows that have one.
+  // `selDue` puts the selection on it; `duePanelNav` tracks which panel button
+  // (Taken/Skip) is highlighted while the confirm panel is open via keyboard.
+  let selDue = $state(false);
+  let duePanelNav = $state<'taken' | 'skipped' | null>(null);
+  let editSeed: string | null = null;
+  let editSnapshotRow: EditableInputRow | null = null;
+
+  // Computed/read-only columns: selectable but never editable. Picker columns
+  // render their dropdown control inline (always look like a dropdown); the rest
+  // are two-state text cells (plain text until clicked/typed). Date is two-state
+  // (formatted text → date input).
+  const READONLY_COLS = new Set<ColumnKey>(['day', 'system', 'loss']);
+  const PICKER_COLS = new Set<ColumnKey>(['symptoms', 'shotLocation']);
+  function isEditableColumn(key: ColumnKey): boolean {
+    return !READONLY_COLS.has(key);
+  }
+  function isTextColumn(key: ColumnKey): boolean {
+    return isEditableColumn(key) && !PICKER_COLS.has(key);
+  }
+  // The cell that holds keyboard focus (drives tabindex / focus / empty-cell).
+  function isSelected(r: number, c: number): boolean {
+    return selRow === r && selCol === c;
+  }
+  // The cell that shows the selection ring — same as focus, except when the
+  // selection is on the vial chip (then the chip is highlighted, not the cell).
+  function isRingSelected(r: number, c: number): boolean {
+    return selRow === r && selCol === c && !selVial && !selDue;
+  }
+  function isVialSelected(r: number): boolean {
+    return selVial && selRow === r;
+  }
+  function isDueSelected(r: number): boolean {
+    return selDue && selRow === r;
+  }
+  function isCellEditing(r: number, c: number): boolean {
+    return editing && selRow === r && selCol === c && !selVial;
+  }
+
+  function cellRef(r: number, c: number): HTMLElement | null {
+    return tableEl?.querySelector<HTMLElement>(`td[data-cell="${r}-${c}"]`) ?? null;
+  }
+
+  // Keep the DOM focus in step with the selection/edit state. The selected row
+  // is, by construction, within the rendered virtualization window.
+  $effect(() => {
+    // The due-action badge manages its own focus (it lives outside the cell grid).
+    if (selDue) return;
+    if (selRow === null || selCol === null) return;
+    const r = selRow;
+    const c = selCol;
+    const ed = editing;
+    void tick().then(() => {
+      const cell = cellRef(r, c);
+      if (!cell) return;
+      // Only move focus when EDITING starts (focus the inline editor). Cell
+      // focus for plain navigation is done explicitly by moveSelection/commit so
+      // we never steal focus back when the user tabs away from the grid.
+      if (!ed) return;
+      const ctrl = cell.querySelector<HTMLElement>('input, textarea');
+      // No text editor in the cell (e.g. the symptoms multi-select / vial
+      // picker) → leave focus management to that control.
+      if (!ctrl) return;
+      // preventScroll: the user is already looking at this cell (they clicked
+      // or arrowed to it) — focusing the editor must not snap the window.
+      ctrl.focus({ preventScroll: true });
+      if (ctrl instanceof HTMLInputElement && editSeed === null && ctrl.type !== 'date') {
+        const len = ctrl.value.length;
+        try { ctrl.setSelectionRange(len, len); } catch { /* number inputs reject */ }
+      }
+    });
+  });
+
+  // Focus the active cell's <td> (preventScroll so it never fights an explicit
+  // scroll). Used by keyboard navigation and commit — NOT reactively, so tabbing
+  // away from the grid is never undone.
+  function focusSelectedCell() {
+    void tick().then(() => {
+      if (selRow === null || selCol === null) return;
+      cellRef(selRow, selCol)?.focus({ preventScroll: true });
+    });
+  }
+
+  function selectCell(r: number, c: number, startEdit = false) {
+    const key = activeColumns[c]?.key;
+    selRow = r;
+    selCol = c;
+    selVial = false;
+    selDue = false;
+    const canEdit = !!key && isTextColumn(key);
+    editing = startEdit && canEdit;
+    editSeed = null;
+    editSnapshotRow = editing ? cloneRow(tableRows[r]) : null;
+  }
+
+  // Put the selection on the vial chip (the dose cell's sub-stop). `open` opens
+  // the menu immediately — used for a mouse click on the chip; arrow-key landing
+  // leaves it closed until Enter.
+  function setVialSelection(r: number, open = false) {
+    if (doseColIndex < 0) return;
+    selRow = r;
+    selCol = doseColIndex;
+    selVial = true;
+    editing = open;
+    editSeed = null;
+    editSnapshotRow = null;
+  }
+
+  function beginEdit(seed: string | null = null) {
+    if (selRow === null || selCol === null) return;
+    if (selVial) {
+      // Open the vial picker (it manages its own option focus via forceOpen).
+      editing = true;
+      return;
+    }
+    const key = activeColumns[selCol]?.key;
+    if (!key) return;
+    if (PICKER_COLS.has(key)) {
+      // Symptoms + shot location open their menu via forceOpen (isCellEditing)
+      // and manage their own option focus — a single Enter opens, arrows/space/
+      // enter navigate and select, Esc/select returns focus to the cell.
+      editing = true;
+      return;
+    }
+    if (!isTextColumn(key)) return;
+    editSnapshotRow = cloneRow(tableRows[selRow]);
+    editSeed = seed;
+    if (seed !== null) {
+      // Weight rides a display-string draft buffer (so the lbs round-trip never
+      // clobbers mid-typing); every other text cell seeds straight in.
+      if (key === 'weight') weightDrafts.set(rowKey(tableRows[selRow], selRow), seed);
+      else updateCell(selRow, key, seed);
+    }
+    editing = true;
+  }
+
+  function cancelEdit() {
+    if (selRow !== null && editSnapshotRow) {
+      const r = selRow;
+      const snap = editSnapshotRow;
+      weightDrafts.delete(rowKey(tableRows[r], r));
+      tableRows = recalculateDerived(
+        tableRows.map((row, i) => (i === r ? snap : row)),
+        true,
+        snap.date || undefined,
+      );
+    }
+    editSeed = null;
+    editSnapshotRow = null;
+    editing = false;
+    focusSelectedCell();
+  }
+
+  function moveSelection(dr: number, dc: number) {
+    if (selRow === null || selCol === null) {
+      selectCell(0, 0);
+      return;
+    }
+
+    // ── On the due-action badge ──────────────────────────────────────────────
+    if (selDue) {
+      if (dr !== 0) {
+        // Up/down jumps to the prev/next row that has a badge (skipping the
+        // rest), however far away it is.
+        const cur = dueRowIndices.indexOf(selRow);
+        const ni = cur + (dr > 0 ? 1 : -1);
+        if (cur < 0 || ni < 0 || ni >= dueRowIndices.length) return;
+        const target = dueRowIndices[ni];
+        selRow = target;
+        selCol = 0;
+        void bringRowIntoView(target).then(() => focusDueButton(target));
+      } else if (dc > 0) {
+        // Right → leave the badge for the leftmost cell of the same row.
+        selDue = false;
+        selectCell(selRow, 0);
+        void tick().then(() => {
+          if (selRow === null) return;
+          const cell = cellRef(selRow, 0);
+          if (cell) scrollCellIntoView(cell);
+        });
+      }
+      // Left → clamp (nothing is further left than the badge).
+      return;
+    }
+
+    const maxRow = Math.max(0, displayedRows.length - 1);
+    const maxCol = Math.max(0, activeColumns.length - 1);
+    const hasVialStop = doseColIndex >= 0;
+
+    if (dr !== 0) {
+      // Vertical: keep the column (and the vial sub-stop), change row.
+      const r = Math.min(Math.max(selRow + dr, 0), maxRow);
+      if (selVial) setVialSelection(r);
+      else selectCell(r, selCol);
+    } else if (dc > 0) {
+      // Rightward: … [col-left-of-dose] → [VIAL] → [dose number] → …
+      if (selVial) selectCell(selRow, doseColIndex);
+      else if (hasVialStop && selCol === doseColIndex - 1) setVialSelection(selRow);
+      else selectCell(selRow, Math.min(selCol + 1, maxCol));
+    } else if (dc < 0) {
+      // Leftward: badge (if any) sits left of the leftmost cell; then vial; etc.
+      if (selVial) {
+        if (doseColIndex - 1 < 0) return; // vial is the leftmost stop; clamp
+        selectCell(selRow, doseColIndex - 1);
+      } else if (hasVialStop && selCol === doseColIndex) {
+        setVialSelection(selRow);
+      } else if (selCol === 0 && dueRowIndices.includes(selRow)) {
+        setDueSelection(selRow);
+        return; // badge manages its own focus/scroll
+      } else {
+        selectCell(selRow, Math.max(selCol - 1, 0));
+      }
+    }
+
+    // Arrow navigation explicitly focuses the target cell and scrolls it into
+    // view (the focus effect is editor-only now, and never auto-scrolls). Done
+    // manually rather than scrollIntoView so we can keep the row clear of the
+    // page's sticky header when going up.
+    void tick().then(() => {
+      if (selRow === null || selCol === null) return;
+      const cell = cellRef(selRow, selCol);
+      if (!cell) return;
+      cell.focus({ preventScroll: true });
+      scrollCellIntoView(cell);
+    });
+  }
+
+  // Scroll just enough to reveal a cell, leaving room above for the sticky
+  // page header (the dashboard tab bar) — otherwise arrowing up parks the row
+  // behind it. A no-op when the cell is already fully visible.
+  function scrollCellIntoView(cell: HTMLElement) {
+    const bar = document.querySelector('.tabbar');
+    const barRect = bar?.getBoundingClientRect();
+    const safeTop = barRect && barRect.top <= 1 ? barRect.bottom : 0;
+    const rect = cell.getBoundingClientRect();
+    if (rect.top < safeTop) {
+      window.scrollBy({ top: rect.top - safeTop, left: 0, behavior: 'auto' });
+    } else if (rect.bottom > window.innerHeight) {
+      window.scrollBy({ top: rect.bottom - window.innerHeight, left: 0, behavior: 'auto' });
+    }
+  }
+
+  // Commit the current edit: persist, exit edit mode, and re-sort by date so a
+  // changed date reorders immediately. The selection stays on the SAME row
+  // (tracked by identity) — it does NOT move — and the window scrolls to keep
+  // that row visually put. Arrow keys can then move the selector again.
+  async function commitEdit(): Promise<void> {
+    if (selRow === null || selCol === null) {
+      editing = false;
+      return;
+    }
+    const r = selRow;
+    const c = selCol;
+    const id = rowIdentity(tableRows[r]);
+    const beforeTop = cellRef(r, c)?.getBoundingClientRect().top ?? null;
+
+    editing = false;
+    editSeed = null;
+    editSnapshotRow = null;
+    if (id) queueRowSave(r);
+
+    // Re-sort now (date order) instead of waiting for the async save round-trip.
+    tableRows = recalculateDerived(tableRows.map(cloneRow), false);
+    const newIndex = id ? tableRows.findIndex((row) => rowIdentity(row) === id) : r;
+    selRow = newIndex >= 0 ? newIndex : Math.min(r, tableRows.length - 1);
+
+    if (beforeTop === null || selRow === null || selCol === null) return;
+
+    // Suspend the scroll handler's own anchor compensation while we drive the
+    // scroll ourselves, so it doesn't fight the follow.
+    suppressScrollSettle = true;
+    isUserScrolling = true;
+
+    // The row may have re-sorted far outside the rendered window. Estimate its
+    // document position from the prefix-offset table and jump there so the row
+    // renders, landing it at its previous on-screen position. (Heights for
+    // far rows are estimates; the fine-correct below fixes residual error once
+    // the real row is rendered.)
+    ensureLen(displayedRows.length);
+    rebuildPrefix();
+    const tbodyDocTop = tbodyTop() + window.scrollY;
+    const target = tbodyDocTop + prefix[selRow] - beforeTop;
+    window.scrollTo({ top: Math.max(0, target), left: 0, behavior: 'auto' });
+
+    await tick();
+    recomputeVisibleRange();
+    await tick();
+
+    // Fine-correct using the now-rendered cell's real position.
+    const cell = cellRef(selRow, selCol);
+    if (cell) {
+      const afterTop = cell.getBoundingClientRect().top;
+      if (Math.abs(afterTop - beforeTop) > 0.5) {
+        window.scrollBy({ top: afterTop - beforeTop, left: 0, behavior: 'auto' });
+      }
+      cell.focus({ preventScroll: true });
+    }
+
+    // Release after the scrolls' events have settled so a later genuine scroll
+    // re-arms normally.
+    requestAnimationFrame(() => {
+      isUserScrolling = false;
+      suppressScrollSettle = false;
+    });
+  }
+
+  function isPrintableKey(e: KeyboardEvent): boolean {
+    return e.key.length === 1 && !e.altKey && !e.ctrlKey && !e.metaKey;
+  }
+
+  // Return focus from an inner control (dropdown / input) back to the cell, so
+  // arrow-key grid navigation resumes.
+  function exitToCell(r: number, c: number) {
+    editing = false;
+    selVial = false;
+    selRow = r;
+    selCol = c;
+    void tick().then(() => cellRef(r, c)?.focus());
+  }
+
+  // Close the vial picker but keep the selection on the vial chip (so it stays
+  // highlighted and arrow keys resume from there). Focus returns to the dose td.
+  function exitToVial(r: number) {
+    editing = false;
+    selRow = r;
+    selCol = doseColIndex;
+    selVial = true;
+    void tick().then(() => cellRef(r, doseColIndex)?.focus());
+  }
+
+  function cellKeydown(e: KeyboardEvent, r: number, c: number) {
+    // Only navigate when the cell itself holds focus. Once focus is inside an
+    // inner control (text input, date input, or an open dropdown), that control
+    // owns the arrow / Enter keys, so the cell must not steal them — except
+    // Escape, which hands focus back to the cell for grid navigation.
+    if (e.target !== e.currentTarget) {
+      if (e.key === 'Escape') exitToCell(r, c);
+      return;
+    }
+    // The grid was tabbed into with nothing active yet — adopt the focused cell
+    // so the first key acts on it.
+    if (selRow === null) {
+      selRow = r;
+      selCol = c;
+    }
+    switch (e.key) {
+      // Tab / Shift+Tab are deliberately NOT handled — they fall through to the
+      // browser so focus moves to the next/previous element on the page.
+      case 'ArrowDown': e.preventDefault(); moveSelection(1, 0); return;
+      case 'ArrowUp': e.preventDefault(); moveSelection(-1, 0); return;
+      case 'ArrowLeft': e.preventDefault(); moveSelection(0, -1); return;
+      case 'ArrowRight': e.preventDefault(); moveSelection(0, 1); return;
+      case 'Enter':
+      case 'F2': e.preventDefault(); beginEdit(); return;
+      case 'Escape': return;
+      case 'Delete':
+      case 'Backspace': {
+        if (selVial) { e.preventDefault(); clearVialOverride(r); return; }
+        const key = activeColumns[c]?.key;
+        if (key && isEditableColumn(key)) { e.preventDefault(); clearCell(r, key); }
+        return;
+      }
+      default:
+        // On the vial sub-stop, printable keys don't seed a dose value.
+        if (!selVial && isPrintableKey(e)) { e.preventDefault(); beginEdit(e.key); }
+    }
+  }
+
+  // Shared by every text editor incl. the notes textarea. Plain Enter commits
+  // in place (for notes too — so Enter saves rather than inserting a newline);
+  // Shift+Enter is left to the browser (newline in a textarea, no-op elsewhere).
+  // Esc cancels. Tab is left to the browser so focus moves out of the grid
+  // normally (the editor's blur commits + stops editing). stopPropagation so the
+  // committed key doesn't bubble to cellKeydown and re-enter edit mode.
+  function editorKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      e.stopPropagation();
+      void commitEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelEdit();
+    }
+  }
+
+  // An editor lost focus (tab/click away): persist and leave edit mode, but
+  // don't pull focus back — let it land wherever the user sent it.
+  function editorBlur(row: EditableInputRow) {
+    editing = false;
+    queueRowSaveFor(row);
+  }
+
+  function clearCell(r: number, key: ColumnKey) {
+    if (key === 'symptoms') updateCell(r, 'symptoms', []);
+    else if (key === 'dose') {
+      // Clearing a dose also drops its vial override / medication attribution.
+      tableRows = recalculateDerived(
+        tableRows.map((row, i) => (i === r ? { ...cloneRow(row), dose: '', prescriptionId: undefined } : row)),
+        true,
+        tableRows[r]?.date || undefined,
+        'pk',
+      );
+    } else updateCell(r, key, '');
+    queueRowSave(r);
+  }
+
+  // ── Auto-save ──────────────────────────────────────────────────────────────
+  // Persist a single row on commit (blur / Enter / Tab / picker select). Saves
+  // are serialized through one promise chain and re-resolve the row by identity,
+  // so a draft never double-inserts even under rapid edits.
+  let pendingRowSave: Promise<void> = Promise.resolve();
+  function rowIdentity(row: EditableInputRow): string | undefined {
+    return row.draftId ?? row.entryId;
+  }
+  function queueRowSave(rowIndex: number) {
+    const row = tableRows[rowIndex];
+    if (row) queueRowSaveFor(row);
+  }
+  // Save by row identity, not index — blur handlers can fire after a commit has
+  // re-sorted the table, so the original render-time index may now point at a
+  // different row.
+  function queueRowSaveFor(row: EditableInputRow) {
+    // While a mobile card is open, edits are buffered — only its Save button
+    // persists (which clears mobileEditId first, so this guard then passes).
+    if (mobileEditingActive) return;
+    const id = rowIdentity(row);
+    if (!id) return;
+    pendingRowSave = pendingRowSave.catch(() => undefined).then(() => autosaveByIdentity(id));
+  }
+  async function autosaveByIdentity(id: string) {
+    const rowIndex = tableRows.findIndex((r) => rowIdentity(r) === id);
+    if (rowIndex < 0) return;
+    commitWeightDraftFor(rowIndex);
+    const freshIndex = tableRows.findIndex((r) => rowIdentity(r) === id);
+    if (freshIndex < 0) return;
+    const row = tableRows[freshIndex];
+    if (isDraftRow(row) && !hasPersistableData(row)) return; // empty draft: nothing to persist
+    isSavingRows = true;
+    try {
+      const confirmedAt = shouldConfirmEditedPlannedDose(row, freshIndex)
+        ? new Date().toISOString()
+        : undefined;
+      const saveInput = toSaveInputRow(normalizeWellnessRow(stripDraftMetadata(row)), confirmedAt);
+      const [saved] = await saveInputRows([saveInput], {
+        defaultMedication: defaultMedication as Medication | '',
+      });
+      const merged = mergeSavedInputRow(row, saved) as EditableInputRow;
+      tableRows = tableRows.map((r) => (rowIdentity(r) === id ? merged : r));
+      markRowsAsBaseline();
+    } catch (err) {
+      console.error('Failed to save row:', err);
+    } finally {
+      isSavingRows = false;
+    }
+  }
+
+  function commitWeightDraftFor(rowIndex: number) {
+    const row = tableRows[rowIndex];
+    if (!row) return;
+    const key = rowKey(row, rowIndex);
+    const draft = weightDrafts.get(key);
+    if (draft === undefined) return;
+    const next = cloneRow(row);
+    next.weight = toStoredLbs(draft, $weightUnit);
+    tableRows = recalculateDerived(
+      tableRows.map((r, i) => (i === rowIndex ? next : r)),
+      true,
+      next.date || undefined,
+      'weight',
+    );
+    weightDrafts.delete(key);
+  }
+
+  // ── Dose cell vial / drug selection ─────────────────────────────────────────
+  const vialOptions = $derived(
+    $medicationRows
+      .filter((m) => !m.archived && m.type)
+      .map((m) => ({ id: m.id, dbId: m.dbId, type: m.type as string })),
+  );
+  function pickVial(rowIndex: number, dbId: string, type: string) {
+    tableRows = recalculateDerived(
+      tableRows.map((r, i) =>
+        i === rowIndex ? { ...cloneRow(r), prescriptionId: dbId, medication: type } : r,
+      ),
+      true,
+      tableRows[rowIndex]?.date || undefined,
+      'pk',
+    );
+    queueRowSave(rowIndex);
+  }
+  function pickDrug(rowIndex: number, med: string) {
+    updateCell(rowIndex, 'medication', med);
+    queueRowSave(rowIndex);
+  }
+  function clearVialOverride(rowIndex: number) {
+    tableRows = recalculateDerived(
+      tableRows.map((r, i) => (i === rowIndex ? { ...cloneRow(r), prescriptionId: undefined } : r)),
+      true,
+      tableRows[rowIndex]?.date || undefined,
+      'pk',
+    );
+    queueRowSave(rowIndex);
+  }
+
   function isDueConfirmation(row: EditableInputRow): boolean {
     return (
-      !!row.injectionId &&
+      !!row.entryId &&
       row.dosePlanned === true &&
       !row.doseSkipped &&
       typeof row.date === 'string' &&
@@ -369,25 +879,25 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     );
   }
 
-  function patchRowById(rows: EditableInputRow[], injectionId: string, patch: Partial<HealthInputRow>): EditableInputRow[] {
-    return rows.map((row) => (row.injectionId === injectionId ? { ...cloneRow(row), ...patch } : row));
+  function patchRowById(rows: EditableInputRow[], entryId: string, patch: Partial<HealthInputRow>): EditableInputRow[] {
+    return rows.map((row) => (row.entryId === entryId ? { ...cloneRow(row), ...patch } : row));
   }
 
   async function applyDoseDecision(row: EditableInputRow, decision: 'taken' | 'skipped') {
-    if (!row.injectionId) return;
-    const id = row.injectionId;
+    if (!row.entryId) return;
+    const id = row.entryId;
     const patch: Partial<HealthInputRow> =
       decision === 'taken'
         ? { dosePlanned: false, doseSkipped: false, doseConfirmedAt: new Date().toISOString() }
         : { dosePlanned: false, doseSkipped: true, doseConfirmedAt: undefined };
 
-    const affectedDate = tableRows.find((r) => r.injectionId === id)?.date;
+    const affectedDate = tableRows.find((r) => r.entryId === id)?.date;
     tableRows = recalculateDerived(patchRowById(tableRows, id, patch), false, affectedDate, 'pk');
     draftBaseTableRows = patchRowById(draftBaseTableRows, id, patch);
     expandedDueId = null;
 
     try {
-      await updateInjection(id, {
+      await updateEntry(id, {
         planned: false,
         confirmedAt: decision === 'taken' ? patch.doseConfirmedAt : undefined,
         skipped: decision === 'skipped',
@@ -397,14 +907,174 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     }
   }
 
-  function toggleDuePanel(row: EditableInputRow) {
-    if (!row.injectionId) return;
-    expandedDueId = expandedDueId === row.injectionId ? null : row.injectionId;
+  // Mouse click on the badge: select it (so the keyboard model is consistent)
+  // and toggle the confirm panel open/closed.
+  function activateDueFromClick(r: number, row: EditableInputRow) {
+    selRow = r;
+    selCol = 0;
+    selVial = false;
+    selDue = true;
+    editing = false;
+    if (expandedDueId === row.entryId) {
+      expandedDueId = null;
+      duePanelNav = null;
+      focusDueButton(r);
+    } else {
+      openDuePanelKeyboard();
+    }
   }
 
-  function handleDuePanelKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && expandedDueId !== null) {
-      expandedDueId = null;
+  // ── Due-action badge: grid-selection + keyboard control ────────────────────
+  function setDueSelection(r: number) {
+    selRow = r;
+    selCol = 0;
+    selVial = false;
+    selDue = true;
+    editing = false;
+    focusDueButton(r);
+  }
+
+  function focusDueButton(r: number) {
+    void tick().then(() => {
+      inputsTableRegion
+        ?.querySelector<HTMLElement>(`.due-action-btn[data-due-row="${r}"]`)
+        ?.focus({ preventScroll: true });
+    });
+  }
+
+  // Reveal a row that may be far outside the rendered window, then settle it on
+  // screen. Mirrors commitEdit's prefix-estimate jump.
+  async function bringRowIntoView(rowIndex: number) {
+    let cell = cellRef(rowIndex, 0);
+    if (!cell) {
+      ensureLen(displayedRows.length);
+      rebuildPrefix();
+      const tbodyDocTop = tbodyTop() + window.scrollY;
+      const target = tbodyDocTop + prefix[rowIndex] - window.innerHeight / 2;
+      window.scrollTo({ top: Math.max(0, target), left: 0, behavior: 'auto' });
+      await tick();
+      recomputeVisibleRange();
+      await tick();
+      cell = cellRef(rowIndex, 0);
+    }
+    if (cell) scrollCellIntoView(cell);
+  }
+
+  function dueButtonKeydown(event: KeyboardEvent) {
+    switch (event.key) {
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        event.stopPropagation();
+        openDuePanelKeyboard();
+        return;
+      case 'ArrowRight':
+        event.preventDefault();
+        event.stopPropagation();
+        moveSelection(0, 1);
+        return;
+      case 'ArrowLeft':
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      case 'ArrowUp':
+        event.preventDefault();
+        event.stopPropagation();
+        moveSelection(-1, 0);
+        return;
+      case 'ArrowDown':
+        event.preventDefault();
+        event.stopPropagation();
+        moveSelection(1, 0);
+        return;
+    }
+  }
+
+  function openDuePanelKeyboard() {
+    if (selRow === null) return;
+    const row = displayedRows[selRow];
+    if (!row?.entryId) return;
+    expandedDueId = row.entryId;
+    duePanelNav = 'taken';
+    void tick().then(focusDuePanelButton);
+  }
+
+  function focusDuePanelButton() {
+    if (selRow === null) return;
+    const cls = duePanelNav === 'skipped' ? '.due-action-skip' : '.due-action-confirm';
+    inputsTableRegion
+      ?.querySelector<HTMLElement>(`.due-action-panel[data-due-row="${selRow}"] ${cls}`)
+      ?.focus({ preventScroll: true });
+  }
+
+  function duePanelKeydown(event: KeyboardEvent, row: EditableInputRow) {
+    switch (event.key) {
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        event.preventDefault();
+        event.stopPropagation();
+        duePanelNav = 'taken';
+        focusDuePanelButton();
+        return;
+      case 'ArrowRight':
+      case 'ArrowDown':
+        event.preventDefault();
+        event.stopPropagation();
+        duePanelNav = 'skipped';
+        focusDuePanelButton();
+        return;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        event.stopPropagation();
+        confirmDue(row, duePanelNav ?? 'taken');
+        return;
+      case 'Escape':
+      case 'Tab':
+        event.preventDefault();
+        event.stopPropagation();
+        closeDuePanelKeyboard();
+        return;
+    }
+  }
+
+  // Apply the decision then drop the selector back on the row's leftmost cell.
+  function confirmDue(row: EditableInputRow, decision: 'taken' | 'skipped') {
+    const r = selRow;
+    duePanelNav = null;
+    void applyDoseDecision(row, decision);
+    if (selDue && r !== null) {
+      selDue = false;
+      selectCell(r, 0);
+      void tick().then(() => cellRef(r, 0)?.focus({ preventScroll: true }));
+    }
+  }
+
+  // Close the panel but keep the badge selected (Esc from the panel).
+  function closeDuePanelKeyboard() {
+    expandedDueId = null;
+    duePanelNav = null;
+    if (selRow !== null) focusDueButton(selRow);
+  }
+
+  // Vertically center each (desktop) due badge on its row. The badge is absolute
+  // against `.inputs-table-region` to escape the scroll clip, so it can't use a
+  // cell-relative top:50% — we measure the row box and set top in px instead.
+  function positionDueBadges() {
+    if (!inputsTableRegion) return;
+    const wraps = inputsTableRegion.querySelectorAll<HTMLElement>('.due-action-wrap');
+    const desktop =
+      typeof window !== 'undefined' && window.matchMedia('(min-width: 641px)').matches;
+    if (!desktop) {
+      for (const wrap of wraps) wrap.style.top = '';
+      return;
+    }
+    const regionTop = inputsTableRegion.getBoundingClientRect().top;
+    for (const wrap of wraps) {
+      const cell = wrap.closest('td');
+      if (!cell) continue;
+      const rect = cell.getBoundingClientRect();
+      wrap.style.top = `${rect.top - regionTop + rect.height / 2}px`;
     }
   }
 
@@ -417,14 +1087,11 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
       if (wrap.contains(target)) return;
     }
     expandedDueId = null;
+    duePanelNav = null;
   }
 
   let nextDraftRowId = 0;
   let lastAddRowSignal = getInitialAddRowSignal();
-  let lastResetSignal = getInitialResetSignal();
-  let lastSaveSignal = getInitialSaveSignal();
-  let lastDiscardSignal = getInitialDiscardSignal();
-  let lastNotifiedUnsavedChanges = false;
   let lastDefaultMedication = '';
 
   $effect(() => {
@@ -442,7 +1109,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   $effect(() => {
     if (defaultMedication === lastDefaultMedication) return;
     lastDefaultMedication = defaultMedication;
-    if (!isEditing && !hasUnsavedChanges) {
+    if (!editing) {
       tableRows = recalculateDerived(tableRows.map(cloneRow));
     }
   });
@@ -456,56 +1123,22 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
   });
 
   $effect(() => {
-    if (resetSignal === lastResetSignal) return;
-    lastResetSignal = resetSignal;
-    resetTable();
-  });
-
-  $effect(() => {
     if (columnSettingsOpen) return;
     resetColumnInteractionState();
   });
 
   const visibleColumns = $derived(
-    (isEditing ? columns : savedColumns).filter((column) =>
-      !(isEditing ? hiddenColumns : savedHiddenColumns).has(column.key),
-    ),
+    columns.filter((column) => !hiddenColumns.has(column.key)),
   );
   const hiddenColumnOptions = $derived(columns.filter((column) => hiddenColumns.has(column.key)));
   const activeColumns = $derived(visibleColumns);
+  // Index of the dose column (the vial sub-stop sits just left of it).
+  const doseColIndex = $derived(activeColumns.findIndex((c) => c.key === 'dose'));
   const stretchColumnKey = $derived(
     activeColumns.some((column) => column.key === 'notes')
       ? 'notes'
       : activeColumns[activeColumns.length - 1]?.key,
   );
-  const hasUnsavedChanges = $derived.by(() => {
-    return (
-      weightDrafts.size > 0 ||
-      !rowsMatch(tableRowsWithCommittedWeightDrafts(), draftBaseTableRows)
-    );
-  });
-
-  $effect(() => {
-    if (saveSignal === lastSaveSignal) return;
-    lastSaveSignal = saveSignal;
-    void saveTableRows(true).then(() => {
-      if (isEditing) onSaveEdits?.();
-    });
-  });
-
-  $effect(() => {
-    if (discardSignal === lastDiscardSignal) return;
-    lastDiscardSignal = discardSignal;
-    discardTableChanges();
-  });
-
-  $effect(() => {
-    if (hasUnsavedChanges === lastNotifiedUnsavedChanges) return;
-    lastNotifiedUnsavedChanges = hasUnsavedChanges;
-    onDraftRowsChange?.(hasUnsavedChanges);
-    onUnsavedChangesChange?.(hasUnsavedChanges);
-  });
-
   const weightDecimals = $derived(
     columnDecimals(displayedRows.map((r) => lbsToDisplayNum(r.weight, $weightUnit)))
   );
@@ -571,9 +1204,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
 
   function rebuildPrefix() {
     const n = rowHeights.length;
-    if (prefix.length !== n + 1) prefix = new Array(n + 1);
-    prefix[0] = 0;
-    for (let i = 0; i < n; i += 1) prefix[i + 1] = prefix[i] + heightAt(i);
+    prefix = buildPrefix(Array.from({ length: n }, (_, i) => heightAt(i)));
   }
 
   function ensureLen(n: number) {
@@ -590,14 +1221,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
 
   // Largest index i in [0, n] with prefix[i] <= target (the row at that offset).
   function indexAtOffset(target: number): number {
-    let lo = 0;
-    let hi = rowHeights.length;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (prefix[mid] <= target) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
+    return indexAtOffsetShared(prefix, target, rowHeights.length);
   }
 
   function tbodyTop(): number {
@@ -609,29 +1233,20 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     if (!tableEl) return;
     const rowCount = displayedRows.length;
     ensureLen(rowCount);
-    if (rowCount === 0) {
-      firstVisibleIndex = 0;
-      lastVisibleIndex = 0;
-      topSpacerHeight = 0;
-      bottomSpacerHeight = 0;
-      return;
-    }
     // Offsets are measured from the tbody's content top (= row 0's top), which
     // already excludes the thead and accounts for the current top spacer.
     const top = tbodyTop();
-    const scrolledPast = Math.max(0, -top);
-    const bottomFromTop = Math.max(0, window.innerHeight - top);
-
-    let nextFirst = indexAtOffset(scrolledPast) - ROW_OVERSCAN;
-    if (nextFirst < 0) nextFirst = 0;
-    let nextLast = indexAtOffset(bottomFromTop) + ROW_OVERSCAN;
-    if (nextLast > rowCount - 1) nextLast = rowCount - 1;
-    if (nextLast < nextFirst) nextLast = nextFirst;
-
-    firstVisibleIndex = nextFirst;
-    lastVisibleIndex = nextLast;
-    topSpacerHeight = prefix[nextFirst];
-    bottomSpacerHeight = Math.max(0, prefix[rowCount] - prefix[nextLast + 1]);
+    const range = computeVisibleRange(
+      prefix,
+      rowCount,
+      Math.max(0, -top),
+      Math.max(0, window.innerHeight - top),
+      ROW_OVERSCAN,
+    );
+    firstVisibleIndex = range.first;
+    lastVisibleIndex = range.last;
+    topSpacerHeight = range.topSpacer;
+    bottomSpacerHeight = range.bottomSpacer;
   }
 
   // Measure the rendered (non-spacer) rows and fold their real heights into the
@@ -751,7 +1366,29 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
       window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
     }
     recomputeVisibleRange();
+    positionDueBadges();
   }
+
+  // Freeze vial attribution permanently. The moment a consuming dose has a
+  // FIFO-chosen vial (by table order) and no stored one, persist that single
+  // vial as the dose's `prescriptionId`. From then on the dose draws wholly from
+  // that one vial — reordering vials or editing the medications table never
+  // re-attributes it, and the remaining-mg math stays put. (Picking "Auto"
+  // clears the stored vial, which re-snaps to the current order and re-freezes.)
+  // Converges: once stored, a dose drops out of the auto map so the effect stops.
+  const freezingIds = new Set<string>();
+  $effect(() => {
+    const map = $autoVialByEntryId;
+    if (map.size === 0) return;
+    const toFreeze = [...map.entries()].filter(([id]) => !freezingIds.has(id));
+    if (toFreeze.length === 0) return;
+    for (const [id] of toFreeze) freezingIds.add(id);
+    void Promise.all(toFreeze.map(([id, dbId]) => updateEntry(id, { prescriptionId: dbId }))).finally(
+      () => {
+        for (const [id] of toFreeze) freezingIds.delete(id);
+      },
+    );
+  });
 
   // Resize the cache and recompute when rows are added/removed.
   $effect(() => {
@@ -759,6 +1396,13 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     if (!tableEl) return;
     ensureLen(displayedRowsLength);
     recomputeVisibleRange();
+  });
+
+  // Re-center the due badges whenever the rendered slice or its geometry shifts.
+  $effect(() => {
+    visibleRows;
+    topSpacerHeight;
+    void tick().then(positionDueBadges);
   });
 
   $effect(() => {
@@ -803,6 +1447,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
         }
         measureRenderedRows();
         recomputeVisibleRange();
+        positionDueBadges();
       });
     };
     // Also fires when the table goes 0 → real size (hidden tab becomes active).
@@ -827,7 +1472,7 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     firstVisibleIndex;
     lastVisibleIndex;
     displayedRowsLength;
-    isEditing;
+    editing;
     if (!tableEl) return;
     queueMicrotask(measureRenderedRows);
   });
@@ -871,16 +1516,21 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     const draft = createDraftRow();
     // The new row is empty — no derived field on any existing row changes.
     tableRows = recalculateDerived([draft, ...tableRows], true, draft.date || undefined, 'local');
+    // On mobile open the fresh card in edit mode so all fields are ready to fill.
+    if ($isMobile) startMobileEdit(draft);
   }
 
   async function deleteRow(row: EditableInputRow) {
     if (!isDraftRow(row)) {
       if (!confirm('Delete this row? This cannot be undone.')) return;
-      await Promise.all([
-        row.weightId ? deleteWeight(row.weightId) : Promise.resolve(),
-        row.injectionId ? deleteInjection(row.injectionId) : Promise.resolve(),
-      ]);
     }
+    await performDeleteRow(row);
+  }
+
+  // The destructive half of deleteRow, without the native confirm — the mobile
+  // per-card flow gates it behind the styled ConfirmDialog instead.
+  async function performDeleteRow(row: EditableInputRow) {
+    if (!isDraftRow(row) && row.entryId) await deleteEntry(row.entryId);
     tableRows = recalculateDerived(tableRows.filter((r) => r !== row));
   }
 
@@ -899,13 +1549,6 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
     draftBaseTableRows = nextSavedRows.map(cloneRow);
   }
 
-  function discardTableChanges() {
-    weightDrafts.clear();
-    const base = recalculateDerived(rows.map(cloneRow));
-    tableRows = base;
-    draftBaseTableRows = base.map(cloneRow);
-  }
-
   function getInitialTableRows(): EditableInputRow[] {
     return recalculateDerived(rows.map(cloneRow));
   }
@@ -916,18 +1559,6 @@ function mergeColumnOrder(savedOrder: string[] | undefined): ColumnKey[] {
 
   function getInitialAddRowSignal(): number {
     return addRowSignal;
-  }
-
-  function getInitialResetSignal(): number {
-    return resetSignal;
-  }
-
-  function getInitialSaveSignal(): number {
-    return saveSignal;
-  }
-
-  function getInitialDiscardSignal(): number {
-    return discardSignal;
   }
 
 function markRowsAsBaseline() {
@@ -971,7 +1602,7 @@ function markRowsAsBaseline() {
   }
 
   function rowKey(row: EditableInputRow, rowIndex: number): string {
-    return row.draftId ?? row.injectionId ?? row.weightId ?? `${row.date}-${rowIndex}`;
+    return row.draftId ?? row.entryId ?? `${row.date}-${rowIndex}`;
   }
 
   function rowBaseline(row: EditableInputRow, tableIndex: number): EditableInputRow | undefined {
@@ -987,7 +1618,7 @@ function markRowsAsBaseline() {
 
   function shouldConfirmEditedPlannedDose(row: EditableInputRow, tableIndex: number): boolean {
     return (
-      !!row.injectionId &&
+      !!row.entryId &&
       row.dosePlanned === true &&
       row.doseSkipped !== true &&
       !row.doseConfirmedAt &&
@@ -1002,8 +1633,7 @@ function markRowsAsBaseline() {
     const doseMg = row.dose ? parseFloat(row.dose) : undefined;
 
     return {
-      weightId: row.weightId,
-      injectionId: row.injectionId,
+      entryId: row.entryId,
       date: row.date,
       weightLbs,
       wellness,
@@ -1015,20 +1645,20 @@ function markRowsAsBaseline() {
       doseSkipped: row.doseSkipped,
       medication: row.medication as Medication | '',
       shotLocation: row.shotLocation,
+      prescriptionId: row.prescriptionId,
     };
   }
 
   function mergeSavedInputRow(row: HealthInputRow, saved: SavedHealthInputRow): HealthInputRow {
-    const nextRow = { ...row, weightId: saved.weightId, injectionId: saved.injectionId };
-
-    if (saved.injectionSaved) {
-      nextRow.medication = saved.medication ?? '';
-      nextRow.dosePlanned = saved.dosePlanned ?? false;
-      nextRow.doseConfirmedAt = saved.doseConfirmedAt;
-      nextRow.doseSkipped = saved.doseSkipped ?? false;
-    }
-
-    return nextRow;
+    return {
+      ...row,
+      entryId: saved.entryId,
+      medication: saved.medication ?? '',
+      dosePlanned: saved.dosePlanned ?? false,
+      doseConfirmedAt: saved.doseConfirmedAt,
+      doseSkipped: saved.doseSkipped ?? false,
+      prescriptionId: saved.prescriptionId,
+    };
   }
 
   function stripDraftMetadata(row: EditableInputRow): HealthInputRow {
@@ -1039,55 +1669,6 @@ function markRowsAsBaseline() {
   function normalizeWellnessRow<T extends HealthInputRow>(row: T): T {
     if (!row.wellness.trim()) return row;
     return { ...row, wellness: normalizeWellnessScoreInput(row.wellness) };
-  }
-
-  function getRowsToPersist(includeExistingRows: boolean): PersistableInputRow[] {
-    return tableRows.map((row, tableIndex) => ({ row, tableIndex })).filter(({ row, tableIndex }) => {
-      if (!isDraftRow(row)) return includeExistingRows && rowHasUserChanges(row, tableIndex);
-      return hasPersistableData(row);
-    });
-  }
-
-  async function persistRows(rowsToPersist: PersistableInputRow[]): Promise<HealthInputRow[]> {
-    const confirmationTimestamp = new Date().toISOString();
-    const saveEntries = rowsToPersist.map(({ row, tableIndex }) => ({
-      row: normalizeWellnessRow(stripDraftMetadata(row)),
-      confirmedAt: shouldConfirmEditedPlannedDose(row, tableIndex) ? confirmationTimestamp : undefined,
-    }));
-    const savedRows = await saveInputRows(
-      saveEntries.map((entry) => toSaveInputRow(entry.row, entry.confirmedAt)),
-      { defaultMedication: defaultMedication as Medication | '' },
-    );
-
-    return saveEntries.map((entry, index) => mergeSavedInputRow(entry.row, savedRows[index]));
-  }
-
-  async function saveTableRows(includeExistingRows = false) {
-    if (isSavingRows) return;
-    commitWeightDrafts();
-    const rowsToPersist = getRowsToPersist(includeExistingRows);
-    // Existing rows that aren't changing this save stay as-is. Empty drafts
-    // (not in rowsToPersist) are dropped, matching previous behavior.
-    const persistKeys = new Set(rowsToPersist.map(({ row, tableIndex }) => rowKey(row, tableIndex)));
-    const rowsToKeep = tableRows
-      .filter((row, idx) => !isDraftRow(row) && !persistKeys.has(rowKey(row, idx)))
-      .map(stripDraftMetadata);
-
-    isSavingRows = true;
-    try {
-      const persistedRows = await persistRows(rowsToPersist);
-      const earliestChangedDate = rowsToPersist.reduce<string | undefined>(
-        (min, { row }) => (min === undefined || row.date < min ? row.date : min),
-        undefined,
-      );
-      tableRows = recalculateDerived([...rowsToKeep, ...persistedRows], false, earliestChangedDate);
-      markRowsAsBaseline();
-    } catch (err) {
-      console.error('Failed to save row data:', err);
-    } finally {
-      isSavingRows = false;
-    }
-
   }
 
   // Thin wrapper around the pure helper so call sites don't have to thread
@@ -1131,14 +1712,8 @@ function markRowsAsBaseline() {
     void announce(`${columnLabel(column)} column restored.`);
   }
 
-  function isRowEditable(row: EditableInputRow): boolean {
-    return isEditing || isDraftRow(row);
-  }
-
-  // For the ≤640px card layout: a read-only row hides its empty fields so sparse
-  // days collapse to just what was logged. `day`/`date` always show (they're the
-  // card's identity). Editable rows never hide cells — every input stays
-  // reachable. Mirrors the empty checks used by each column's render branch.
+  // For the ≤640px card layout: an unselected cell hides its empty fields so
+  // sparse days collapse to just what was logged. `day`/`date` always show.
   function isCellEmpty(row: HealthInputRow, key: ColumnKey): boolean {
     switch (key) {
       case 'day':
@@ -1153,11 +1728,6 @@ function markRowsAsBaseline() {
     }
   }
 
-  function requestSaveRows() {
-    void saveTableRows(true).then(() => {
-      if (isEditing) onSaveEdits?.();
-    });
-  }
 
   function updateCell(index: number, key: ColumnKey, value: string | string[]) {
     const nextRows = [...tableRows];
@@ -1197,38 +1767,6 @@ function markRowsAsBaseline() {
     }
   }
 
-  function releaseActiveDiscreteControlFocus() {
-    const activeElement = document.activeElement;
-    if (
-      activeElement instanceof HTMLSelectElement ||
-      (activeElement instanceof HTMLInputElement && activeElement.type === 'date')
-    ) {
-      activeElement.blur();
-    }
-  }
-
-  function releaseDiscreteControlFocus(element: HTMLInputElement | HTMLSelectElement) {
-    const release = () => {
-      element.blur();
-      releaseActiveDiscreteControlFocus();
-    };
-
-    requestAnimationFrame(release);
-    setTimeout(release, 0);
-    setTimeout(release, 75);
-    setTimeout(release, 200);
-  }
-
-  function updateCellAndReleaseFocus(
-    index: number,
-    key: ColumnKey,
-    value: string,
-    element: HTMLInputElement | HTMLSelectElement,
-  ) {
-    updateCell(index, key, value);
-    releaseDiscreteControlFocus(element);
-  }
-
   function commitWellnessInput(index: number, value: string) {
     const wellness = normalizeWellnessScoreInput(value);
     updateCell(index, 'wellness', wellness);
@@ -1265,15 +1803,12 @@ function markRowsAsBaseline() {
     const countMatches = (values: string[] | undefined) =>
       (values ?? []).filter((value) => value === option).length;
 
-    return (
-      records.weights.reduce((count, weight) => count + countMatches(weight.symptoms), 0) +
-      records.injections.reduce((count, injection) => count + countMatches(injection.symptoms), 0)
-    );
+    return records.entries.reduce((count, entry) => count + countMatches(entry.symptoms), 0);
   }
 
   function countPersistedOptionRecords(records: PersistedHealthRecords, kind: ManagedOptionKind, option: string): number {
     if (kind === 'shotLocation') {
-      return records.injections.filter((injection) => injection.site === option).length;
+      return records.entries.filter((entry) => entry.site === option).length;
     }
 
     return countSymptomRecords(records, option);
@@ -1287,8 +1822,7 @@ function markRowsAsBaseline() {
   }
 
   async function readPersistedHealthRecords(): Promise<PersistedHealthRecords> {
-    const [weights, injections] = await Promise.all([getAllWeights(), getAllInjections()]);
-    return { weights, injections };
+    return { entries: await getAllEntries() };
   }
 
   function removeOptionFromRows(
@@ -1322,29 +1856,22 @@ function markRowsAsBaseline() {
   ): Promise<void> {
     if (kind === 'shotLocation') {
       await Promise.all(
-        records.injections
-          .filter((injection) => injection.site === option)
-          .map((injection) => updateInjection(injection.id, { site: '' })),
+        records.entries
+          .filter((entry) => entry.site === option)
+          .map((entry) => updateEntry(entry.id, { site: '' })),
       );
       return;
     }
 
-    await Promise.all([
-      ...records.weights
-        .filter((weight) => (weight.symptoms ?? []).includes(option))
-        .map((weight) =>
-          updateWeight(weight.id, {
-            symptoms: (weight.symptoms ?? []).filter((symptom) => symptom !== option),
+    await Promise.all(
+      records.entries
+        .filter((entry) => (entry.symptoms ?? []).includes(option))
+        .map((entry) =>
+          updateEntry(entry.id, {
+            symptoms: (entry.symptoms ?? []).filter((symptom) => symptom !== option),
           }),
         ),
-      ...records.injections
-        .filter((injection) => (injection.symptoms ?? []).includes(option))
-        .map((injection) =>
-          updateInjection(injection.id, {
-            symptoms: (injection.symptoms ?? []).filter((symptom) => symptom !== option),
-          }),
-        ),
-    ]);
+    );
   }
 
   async function requestRemoveOption(kind: ManagedOptionKind, option: string) {
@@ -1385,44 +1912,26 @@ function markRowsAsBaseline() {
     return resolveSymptomColor(symptom, $symptomColors);
   }
 
+  // Single-mode auto-save commits per cell (see editorKeydown / queueRowSave),
+  // so the document-level handler only closes the option-delete dialog and the
+  // due-dose confirmation popover on Escape.
   function handleInputCommitKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && optionDeleteRequest !== null) {
+    if (event.key !== 'Escape') return;
+    if (optionDeleteRequest !== null) {
       optionDeleteRequest = null;
-      return;
-    }
-
-    if (event.key === 'Escape' && expandedDueId !== null) {
+    } else if (expandedDueId !== null) {
       expandedDueId = null;
-      return;
     }
-
-    if (!(event.target instanceof Node) || !inputsTableRegion?.contains(event.target)) return;
-
-    if (
-      event.key !== 'Enter' ||
-      event.isComposing ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey
-    ) {
-      return;
-    }
-
-    if (!hasUnsavedChanges && !isEditing) return;
-
-    event.preventDefault();
-    requestSaveRows();
   }
 </script>
 
-<svelte:document onkeydown={handleInputCommitKeydown} onclick={handleDocumentClickForDuePanel} />
+<svelte:document onkeydown={$isMobile ? undefined : handleInputCommitKeydown} onclick={handleDocumentClickForDuePanel} />
 
 <div class="inputs-table-region" bind:this={inputsTableRegion}>
   {#if columnSettingsOpen}
     <section class="column-manager" aria-label="Column visibility and option settings">
       <div class="option-managers">
-        <fieldset>
+        <fieldset class="hidden-columns-fieldset">
           <legend class="hidden-columns-legend">
             <span>Hidden columns</span>
             <button
@@ -1521,6 +2030,22 @@ function markRowsAsBaseline() {
     </div>
   {/if}
 
+  {#if rowDeleteRequest}
+    <ConfirmDialog
+      title="Delete this row?"
+      message="This permanently removes this day's logged data. This cannot be undone."
+      confirmLabel="Delete"
+      onConfirm={() => {
+        const target = rowDeleteRequest;
+        rowDeleteRequest = null;
+        mobileEditId = null;
+        mobileEditSnapshot = null;
+        if (target) void performDeleteRow(target);
+      }}
+      onCancel={() => (rowDeleteRequest = null)}
+    />
+  {/if}
+
   {#snippet systemStack(row: HealthInputRow)}
     {#if row.systemAmounts.length}
       <div class="system-stack" aria-label={row.system.replace(/\n/g, ', ')}>
@@ -1543,7 +2068,7 @@ function markRowsAsBaseline() {
   {/snippet}
 
   <div class="table-scroll">
-    <table bind:this={tableEl} class="inputs-table" class:inputs-table--editing={isEditing}>
+    <table bind:this={tableEl} class="inputs-table inputs-table--editing">
       <colgroup>
         <col class="col-due-action" />
         {#each activeColumns as column (column.key)}
@@ -1576,7 +2101,7 @@ function markRowsAsBaseline() {
                     aria-label="Reorder {column.label} column"
                     aria-pressed={colKbIndex === colIndex}
                     ondragstart={(e) => e.preventDefault()}
-                    onkeydown={(e) => colKeydown(e, colIndex)}
+                    onkeydown={$isMobile ? undefined : (e) => colKeydown(e, colIndex)}
                   >⠿</button>
                   <span class="th-label">{column.label}</span>
                   <button
@@ -1602,37 +2127,64 @@ function markRowsAsBaseline() {
         {#each visibleRows as row, sliceIndex (rowKey(row, firstVisibleIndex + sliceIndex))}
           {@const rowIndex = firstVisibleIndex + sliceIndex}
           {@const dueConfirm = isDueConfirmation(row)}
-          {@const isExpanded = !!row.injectionId && expandedDueId === row.injectionId}
+          {@const isExpanded = !!row.entryId && expandedDueId === row.entryId}
           <tr
             class:row-alt={rowIndex % 2 === 1}
             class:new-row={isDraftRow(row)}
             class:row-skipped={row.doseSkipped}
             class:row-needs-medication={rowMissingMedication(row)}
+            class:mobile-card-editing={isRowMobileEditing(row)}
           >
             <td class="due-action-cell">
-              {#if dueConfirm}
+              {#if columnSettingsOpen}
+                <button
+                  type="button"
+                  class="row-delete-btn"
+                  aria-label={`Delete row for ${row.date}`}
+                  title="Delete row"
+                  onclick={() => deleteRow(row)}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M2.6 4.2h10.8M6.4 4.2V2.9a.7.7 0 0 1 .7-.7h1.8a.7.7 0 0 1 .7.7v1.3M4.6 4.2l.6 8.5a1.1 1.1 0 0 0 1.1 1h3.4a1.1 1.1 0 0 0 1.1-1l.6-8.5M6.7 6.6v4.6M9.3 6.6v4.6"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+              {:else if dueConfirm}
                 <div class="due-action-wrap">
                   <button
                     type="button"
                     class="due-action-btn"
                     class:expanded={isExpanded}
+                    class:selected={isDueSelected(rowIndex)}
+                    data-due-row={rowIndex}
+                    tabindex={$isMobile ? undefined : (isDueSelected(rowIndex) ? 0 : -1)}
                     aria-label="Confirm whether this dose was taken"
                     aria-expanded={isExpanded}
                     title="Confirm whether this dose was taken"
-                    onclick={() => toggleDuePanel(row)}
-                    onkeydown={handleDuePanelKeydown}
+                    onclick={() => activateDueFromClick(rowIndex, row)}
+                    onkeydown={$isMobile ? undefined : dueButtonKeydown}
                   >!</button>
                   {#if isExpanded}
-                    <div class="due-action-panel" role="group" aria-label="Confirm planned dose">
+                    <div class="due-action-panel" role="group" aria-label="Confirm planned dose" data-due-row={rowIndex}>
                       <button
                         type="button"
                         class="due-action-confirm"
-                        onclick={() => applyDoseDecision(row, 'taken')}
+                        class:selected={duePanelNav === 'taken' && isDueSelected(rowIndex)}
+                        onclick={() => confirmDue(row, 'taken')}
+                        onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
                       >Taken</button>
                       <button
                         type="button"
                         class="due-action-skip"
-                        onclick={() => applyDoseDecision(row, 'skipped')}
+                        class:selected={duePanelNav === 'skipped' && isDueSelected(rowIndex)}
+                        onclick={() => confirmDue(row, 'skipped')}
+                        onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
                       >Skip</button>
                     </div>
                   {/if}
@@ -1640,138 +2192,197 @@ function markRowsAsBaseline() {
               {/if}
             </td>
             {#each activeColumns as column, colIndex (column.key)}
+              {@const rowEditing = isRowMobileEditing(row)}
+              <!-- On mobile a cell is "editing" when its card is open (all text
+                   fields at once); on desktop it's the two-state grid selection. -->
+              {@const editingCell = $isMobile ? (rowEditing && isTextColumn(column.key)) : isCellEditing(rowIndex, colIndex)}
+              <!-- On mobile, pickers render their interactive control only inside
+                   the open card; otherwise a static value (read-only). -->
+              {@const showPicker = !$isMobile || rowEditing}
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
               <td
                 class={column.key}
+                data-cell={`${rowIndex}-${colIndex}`}
                 data-label={column.label}
-                class:empty-cell={!isRowEditable(row) && isCellEmpty(row, column.key)}
+                tabindex={$isMobile ? undefined : ((selRow === null ? rowIndex === 0 && colIndex === 0 : isSelected(rowIndex, colIndex)) ? 0 : -1)}
+                class:cell-selected={!$isMobile && isRingSelected(rowIndex, colIndex)}
+                class:cell-editing={editingCell && !$isMobile}
+                class:cell-readonly={READONLY_COLS.has(column.key)}
+                class:empty-cell={isCellEmpty(row, column.key) && !rowEditing && !isSelected(rowIndex, colIndex)}
                 class:col-indicator-left={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'left'}
                 class:col-indicator-right={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'right'}
+                onclick={$isMobile ? undefined : () => selectCell(rowIndex, colIndex, true)}
+                onkeydown={$isMobile ? undefined : (e) => cellKeydown(e, rowIndex, colIndex)}
+                onfocusin={$isMobile ? undefined : () => {
+                  // Tabbed into the grid with nothing active yet → adopt this
+                  // cell so the selection ring shows and arrows work from here.
+                  if (selRow === null) {
+                    selRow = rowIndex;
+                    selCol = colIndex;
+                  }
+                }}
               >
-                {#if isRowEditable(row) && column.key !== 'symptoms' && column.key !== 'shotLocation'}
-                  {#if column.key === 'day' || column.key === 'loss' || column.key === 'system'}
-                    {#if column.key === 'system'}
-                      {@render systemStack(row)}
-                    {:else if column.key === 'loss'}
-                      {displayWeight(row.loss, $weightUnit)}
-                    {:else}
-                      {#if isEditing}
-                        <div class="day-delete-cell">
-                          <span>{row[column.key]}</span>
-                          <button
-                            type="button"
-                            class="delete-btn"
-                            aria-label={`Delete row for ${row.date}`}
-                            onclick={() => deleteRow(row)}
-                          >×</button>
-                        </div>
-                      {:else}
-                        {row[column.key]}
-                      {/if}
-                    {/if}
-                  {:else if column.key === 'date'}
-                  <DateInput
-                    value={row.date}
-                    onchange={(v) => updateCell(rowIndex, 'date', v)}
-                  />
-                  {:else if column.key === 'weight'}
-                  <input
-                    type="text"
-                    value={weightDrafts.has(rowKey(row, rowIndex)) ? (weightDrafts.get(rowKey(row, rowIndex)) ?? '') : displayWeight(row.weight, $weightUnit)}
-                    oninput={(event) => { weightDrafts.set(rowKey(row, rowIndex), event.currentTarget.value); }}
-                    onblur={() => {
-                      const key = rowKey(row, rowIndex);
-                      const draft = weightDrafts.get(key);
-                      if (draft !== undefined) {
-                        updateCell(rowIndex, 'weight', toStoredLbs(draft, $weightUnit));
-                        weightDrafts.delete(key);
-                      }
-                    }}
-                    placeholder={isDraftRow(row) ? `Weight (${$weightUnit})` : undefined}
-                  />
-                  {:else if column.key === 'dose'}
-                  <div class="dose-entry">
-                    <input
-                      type="text"
-                      value={row.dose}
-                      oninput={(event) => updateCell(rowIndex, 'dose', event.currentTarget.value)}
-                      placeholder={isDraftRow(row) ? 'New dose' : undefined}
-                    />
-                    <CustomPicker
-                      value={row.medication}
-                      options={medicationOptions}
-                      invalid={rowMissingMedication(row)}
-                      onSelect={(value) => updateCell(rowIndex, 'medication', value)}
-                      ariaLabel={isDraftRow(row) ? 'Medication for new dose' : 'Medication'}
-                    />
-                    {#if rowMissingMedication(row)}
-                      <p class="medication-warning" role="alert">
-                        Pick a medication so this dose shows on the graph.
-                      </p>
-                    {/if}
-                  </div>
-                  {:else if column.key === 'wellness'}
-                  <input
-                    type="number"
-                    value={row.wellness}
-                    min={WELLNESS_SCORE_MIN}
-                    max={WELLNESS_SCORE_MAX}
-                    step="1"
-                    title={`Wellness score ${WELLNESS_SCORE_MIN}-${WELLNESS_SCORE_MAX}`}
-                    oninput={(event) => updateCell(rowIndex, 'wellness', event.currentTarget.value)}
-                    onblur={(event) => commitWellnessInput(rowIndex, event.currentTarget.value)}
-                    placeholder={`${WELLNESS_SCORE_MIN}-${WELLNESS_SCORE_MAX}`}
-                  />
-                  {:else}
-                  <input
-                    type="text"
-                    value={row[column.key]}
-                    oninput={(event) => updateCell(rowIndex, column.key, event.currentTarget.value)}
-                    placeholder={isDraftRow(row) ? `New ${column.label.toLowerCase()}` : undefined}
-                  />
-                  {/if}
-                {:else if isRowEditable(row) && column.key === 'shotLocation'}
-                  <CustomPicker
-                    value={row.shotLocation}
-                    options={optionsWithCurrent(shotLocationSelectOptions, row.shotLocation)}
-                    onSelect={(value) => updateCell(rowIndex, 'shotLocation', value)}
-                    ariaLabel={isDraftRow(row) ? 'Shot location for new dose' : 'Shot location'}
-                  />
-                {:else if isRowEditable(row) && column.key === 'symptoms'}
-                  <MultiPicker
-                    values={row.symptoms}
-                    options={$symptomOptions}
-                    optionColor={symptomColor}
-                    onToggle={(symptom) =>
-                      updateCell(rowIndex, 'symptoms', toggleSymptomValue(symptom, row.symptoms))}
-                    ariaLabel={isDraftRow(row) ? 'Symptoms for new row' : `Symptoms for row ${rowIndex + 1}`}
-                  />
-                {:else if column.key === 'symptoms'}
-                  <div class="symptoms-cell">
-                    {#each row.symptoms as symptom (symptom)}
-                      <span class="pill" style={`background:${symptomColor(symptom)}`}>{symptom}</span>
-                    {/each}
-                  </div>
-                {:else if column.key === 'system'}
+                {#if column.key === 'system'}
                   {@render systemStack(row)}
-                {:else if column.key === 'weight'}
-                  {fmtNum(lbsToDisplayNum(row.weight, $weightUnit), weightDecimals)}
-                {:else if column.key === 'dose'}
-                  {fmtNum(parseFloat(row.dose), doseDecimals)}
-                  {#if rowMissingMedication(row)}
-                    <span
-                      class="medication-warning-icon"
-                      title="No medication set — this dose is not shown on the graph."
-                      aria-label="No medication set — this dose is not shown on the graph."
-                    >⚠</span>
-                  {/if}
                 {:else if column.key === 'loss'}
-                  {displayWeight(row.loss, $weightUnit)}
-                {:else if column.key === 'wellness'}
-                  {normalizeWellnessScoreInput(row.wellness)}
+                  <span class="cell-static">{displayWeight(row.loss, $weightUnit)}</span>
+                {:else if column.key === 'day'}
+                  <span class="cell-static">{row.day}</span>
+                {:else if column.key === 'symptoms'}
+                  {#if showPicker}
+                    <MultiPicker
+                      values={row.symptoms}
+                      options={$symptomOptions}
+                      optionColor={symptomColor}
+                      forceOpen={isCellEditing(rowIndex, colIndex)}
+                      onRequestClose={() => exitToCell(rowIndex, colIndex)}
+                      onToggle={(symptom) => {
+                        updateCell(rowIndex, 'symptoms', toggleSymptomValue(symptom, row.symptoms));
+                        queueRowSave(rowIndex);
+                      }}
+                      ariaLabel={isDraftRow(row) ? 'Symptoms for new row' : `Symptoms for row ${rowIndex + 1}`}
+                    />
+                  {:else}
+                    <span class="cell-static">{row.symptoms.join(', ')}</span>
+                  {/if}
+                {:else if column.key === 'shotLocation'}
+                  {#if showPicker}
+                    <CustomPicker
+                      value={row.shotLocation}
+                      options={optionsWithCurrent(shotLocationSelectOptions, row.shotLocation)}
+                      forceOpen={isCellEditing(rowIndex, colIndex)}
+                      onRequestClose={() => exitToCell(rowIndex, colIndex)}
+                      onSelect={(value) => { updateCell(rowIndex, 'shotLocation', value); queueRowSave(rowIndex); }}
+                      ariaLabel={isDraftRow(row) ? 'Shot location for new dose' : 'Shot location'}
+                    />
+                  {:else}
+                    <span class="cell-static">{row.shotLocation}</span>
+                  {/if}
+                {:else if column.key === 'dose'}
+                  <div class="dose-entry">
+                    {#if showPicker}
+                    <DoseVialPicker
+                      prescriptionId={row.prescriptionId}
+                      autoVialDbId={row.entryId ? $vialByEntryId.get(row.entryId) : undefined}
+                      medication={row.medication}
+                      vials={vialOptions}
+                      drugOptions={medicationOptions}
+                      forceOpen={editing && isVialSelected(rowIndex)}
+                      vialSelected={isVialSelected(rowIndex)}
+                      onActivate={() => setVialSelection(rowIndex, true)}
+                      onRequestClose={() => exitToVial(rowIndex)}
+                      ariaLabel={isDraftRow(row) ? 'Vial or drug for new dose' : 'Vial or drug for this dose'}
+                      onPickVial={(dbId, type) => pickVial(rowIndex, dbId, type)}
+                      onPickDrug={(med) => pickDrug(rowIndex, med)}
+                      onClear={() => clearVialOverride(rowIndex)}
+                    />
+                    {/if}
+                    {#if editingCell && !selVial}
+                      <input
+                        class="cell-input dose-input"
+                        type="text"
+                        size="1"
+                        value={row.dose}
+                        oninput={(event) => updateCell(rowIndex, 'dose', event.currentTarget.value)}
+                        onblur={() => editorBlur(row)}
+                        onkeydown={$isMobile ? undefined : editorKeydown}
+                        placeholder={isDraftRow(row) ? 'New dose' : undefined}
+                      />
+                    {:else}
+                      <span class="cell-static dose-number"
+                        >{row.dose ? fmtNum(parseFloat(row.dose), doseDecimals) : ''}</span
+                      >
+                    {/if}
+                    {#if rowMissingMedication(row)}
+                      <span
+                        class="medication-warning-icon"
+                        title="No medication set — this dose is not shown on the graph."
+                        aria-label="No medication set — this dose is not shown on the graph."
+                      >⚠</span>
+                    {/if}
+                  </div>
                 {:else if column.key === 'date'}
-                  {formatLocaleDate(row.date)}
+                  {#if editingCell}
+                    <DateInput
+                      value={row.date}
+                      onchange={(v) => updateCell(rowIndex, 'date', v)}
+                      onkeydown={$isMobile ? undefined : editorKeydown}
+                      onblur={() => editorBlur(row)}
+                    />
+                  {:else}
+                    <span class="cell-static">{formatLocaleDate(row.date)}</span>
+                  {/if}
+                  <!-- Mobile-only per-card controls live in the card's header (date)
+                       row: the pencil (read) ↔ Save/Cancel/Delete (edit). Hidden on
+                       desktop via .card-header-actions{display:none}. -->
+                  <span class="card-header-actions">
+                    {#if isRowMobileEditing(row)}
+                      <button type="button" class="card-action-btn card-save" aria-label="Save" title="Save" onclick={() => saveMobileEdit(row)}><SaveIcon size="1.1rem" /></button>
+                      <button type="button" class="card-action-btn card-cancel" onclick={() => cancelMobileEdit(row)}>Cancel</button>
+                      <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => (rowDeleteRequest = row)}><TrashIcon size="1.15rem" /></button>
+                    {:else}
+                      <EditPencil ariaLabel={`Edit entry for ${row.date}`} onclick={() => startMobileEdit(row)} />
+                    {/if}
+                  </span>
+                {:else if column.key === 'weight'}
+                  {#if editingCell}
+                    <input
+                      class="cell-input"
+                      type="text"
+                      value={weightDrafts.has(rowKey(row, rowIndex)) ? (weightDrafts.get(rowKey(row, rowIndex)) ?? '') : displayWeight(row.weight, $weightUnit)}
+                      oninput={(event) => { weightDrafts.set(rowKey(row, rowIndex), event.currentTarget.value); }}
+                      onblur={() => editorBlur(row)}
+                      onkeydown={$isMobile ? undefined : editorKeydown}
+                      placeholder={isDraftRow(row) ? `Weight (${$weightUnit})` : undefined}
+                    />
+                  {:else}
+                    <span class="cell-static">{row.weight ? fmtNum(lbsToDisplayNum(row.weight, $weightUnit), weightDecimals) : ''}</span>
+                  {/if}
+                {:else if column.key === 'wellness'}
+                  {#if editingCell}
+                    <input
+                      class="cell-input"
+                      type="number"
+                      value={row.wellness}
+                      min={WELLNESS_SCORE_MIN}
+                      max={WELLNESS_SCORE_MAX}
+                      step="1"
+                      title={`Wellness score ${WELLNESS_SCORE_MIN}-${WELLNESS_SCORE_MAX}`}
+                      oninput={(event) => updateCell(rowIndex, 'wellness', event.currentTarget.value)}
+                      onblur={(event) => { commitWellnessInput(rowIndex, event.currentTarget.value); editorBlur(row); }}
+                      onkeydown={$isMobile ? undefined : editorKeydown}
+                      placeholder={`${WELLNESS_SCORE_MIN}-${WELLNESS_SCORE_MAX}`}
+                    />
+                  {:else}
+                    <span class="cell-static">{row.wellness ? normalizeWellnessScoreInput(row.wellness) : ''}</span>
+                  {/if}
+                {:else if column.key === 'notes'}
+                  {#if editingCell}
+                    <textarea
+                      class="cell-input notes-input"
+                      value={row.notes}
+                      oninput={(event) => updateCell(rowIndex, 'notes', event.currentTarget.value)}
+                      onblur={() => editorBlur(row)}
+                      onkeydown={$isMobile ? undefined : editorKeydown}
+                      placeholder={isDraftRow(row) ? 'New notes (Shift+Enter for a new line)' : undefined}
+                    ></textarea>
+                  {:else}
+                    <span class="cell-static">{row.notes}</span>
+                  {/if}
                 {:else}
-                  {row[column.key]}
+                  {#if editingCell}
+                    <input
+                      class="cell-input"
+                      type="text"
+                      value={row[column.key]}
+                      oninput={(event) => updateCell(rowIndex, column.key, event.currentTarget.value)}
+                      onblur={() => editorBlur(row)}
+                      onkeydown={$isMobile ? undefined : editorKeydown}
+                      placeholder={isDraftRow(row) ? `New ${column.label.toLowerCase()}` : undefined}
+                    />
+                  {:else}
+                    <span class="cell-static">{row[column.key]}</span>
+                  {/if}
                 {/if}
               </td>
             {/each}
@@ -1790,8 +2401,17 @@ function markRowsAsBaseline() {
 </div>
 
 <style>
+  /* Containing block for the due-action badge. Because the badge is positioned
+     against THIS element (an ancestor of the horizontally-scrolling
+     `.table-scroll`), the scroll container's overflow never clips it — so the
+     badge can sit out in the card gutter, on top of everything, while the table
+     still clips exactly at its own edge (no boundary change, no scroll leak). */
+  .inputs-table-region {
+    position: relative;
+  }
+
   .column-manager {
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, white 60%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 40%, white 60%);
     border-radius: 12px;
     padding: 0.7rem;
     margin-bottom: 0.75rem;
@@ -1954,7 +2574,7 @@ function markRowsAsBaseline() {
 
   .confirm-dialog {
     width: min(100%, 26rem);
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 48%, white 52%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 48%, white 52%);
     border-radius: 12px;
     padding: 1rem;
     background: color-mix(in oklab, var(--surface) 92%, transparent);
@@ -2077,6 +2697,20 @@ function markRowsAsBaseline() {
 
   .inputs-table {
     width: 100%;
+    /* Grid lines (table outline + between cells) tinted the same as the header
+       cell background. */
+    --inputs-grid: color-mix(in oklab, var(--headerBg) 60%, white 40%);
+    border-collapse: collapse;
+    border: 1px solid var(--inputs-grid);
+  }
+
+  .inputs-table th:not(.due-action-header),
+  .inputs-table td:not(.due-action-cell) {
+    border: 1px solid var(--inputs-grid);
+  }
+
+  .inputs-table tr.virtual-spacer td {
+    border: 0;
   }
 
   .inputs-table col {
@@ -2096,8 +2730,96 @@ function markRowsAsBaseline() {
 
   .inputs-table td {
     font-size: 1.02rem;
-    vertical-align: top;
+    vertical-align: middle;
     text-align: center;
+    padding: 0.2rem 0.3rem;
+    /* Positioning context so an editor can overlay the cell (see input.cell-input
+       below) without affecting column sizing. */
+    position: relative;
+  }
+
+  /* Single-mode spreadsheet cells: a focusable cell shows a selection ring; its
+     editor swaps in at identical metrics (borderless, transparent) so clicking
+     a cell to edit never changes its size. */
+  /* The cell ring is driven by real DOM :focus, so it shows only while the cell
+     itself is focused and vanishes the moment focus leaves the grid — there's
+     never more than one selector on the page. When focus moves into an inner
+     control (editor/open dropdown), the td isn't :focus, so the cell ring steps
+     aside and that control's own focus ring / the edit ring shows instead. */
+  /* Select mode: a flat accent ring. */
+  .inputs-table td.cell-selected:focus {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-radius: 4px;
+  }
+
+  /* Edit mode: a distinctly darker border plus a strong inner shadow, so it's
+     unmistakable at a glance that the cell is being edited (vs merely selected,
+     which is the flat accent ring above). */
+  .inputs-table td.cell-editing:not(.symptoms):not(.shotLocation) {
+    box-shadow:
+      inset 0 0 0 2.5px color-mix(in oklab, var(--accent) 30%, var(--text) 70%),
+      inset 0 0 18px 4px color-mix(in oklab, var(--accent) 60%, transparent);
+    border-radius: 4px;
+  }
+
+  .inputs-table td:focus,
+  .inputs-table td:focus-visible {
+    outline: none;
+  }
+
+  .cell-static {
+    display: block;
+    min-height: 1.3em;
+    white-space: pre-wrap;
+  }
+
+  /* The text/number editor overlays the cell instead of sitting in flow, so its
+     intrinsic width (a bare <input> defaults to ~20ch) can't inflate the column —
+     the cell keeps the static-text width and the editor just fills it. Same trick
+     as .notes-input. (Excludes the dose cell, whose input shares a flex row with
+     the vial picker; that one is constrained separately below.) Reverted to
+     in-flow on mobile (see the ≤640px block). */
+  .inputs-table :global(input.cell-input:not(.dose-input)) {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 0;
+    padding: 0.2rem 0.3rem;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    text-align: inherit;
+    outline: none;
+  }
+
+  /* Notes edit in place as a wrapping textarea that fills the cell's full
+     height — so on a tall row (e.g. many symptoms) the editor uses all the
+     vertical space, not just two lines. Same look as the static cell. */
+  /* The cell already has the row's full height (a tall sibling like symptoms
+     stretches every cell). Absolutely fill that box so the textarea uses it all,
+     dodging the unreliable table-cell percentage-height resolution. */
+  .inputs-table td.notes.cell-editing {
+    position: relative;
+  }
+
+  .notes-input {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+    padding: 0.2rem 0.3rem;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    line-height: inherit;
+    resize: none;
+    outline: none;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
   }
 
   .inputs-table th.day,
@@ -2139,8 +2861,6 @@ function markRowsAsBaseline() {
     min-width: 16rem;
   }
 
-  .inputs-table--editing th.dose,
-  .inputs-table--editing td.dose,
   .inputs-table--editing th.shotLocation,
   .inputs-table--editing td.shotLocation {
     min-width: 8rem;
@@ -2163,13 +2883,6 @@ function markRowsAsBaseline() {
 
   .inputs-table tbody tr.row-alt {
     background: var(--rowAlt);
-  }
-
-  .symptoms-cell {
-    display: inline-flex;
-    flex-wrap: wrap;
-    gap: 0.3rem;
-    align-items: center;
   }
 
   .system-stack {
@@ -2199,9 +2912,35 @@ function markRowsAsBaseline() {
     vertical-align: 0.08em;
   }
 
+  /* Number + compact vial/drug chip on one line; the chip stays ~1.5rem so the
+     dose column never grows. */
   .dose-entry {
-    display: grid;
-    gap: 0.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+
+  .dose-entry .dose-number {
+    flex: 1 1 auto;
+    text-align: right;
+    min-width: 0;
+  }
+
+  .dose-entry .dose-input {
+    /* basis 0 + size=1 (in markup) keep the editor from contributing its ~20ch
+       default width to the dose column; it grows to fill the slot via flex. */
+    flex: 1 1 0;
+    text-align: right;
+    min-width: 0;
+    box-sizing: border-box;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    outline: none;
   }
 
   .pill {
@@ -2213,7 +2952,7 @@ function markRowsAsBaseline() {
   }
 
   .new-row {
-    border-top: 2px solid color-mix(in oklab, var(--cardBorder) 30%, white 70%);
+    border-top: 1px solid color-mix(in oklab, var(--cardBorder) 30%, white 70%);
   }
 
   .virtual-spacer td {
@@ -2224,13 +2963,6 @@ function markRowsAsBaseline() {
 
   .row-needs-medication td:first-of-type {
     box-shadow: inset 3px 0 0 var(--danger);
-  }
-
-  .medication-warning {
-    margin: 0;
-    font-size: 0.82rem;
-    line-height: 1.25;
-    color: var(--danger);
   }
 
   .medication-warning-icon {
@@ -2265,7 +2997,7 @@ function markRowsAsBaseline() {
   }
 
   .due-action-btn {
-    border: 2px solid var(--warning);
+    border: 1px solid var(--warning);
     background: color-mix(in oklab, var(--headerBg) 18%, white 82%);
     color: var(--warning);
     font-weight: 800;
@@ -2283,9 +3015,17 @@ function markRowsAsBaseline() {
 
   .due-action-btn:hover,
   .due-action-btn.expanded {
-    background: var(--headerBg);
-    color: var(--headerText);
-    border: 2px solid var(--headerBg);
+    background: var(--warning);
+    color: color-mix(in oklab, var(--headerBg) 18%, white 82%);
+    border: 1px solid color-mix(in oklab, var(--headerBg) 18%, white 82%);
+  }
+
+  /* Grid selector resting on the badge. */
+  .due-action-btn.selected {
+    box-shadow:
+      0 0 0 2px var(--surface),
+      0 0 0 4px var(--accent);
+    outline: none;
   }
 
   .due-action-panel {
@@ -2298,7 +3038,7 @@ function markRowsAsBaseline() {
     gap: 0.3rem;
     padding: 0.25rem 0.35rem;
     background: var(--surface);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 10px;
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
     white-space: nowrap;
@@ -2330,27 +3070,23 @@ function markRowsAsBaseline() {
     background: color-mix(in oklab, var(--danger) 10%, transparent 90%);
   }
 
-  /* ── Desktop (≥641px): the due-confirm badge sits against the card border ──
+  /* Keyboard selector resting on a panel button. */
+  .due-action-confirm.selected,
+  .due-action-skip.selected {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* ── Desktop (≥641px): the due-confirm badge sits in the card gutter ──
    * On mobile each row is a card and this button floats in the card corner (see
    * the ≤640px block); the dedicated column + zero-width header exist only to
    * support that layout. On desktop the table is flat, so the column reserves no
-   * width — the badge is pushed left until it meets the card's border and lifted
-   * above everything (overlapping the leading cell's content is fine). The badge
-   * lands in the card padding, outside the table's content box, so the scroll
-   * viewport would normally clip it; the .table-scroll rule below extends the
-   * clip region left to cover it without moving the table or adding a gutter. */
+   * width and the badge is lifted out into the card gutter, on top of
+   * everything. It's positioned against `.inputs-table-region` (an ancestor of
+   * `.table-scroll`), so the scroll container's overflow never clips it — and
+   * because `.table-scroll` itself is left untouched, the table still clips at
+   * its own edge and never leaks past the card when scrolled horizontally. */
   @media (min-width: 641px) {
-    /* Extend the scroll viewport left into the card padding so the badge isn't
-     * clipped by overflow: the negative margin pulls the box left, the matching
-     * padding restores the table's position, and the width/​max-width reclaim
-     * keeps the right edge. Horizontal scrolling for wide tables still works. */
-    .table-scroll {
-      margin-left: -1rem;
-      padding-left: 1rem;
-      width: calc(100% + 1rem);
-      max-width: none;
-    }
-
     .inputs-table col.col-due-action {
       width: 0;
     }
@@ -2359,17 +3095,19 @@ function markRowsAsBaseline() {
     .inputs-table td.due-action-cell {
       width: 0;
       padding: 0;
+      /* static so the badge's containing block is `.inputs-table-region`, not
+       * this cell — that's what lets it escape the scroll clip. */
+      position: static;
       overflow: visible;
     }
 
     .inputs-table td.due-action-cell .due-action-wrap {
       position: absolute;
-      /* Left of the table's content edge (one padding-width, plus the table's
-       * leading cell-spacing) so the badge sits flush against the card border. */
-      left: -0.9rem;
-      top: 50%;
-      transform: translateY(-50%);
-      z-index: 10;
+      /* `top` is set in px by positionDueBadges() (measured row center, relative
+       * to .inputs-table-region); the transform centers on it and nudges the
+       * badge left into the gutter. left:auto keeps the static horizontal spot. */
+      transform: translate(-1.6rem, -50%);
+      z-index: 30;
     }
   }
 
@@ -2383,14 +3121,8 @@ function markRowsAsBaseline() {
     opacity: 0.55;
   }
 
-  .day-delete-cell {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    white-space: nowrap;
-  }
-
-  .delete-btn {
+  /* Gutter trash-can shown for every row while the gear (settings) is open. */
+  .row-delete-btn {
     border: 0;
     border-radius: 8px;
     width: 1.5rem;
@@ -2398,17 +3130,24 @@ function markRowsAsBaseline() {
     padding: 0;
     background: color-mix(in oklab, var(--danger) 12%, transparent 88%);
     color: var(--danger);
-    font-size: 1.1rem;
-    font-weight: 700;
-    line-height: 0;
     display: inline-grid;
     place-items: center;
     cursor: pointer;
-    flex-shrink: 0;
   }
 
-  .delete-btn:hover {
+  .row-delete-btn svg {
+    width: 1rem;
+    height: 1rem;
+  }
+
+  .row-delete-btn:hover {
     background: color-mix(in oklab, var(--danger) 25%, transparent 75%);
+  }
+
+  /* Per-card controls live in the card header (date) row on mobile only; the
+     desktop spreadsheet never shows them. */
+  .card-header-actions {
+    display: none;
   }
 
   @media (max-width: 1280px) {
@@ -2432,6 +3171,14 @@ function markRowsAsBaseline() {
 
     .inputs-table {
       min-width: 0;
+    }
+
+    /* The desktop grid lines don't apply to the card layout — each row is its
+       own bordered card instead. */
+    .inputs-table,
+    .inputs-table th,
+    .inputs-table td {
+      border: 0;
     }
 
     .inputs-table,
@@ -2464,7 +3211,7 @@ function markRowsAsBaseline() {
       display: flex;
       flex-direction: column;
       position: relative;
-      border: 2px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
+      border: 1px solid color-mix(in oklab, var(--cardBorder) 40%, #f0f0f0 60%);
       border-radius: 12px;
       padding: 0.4rem 0.7rem 0.55rem;
       margin-bottom: 0.6rem;
@@ -2473,8 +3220,9 @@ function markRowsAsBaseline() {
       background: var(--surface);
     }
 
+    /* No zebra striping in the card layout — every card is the same surface. */
     .inputs-table tbody tr.row-alt {
-      background: linear-gradient(var(--rowAlt), var(--rowAlt)), var(--surface);
+      background: var(--surface);
     }
 
     .inputs-table tbody tr:last-child {
@@ -2530,15 +3278,17 @@ function markRowsAsBaseline() {
       display: none;
     }
 
-    /* The date is the card's top line / title. order:-1 lifts it above the Day
-     * row so its empty right side hosts the due-confirm button; padding-right
-     * reserves room so a long locale date never runs under that button. */
+    /* The date is the card's header row: the date/value on the left, the per-card
+     * controls (pencil, or Save/Cancel/Delete) on the right. order:-1 lifts it to
+     * the top of the card. */
     .inputs-table td.date {
       order: -1;
-      justify-content: flex-start;
-      border-bottom: 2px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      column-gap: 0.5rem;
+      border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
       padding-top: 0.1rem;
-      padding-right: 2.2rem;
       margin-bottom: 0.15rem;
       font-weight: 700;
       font-size: 1.05rem;
@@ -2548,17 +3298,37 @@ function markRowsAsBaseline() {
       content: none;
     }
 
-    /* Due-confirm action floats in the card's top-right; absent ones vanish. */
+    /* The pencil / Save·Cancel·Delete cluster on the right of the header row. */
+    .card-header-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.4rem;
+    }
+
+    /* In edit mode the date editor keeps a sensible width; the compact icon
+       actions (Save / Cancel / Delete) sit beside it on the same row. */
+    .inputs-table tr.mobile-card-editing td.date :global(input) {
+      flex: 1 1 7rem;
+    }
+
+    /* Due-confirm `!` sits just left of the pencil (a fixed 2rem button anchored
+     * to the card's top-right); absent ones vanish, and it hides while editing. */
     .inputs-table td.due-action-cell {
       position: absolute;
-      top: 0.4rem;
-      right: 0.7rem;
+      top: 0.5rem;
+      right: 3rem;
       width: auto;
       padding: 0;
       border: none;
     }
 
     .inputs-table td.due-action-cell:not(:has(.due-action-wrap)) {
+      display: none;
+    }
+
+    .inputs-table tr.mobile-card-editing td.due-action-cell {
       display: none;
     }
 
@@ -2572,6 +3342,12 @@ function markRowsAsBaseline() {
       right: 0;
     }
 
+    /* The desktop overlay (position:absolute) doesn't apply to the card layout —
+       here the editor is an in-flow flex item beside its label. */
+    .inputs-table :global(input.cell-input:not(.dose-input)) {
+      position: static;
+    }
+
     /* Inputs/pickers share the row with their label rather than filling it. */
     .inputs-table td :global(input),
     .inputs-table td :global(select) {
@@ -2583,15 +3359,53 @@ function markRowsAsBaseline() {
 
     /* Richer value blocks wrap to full width under their label. */
     .inputs-table td .dose-entry,
-    .inputs-table td .system-stack,
-    .inputs-table td .symptoms-cell {
+    .inputs-table td .system-stack {
       flex: 1 1 100%;
       min-width: 0;
     }
 
-    .inputs-table td .system-stack,
-    .inputs-table td .symptoms-cell {
+    .inputs-table td .system-stack {
       align-items: flex-end;
+    }
+
+    /* ── Per-card edit action buttons (shown in the header row when editing) ──
+       Icon buttons (Save/Delete) are compact squares; Cancel keeps its text. */
+    .card-action-btn {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      padding: 0.35rem 0.55rem;
+      font-weight: 700;
+      font-size: 0.9rem;
+      line-height: 0;
+      cursor: pointer;
+      border: 1.5px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
+      background: color-mix(in oklab, var(--surface) 82%, transparent);
+      color: var(--text);
+    }
+
+    .card-action-btn.card-save {
+      border-color: transparent;
+      background: var(--accent, var(--text));
+      color: var(--surface);
+    }
+
+    .card-action-btn.card-delete {
+      border-color: transparent;
+      background: var(--danger);
+      color: white;
+    }
+
+    /* Delete now lives in the per-card edit actions, so the gear's gutter
+       trash-can and the Hidden-columns manager are redundant on mobile. */
+    .row-delete-btn {
+      display: none;
+    }
+
+    .hidden-columns-fieldset {
+      display: none;
     }
   }
 </style>

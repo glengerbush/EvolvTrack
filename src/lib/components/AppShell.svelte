@@ -86,7 +86,7 @@
     width: 1.9rem;
     height: 1.9rem;
     border-radius: 7px;
-    border: 2px solid var(--brand);
+    border: 1px solid var(--brand);
     background-color: var(--brand);
     flex: 0 0 auto;
     display: inline-block;

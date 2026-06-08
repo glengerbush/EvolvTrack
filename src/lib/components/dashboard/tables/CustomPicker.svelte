@@ -1,94 +1,176 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
   let {
     value = '',
     options = [],
     onSelect,
     ariaLabel,
     invalid = false,
+    forceOpen = false,
+    onRequestClose,
   }: {
     value?: string;
     options?: string[];
     onSelect: (value: string) => void;
     ariaLabel: string;
     invalid?: boolean;
+    /** Host-driven open (the grid cell opens it on a single Enter). */
+    forceOpen?: boolean;
+    /** Called when the picker wants to close so the host can return focus. */
+    onRequestClose?: () => void;
   } = $props();
 
   let isOpen = $state(false);
+  let containerEl: HTMLDivElement | undefined = $state();
+  let triggerEl: HTMLButtonElement | undefined = $state();
+  let focusedIndex = $state(0);
 
   function optionLabel(option: string): string {
     return option || 'None';
   }
 
-  function chooseOption(option: string) {
-    onSelect(option);
+  let lastForceOpen = false;
+  $effect(() => {
+    if (forceOpen === lastForceOpen) return;
+    lastForceOpen = forceOpen;
+    if (forceOpen) void open(true);
+    else isOpen = false;
+  });
+
+  $effect(() => {
+    if (!isOpen) return;
+    const el = containerEl!;
+    function onDocPointerDown(event: Event) {
+      if (el.contains(event.target as Node | null)) return;
+      requestClose();
+    }
+    document.addEventListener('pointerdown', onDocPointerDown);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown);
+  });
+
+  function optionEls(): HTMLElement[] {
+    return Array.from(containerEl!.querySelectorAll('[role="option"]')) as HTMLElement[];
+  }
+
+  function focusOptionAt(index: number) {
+    const items = optionEls();
+    if (items.length === 0) return;
+    const clamped = Math.max(0, Math.min(index, items.length - 1));
+    focusedIndex = clamped;
+    items[clamped].focus();
+  }
+
+  async function open(focusOption = true) {
+    isOpen = true;
+    if (focusOption) {
+      await tick();
+      const selected = options.indexOf(value);
+      focusOptionAt(selected >= 0 ? selected : 0);
+    }
+  }
+
+  function requestClose() {
     isOpen = false;
+    onRequestClose?.();
   }
 
-  function handleFocusout(event: FocusEvent) {
-    const relatedTarget = event.relatedTarget;
-    const currentTarget = event.currentTarget;
-    if (
-      currentTarget instanceof HTMLElement &&
-      (!(relatedTarget instanceof Node) || !currentTarget.contains(relatedTarget))
-    ) {
-      isOpen = false;
+  function choose(option: string) {
+    onSelect(option);
+    requestClose();
+  }
+
+  async function handleTriggerKeydown(event: KeyboardEvent) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      if (!isOpen) await open();
+      else focusOptionAt(event.key === 'ArrowUp' ? optionEls().length - 1 : 0);
+    } else if (event.key === 'Escape' && isOpen) {
+      event.preventDefault();
+      requestClose();
     }
   }
 
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      isOpen = false;
-      return;
+  function handleOptionKeydown(event: KeyboardEvent, option: string) {
+    switch (event.key) {
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        choose(option);
+        return;
+      case 'Escape':
+      case 'Tab':
+        event.preventDefault();
+        requestClose();
+        return;
+      case 'ArrowDown':
+        event.preventDefault();
+        focusOptionAt((focusedIndex + 1) % optionEls().length);
+        return;
+      case 'ArrowUp':
+        event.preventDefault();
+        focusOptionAt((focusedIndex - 1 + optionEls().length) % optionEls().length);
+        return;
+      case 'Home':
+        event.preventDefault();
+        focusOptionAt(0);
+        return;
+      case 'End':
+        event.preventDefault();
+        focusOptionAt(optionEls().length - 1);
+        return;
     }
-
-    if (event.key === ' ') {
-      event.preventDefault();
-      isOpen = !isOpen;
-      return;
+    if (event.key.length === 1 && /\S/.test(event.key) && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      const lower = event.key.toLowerCase();
+      const items = optionEls();
+      const start = (focusedIndex + 1) % items.length;
+      for (let i = 0; i < items.length; i++) {
+        const idx = (start + i) % items.length;
+        if ((items[idx].textContent ?? '').trim().toLowerCase().startsWith(lower)) {
+          event.preventDefault();
+          focusOptionAt(idx);
+          return;
+        }
+      }
     }
-
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-
-    event.preventDefault();
-    if (options.length === 0) {
-      isOpen = true;
-      return;
-    }
-
-    const currentIndex = Math.max(options.indexOf(value), 0);
-    const direction = event.key === 'ArrowDown' ? 1 : -1;
-    const nextIndex = (currentIndex + direction + options.length) % options.length;
-    chooseOption(options[nextIndex]);
   }
 </script>
 
-<div class="custom-picker" onfocusout={handleFocusout}>
+<div class="custom-picker" bind:this={containerEl}>
+  <!-- tabindex -1: the picker lives inside a grid cell whose <td> is the single
+       tab stop. Tab lands on the cell (arrows navigate the grid, Enter opens via
+       forceOpen); the trigger is reached by click or by the cell opening it, not
+       by Tab. -->
   <button
     type="button"
     class="custom-picker-trigger"
     class:invalid
+    tabindex={-1}
     aria-haspopup="listbox"
     aria-expanded={isOpen}
     aria-label={ariaLabel}
-    onclick={() => (isOpen = !isOpen)}
-    onkeydown={handleKeydown}
+    bind:this={triggerEl}
+    onclick={() => (isOpen ? requestClose() : open())}
+    onkeydown={handleTriggerKeydown}
   >
     <span>{optionLabel(value)}</span>
     <span class="custom-picker-chevron" aria-hidden="true">▾</span>
   </button>
   {#if isOpen}
     <div class="custom-picker-menu" role="listbox" aria-label={ariaLabel}>
-      {#each options as option (option)}
-        <button
-          type="button"
+      {#each options as option, i (option)}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div
+          class="custom-picker-option"
           class:selected={option === value}
           role="option"
           aria-selected={option === value}
-          onclick={() => chooseOption(option)}
+          tabindex={i === focusedIndex ? 0 : -1}
+          onclick={() => choose(option)}
+          onkeydown={(e) => handleOptionKeydown(e, option)}
         >
           {optionLabel(option)}
-        </button>
+        </div>
       {/each}
     </div>
   {/if}
@@ -101,7 +183,7 @@
   }
 
   .custom-picker-trigger,
-  .custom-picker-menu button {
+  .custom-picker-menu div {
     font: inherit;
   }
 
@@ -142,7 +224,7 @@
     width: max-content;
     max-width: min(20rem, 90vw);
     z-index: 10;
-    max-height: 11rem;
+    max-height: 12rem;
     overflow: auto;
     border: 1px solid color-mix(in oklab, var(--cardBorder) 44%, transparent);
     border-radius: 8px;
@@ -152,20 +234,15 @@
     box-sizing: border-box;
   }
 
-  .custom-picker-menu button {
-    width: 100%;
-    border: 0;
-    border-radius: 0;
+  .custom-picker-option {
     padding: 0.28rem 0.45rem;
-    background: transparent;
     color: var(--text);
-    text-align: left;
     cursor: pointer;
   }
 
-  .custom-picker-menu button:hover,
-  .custom-picker-menu button:focus-visible,
-  .custom-picker-menu button.selected {
+  .custom-picker-option:hover,
+  .custom-picker-option:focus-visible,
+  .custom-picker-option.selected {
     background: color-mix(in oklab, var(--accent) 14%, var(--surface) 86%);
     outline: none;
   }

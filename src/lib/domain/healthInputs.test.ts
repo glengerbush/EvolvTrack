@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
-import { getAllInjections, getAllWeights } from '$lib/domain/repo';
+import { getAllEntries } from '$lib/domain/repo';
 import { saveInputRows, type HealthInputRowSaveInput } from '$lib/domain/healthInputs';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
@@ -16,23 +16,23 @@ function input(overrides: Partial<HealthInputRowSaveInput>): HealthInputRowSaveI
   };
 }
 
-describe('saveInputRows — weight-only rows', () => {
-  it('inserts a new weight when one is provided without an injection', async () => {
+describe('saveInputRows — weigh-in-only rows', () => {
+  it('inserts a single entry for a weigh-in with no dose', async () => {
     const [saved] = await saveInputRows(
       [input({ weightLbs: 180, wellness: 5 })],
       { today: TODAY },
     );
-    expect(saved.injectionSaved).toBe(false);
-    expect(saved.weightId).toBeTruthy();
+    expect(saved.entryId).toBeTruthy();
 
-    const weights = await getAllWeights();
-    expect(weights).toHaveLength(1);
-    expect(weights[0]).toMatchObject({ date: TODAY, weightLbs: 180, wellness: 5 });
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ date: TODAY, weightLbs: 180, wellness: 5 });
+    expect(entries[0].amountMg).toBeUndefined();
   });
 
-  it('does not touch the weights table for a row with no weight-ish data', async () => {
+  it('still writes an entry for a row with no weight-ish data (each row is its own record)', async () => {
     await saveInputRows([input({})], { today: TODAY });
-    expect(await getAllWeights()).toHaveLength(0);
+    expect(await getAllEntries()).toHaveLength(1);
   });
 });
 
@@ -47,9 +47,9 @@ describe('saveInputRows — planned vs confirmed semantics', () => {
     expect(saved.doseSkipped).toBe(false);
     expect(saved.doseConfirmedAt).toBeUndefined();
 
-    const injections = await getAllInjections();
-    expect(injections).toHaveLength(1);
-    expect(injections[0]).toMatchObject({
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
       amountMg: 5,
       medication: SEMA,
       planned: true,
@@ -83,9 +83,9 @@ describe('saveInputRows — planned vs confirmed semantics', () => {
     expect(saved.dosePlanned).toBe(false);
     expect(saved.doseConfirmedAt).toBe(confirmedAt);
 
-    const [inj] = await getAllInjections();
-    expect(inj.planned).toBe(false);
-    expect(inj.confirmedAt).toBe(confirmedAt);
+    const [entry] = await getAllEntries();
+    expect(entry.planned).toBe(false);
+    expect(entry.confirmedAt).toBe(confirmedAt);
   });
 });
 
@@ -109,10 +109,10 @@ describe('saveInputRows — skip semantics', () => {
     expect(saved.dosePlanned).toBe(false);
     expect(saved.doseConfirmedAt).toBeUndefined();
 
-    const [inj] = await getAllInjections();
-    expect(inj.skipped).toBe(true);
-    expect(inj.planned).toBe(false);
-    expect(inj.confirmedAt).toBeUndefined();
+    const [entry] = await getAllEntries();
+    expect(entry.skipped).toBe(true);
+    expect(entry.planned).toBe(false);
+    expect(entry.confirmedAt).toBeUndefined();
   });
 });
 
@@ -124,43 +124,43 @@ describe('saveInputRows — defaults and identity', () => {
     );
     expect(saved.medication).toBe(SEMA);
 
-    const [inj] = await getAllInjections();
-    expect(inj.medication).toBe(SEMA);
+    const [entry] = await getAllEntries();
+    expect(entry.medication).toBe(SEMA);
   });
 
-  it('returns no injection identifier when doseMg is missing or non-finite', async () => {
+  it('saves a weigh-in entry (no dose) when doseMg is missing or non-finite', async () => {
     const [saved] = await saveInputRows(
       [input({ doseMg: Number.NaN, medication: SEMA, weightLbs: 180 })],
       { today: TODAY },
     );
-    expect(saved.injectionSaved).toBe(false);
-    expect(saved.injectionId).toBeUndefined();
-    expect(saved.weightId).toBeTruthy();
+    expect(saved.entryId).toBeTruthy();
 
-    expect(await getAllInjections()).toHaveLength(0);
-    expect(await getAllWeights()).toHaveLength(1);
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].amountMg).toBeUndefined();
+    expect(entries[0].weightLbs).toBe(180);
   });
 
-  it('updating an existing injection preserves the same id', async () => {
+  it('updating an existing entry preserves the same id', async () => {
     const [first] = await saveInputRows(
       [input({ date: TODAY, doseMg: 5, medication: SEMA })],
       { today: TODAY },
     );
-    expect(first.injectionId).toBeTruthy();
+    expect(first.entryId).toBeTruthy();
 
     const [second] = await saveInputRows(
       [
         {
           ...input({ date: TODAY, doseMg: 7, medication: SEMA }),
-          injectionId: first.injectionId,
+          entryId: first.entryId,
         },
       ],
       { today: TODAY },
     );
-    expect(second.injectionId).toBe(first.injectionId);
+    expect(second.entryId).toBe(first.entryId);
 
-    const injections = await getAllInjections();
-    expect(injections).toHaveLength(1);
-    expect(injections[0].amountMg).toBe(7);
+    const entries = await getAllEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].amountMg).toBe(7);
   });
 });

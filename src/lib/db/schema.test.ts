@@ -26,19 +26,17 @@ describe('schema.ts singleton', () => {
     const tableNames = db.tables.map((t) => t.name).sort();
     expect(tableNames).toEqual([
       'encrypted',
-      'injections',
+      'entries',
       'migrationBackfill',
       'outbox',
       'prescriptions',
       'profile',
-      'weights',
       'wrappedKeys',
     ]);
   });
 
   it('makes each table addressable by name on the class instance', () => {
-    expect(db.weights).toBeDefined();
-    expect(db.injections).toBeDefined();
+    expect(db.entries).toBeDefined();
     expect(db.prescriptions).toBeDefined();
     expect(db.profile).toBeDefined();
     expect(db.encrypted).toBeDefined();
@@ -47,10 +45,10 @@ describe('schema.ts singleton', () => {
     expect(db.wrappedKeys).toBeDefined();
 
     // Table accessors should be the same identity across reads.
-    expect(db.weights).toBe(db.weights);
+    expect(db.entries).toBe(db.entries);
   });
 
   it('re-exports DB_SCHEMA_VERSION from migrations.ts', () => {
-    expect(DB_SCHEMA_VERSION).toBe(2);
+    expect(DB_SCHEMA_VERSION).toBe(3);
   });
 });

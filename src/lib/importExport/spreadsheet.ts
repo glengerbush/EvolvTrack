@@ -1,5 +1,5 @@
-import { getAllInjections, getAllPrescriptions, getAllWeights, getProfile } from '$lib/domain/repo';
-import type { InjectionEntry, IsoDate, Prescription, ProfileSettings, WeightEntry } from '$lib/domain/types';
+import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import type { HealthEntry, IsoDate, Prescription, ProfileSettings } from '$lib/domain/types';
 import { APP_VERSION } from '$lib/version';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
 import { dateStamp, downloadBytes } from '$lib/importExport/download';
@@ -187,11 +187,12 @@ type SheetInput = {
 };
 
 type ExportData = {
-  weights: WeightEntry[];
-  injections: InjectionEntry[];
+  entries: HealthEntry[];
   prescriptions: Prescription[];
   profile?: ProfileSettings;
 };
+
+type DoseLike = { date: IsoDate; amountMg?: number; medication?: string };
 
 function colName(index: number): string {
   let name = '';
@@ -502,29 +503,29 @@ function systemFormula(rowNumber: number, lastRowNumber: number) {
   ].join('');
 }
 
-function normalizeInjectionSnapshot(injections: InjectionEntry[]) {
+function normalizeInjectionSnapshot(entries: HealthEntry[]) {
   let lastKnownMedication = '';
-  return [...injections]
+  return [...entries]
     .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-    .filter((injection) => Number.isFinite(injection.amountMg) && injection.amountMg > 0)
-    .map((injection) => {
-      const medication = injection.medication || lastKnownMedication;
-      if (injection.medication) lastKnownMedication = injection.medication;
-      return { date: injection.date, amountMg: injection.amountMg, medication };
+    .filter((e) => e.amountMg != null && Number.isFinite(e.amountMg) && e.amountMg > 0)
+    .map((e) => {
+      const medication = e.medication || lastKnownMedication;
+      if (e.medication) lastKnownMedication = e.medication;
+      return { date: e.date, amountMg: e.amountMg as number, medication };
     })
-    .filter((injection) => injection.medication);
+    .filter((d) => d.medication);
 }
 
-function systemLabel(injections: InjectionEntry[], date: IsoDate, weighIns: WeighIn[]) {
-  const amounts = calculateSystemMgByDrug(normalizeInjectionSnapshot(injections), date, weighIns);
+function systemLabel(entries: HealthEntry[], date: IsoDate, weighIns: WeighIn[]) {
+  const amounts = calculateSystemMgByDrug(normalizeInjectionSnapshot(entries), date, weighIns);
   return round(amounts.reduce((total, amount) => total + amount.amountMg, 0), 2);
 }
 
 function buildSummarySheet(data: ExportData, exportedAt: string): WriteSheet {
   const unit = data.profile?.weightUnit ?? 'lbs';
-  const currentWeight = [...data.weights]
+  const currentWeight = [...data.entries]
     .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
-    .find((weight) => weight.weightLbs != null)?.weightLbs;
+    .find((entry) => entry.weightLbs != null)?.weightLbs;
   const activeMedication = data.prescriptions.find((prescription) => prescription.status === 'active')?.type ?? '';
 
   return buildSheet({
@@ -538,8 +539,8 @@ function buildSummarySheet(data: ExportData, exportedAt: string): WriteSheet {
       ['Database schema version', DB_SCHEMA_VERSION],
       ['Exported at', exportedAt],
       ['Weight unit', unit],
-      ['Weights', data.weights.length],
-      ['Injections', data.injections.length],
+      ['Weights', data.entries.filter((e) => e.weightLbs != null).length],
+      ['Injections', data.entries.filter((e) => e.amountMg != null).length],
       ['Medication rows', data.prescriptions.length],
       [],
       ['Current weight', weightFromStoredLbs(currentWeight, unit)],
@@ -570,12 +571,12 @@ function buildHealthSheet(data: ExportData): WriteSheet {
   const unit = data.profile?.weightUnit ?? 'lbs';
   const unitToKg = unit === 'kg' ? 1 : KG_PER_LB;
   const weighIns: WeighIn[] = [];
-  for (const w of data.weights) {
-    if (w.weightLbs != null) weighIns.push({ date: w.date, weightKg: w.weightLbs * KG_PER_LB });
+  for (const e of data.entries) {
+    if (e.weightLbs != null) weighIns.push({ date: e.date, weightKg: e.weightLbs * KG_PER_LB });
   }
-  const weightsByDate = groupByDate(data.weights);
-  const injectionsByDate = groupByDate(data.injections);
-  const dates = [...new Set([...weightsByDate.keys(), ...injectionsByDate.keys()])].sort();
+  const orderedEntries = [...data.entries].sort(
+    (a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+  );
   const rows: SpreadsheetCellValue[][] = [[
     'Date',
     'Day',
@@ -601,44 +602,40 @@ function buildHealthSheet(data: ExportData): WriteSheet {
   ]];
   let previousWeight: number | null = null;
 
-  for (const date of dates) {
-    const dateWeights = weightsByDate.get(date) ?? [];
-    const dateInjections = injectionsByDate.get(date) ?? [];
-    const rowCount = Math.max(dateWeights.length, dateInjections.length, 1);
-    for (let index = 0; index < rowCount; index += 1) {
-      const weight = dateWeights[index];
-      const injection = dateInjections[index];
-      const displayWeight = weightFromStoredLbs(weight?.weightLbs, unit);
-      const loss = typeof displayWeight === 'number' && previousWeight != null
-        ? round(previousWeight - displayWeight, 1)
-        : '';
-      if (typeof displayWeight === 'number') previousWeight = displayWeight;
+  // One row per entry (no merge-by-date).
+  for (const entry of orderedEntries) {
+    const date = entry.date;
+    const hasDose = entry.amountMg != null;
+    const displayWeight = weightFromStoredLbs(entry.weightLbs, unit);
+    const loss = typeof displayWeight === 'number' && previousWeight != null
+      ? round(previousWeight - displayWeight, 1)
+      : '';
+    if (typeof displayWeight === 'number') previousWeight = displayWeight;
 
-      const rowWeightKg = weightForDate(weighIns, date);
-      rows.push([
-        dateCell(date),
-        dateLabel(date),
-        displayWeight,
-        loss,
-        weight?.wellness ?? '',
-        formatList(weight?.symptoms ?? injection?.symptoms),
-        injection?.medication ?? '',
-        injection?.amountMg ?? '',
-        injection?.planned ? 'Planned' : injection ? 'Confirmed' : '',
-        injection?.site ?? '',
-        systemLabel(data.injections, date, weighIns),
-        weight?.notes ?? injection?.notes ?? '',
-        decayTermValue(injection?.medication, rowWeightKg, 0, 'coefficient'),
-        decayTermValue(injection?.medication, rowWeightKg, 0, 'rateConstant'),
-        decayTermValue(injection?.medication, rowWeightKg, 1, 'coefficient'),
-        decayTermValue(injection?.medication, rowWeightKg, 1, 'rateConstant'),
-        decayTermValue(injection?.medication, rowWeightKg, 2, 'coefficient'),
-        decayTermValue(injection?.medication, rowWeightKg, 2, 'rateConstant'),
-        weight?.id ?? '',
-        injection?.id ?? '',
-        injection?.medication ? rowWeightKg ?? referenceWeightFor(injection.medication) : '',
-      ]);
-    }
+    const rowWeightKg = weightForDate(weighIns, date);
+    rows.push([
+      dateCell(date),
+      dateLabel(date),
+      displayWeight,
+      loss,
+      entry.wellness ?? '',
+      formatList(entry.symptoms),
+      hasDose ? entry.medication ?? '' : '',
+      hasDose ? entry.amountMg ?? '' : '',
+      hasDose ? (entry.planned ? 'Planned' : 'Confirmed') : '',
+      hasDose ? entry.site ?? '' : '',
+      systemLabel(data.entries, date, weighIns),
+      entry.notes ?? '',
+      decayTermValue(entry.medication, rowWeightKg, 0, 'coefficient'),
+      decayTermValue(entry.medication, rowWeightKg, 0, 'rateConstant'),
+      decayTermValue(entry.medication, rowWeightKg, 1, 'coefficient'),
+      decayTermValue(entry.medication, rowWeightKg, 1, 'rateConstant'),
+      decayTermValue(entry.medication, rowWeightKg, 2, 'coefficient'),
+      decayTermValue(entry.medication, rowWeightKg, 2, 'rateConstant'),
+      entry.weightLbs != null ? entry.id : '',
+      hasDose ? entry.id : '',
+      hasDose && entry.medication ? rowWeightKg ?? referenceWeightFor(entry.medication) : '',
+    ]);
   }
 
   const existingDataRows = rows.length - 1;
@@ -751,14 +748,17 @@ function buildInjectionSheet(data: ExportData): WriteSheet {
     'Injection ID',
   ]];
 
-  for (const injection of [...data.injections].sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))) {
+  const doseEntries = data.entries
+    .filter((e) => e.amountMg != null)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+  for (const injection of doseEntries) {
     rows.push([
       dateCell(injection.date),
-      injection.medication,
-      injection.amountMg,
+      injection.medication ?? '',
+      injection.amountMg ?? '',
       injection.planned ? 'Planned' : 'Confirmed',
       injection.confirmedAt ?? '',
-      injection.site,
+      injection.site ?? '',
       formatList(injection.symptoms),
       injection.notes ?? '',
       injection.id,
@@ -897,13 +897,12 @@ function buildSettingsSheet(data: ExportData): WriteSheet {
 }
 
 async function collectExportData(): Promise<ExportData> {
-  const [weights, injections, prescriptions, profile] = await Promise.all([
-    getAllWeights(),
-    getAllInjections(),
+  const [entries, prescriptions, profile] = await Promise.all([
+    getAllEntries(),
     getAllPrescriptions(),
     getProfile(),
   ]);
-  return { weights, injections, prescriptions, profile };
+  return { entries, prescriptions, profile };
 }
 
 function buildWorkbookOptions(data: ExportData): WriteOptions {

@@ -1,33 +1,57 @@
 import { derived } from 'svelte/store';
 import { fromLiveQuery } from '$lib/db/liveQuery';
-import { getAllInjections, getAllPrescriptions } from '$lib/domain/repo';
-import type { InjectionEntry, Medication, Prescription, PrescriptionStatus } from '$lib/domain/types';
-import { computeVialLevels, type DoseEvent, type VialLevel } from '$lib/utils/vialLevels';
+import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
+import type { HealthEntry, Medication, Prescription, PrescriptionStatus } from '$lib/domain/types';
+import {
+  attributeVials,
+  computeVialLevels,
+  type DoseEvent,
+  type VialAttribution,
+  type VialLevel,
+  type VialSpec,
+} from '$lib/utils/vialLevels';
 
 export const rawPrescriptions = fromLiveQuery(
   getAllPrescriptions,
   [] as Prescription[],
 );
 
-export const rawInjections = fromLiveQuery(
-  getAllInjections,
-  [] as InjectionEntry[],
+export const rawEntries = fromLiveQuery(
+  getAllEntries,
+  [] as HealthEntry[],
 );
 
 /**
- * Whether an injection actually drew product from a vial. Planned-but-not-taken
- * and skipped doses don't consume anything, so they're excluded from vial math.
+ * Whether an entry's dose actually drew product from a vial. Planned-but-not-
+ * taken, skipped, and weigh-in-only rows don't consume anything, so they're
+ * excluded from vial math.
  */
-export function isConsumingDose(injection: InjectionEntry): boolean {
-  return !injection.skipped && !injection.planned && injection.amountMg > 0;
+export function isConsumingDose(entry: HealthEntry): boolean {
+  return !entry.skipped && !entry.planned && entry.amountMg != null && entry.amountMg > 0;
 }
 
-function toDoseEvent(injection: InjectionEntry): DoseEvent {
+function toDoseEvent(entry: HealthEntry): DoseEvent {
   return {
-    medication: injection.medication || '',
-    amountMg: injection.amountMg,
-    date: injection.date,
-    createdAt: injection.createdAt,
+    id: entry.id,
+    medication: entry.medication || '',
+    amountMg: entry.amountMg as number,
+    date: entry.date,
+    createdAt: entry.createdAt,
+    prescriptionId: entry.prescriptionId,
+  };
+}
+
+function toVialSpec(p: Prescription): VialSpec {
+  return {
+    id: p.id,
+    medication: p.type ?? '',
+    concentrationMgMl: p.concentrationMgMl,
+    vialMl: p.vialMl,
+    prescribedDoseMg: p.prescribedDoseMg,
+    compoundDate: p.compoundDate,
+    sortOrder: p.sortOrder,
+    createdAt: p.createdAt,
+    manualMgUsed: p.manualMgUsed,
   };
 }
 
@@ -49,30 +73,52 @@ export type MedicationInputRow = {
 };
 
 /**
- * Computed level of every vial, keyed by prescription id. Reactive to both the
- * vials and the doses logged against them (compound-date FIFO; see
- * `computeVialLevels`). This is the source of truth for "doses/mg left" — the
+ * Computed level of every vial, keyed by prescription id. Each dose drains
+ * exactly its stored vial attribution (see `computeVialLevels`); reactive to the
+ * vials and the doses. This is the source of truth for "doses/mg left" — the
  * stored `dosesLeft` is only a fallback for vials with incomplete specs.
  */
 export const vialLevels = derived<
-  [typeof rawPrescriptions, typeof rawInjections],
+  [typeof rawPrescriptions, typeof rawEntries],
   Map<string, VialLevel>
->([rawPrescriptions, rawInjections], ([$prescriptions, $injections]) =>
+>([rawPrescriptions, rawEntries], ([$prescriptions, $entries]) =>
   computeVialLevels(
-    $prescriptions.map((p) => ({
-      id: p.id,
-      medication: p.type ?? '',
-      concentrationMgMl: p.concentrationMgMl,
-      vialMl: p.vialMl,
-      prescribedDoseMg: p.prescribedDoseMg,
-      compoundDate: p.compoundDate,
-      sortOrder: p.sortOrder,
-      createdAt: p.createdAt,
-      manualMgUsed: p.manualMgUsed,
-    })),
-    $injections.filter(isConsumingDose).map(toDoseEvent),
+    $prescriptions.map(toVialSpec),
+    $entries.filter(isConsumingDose).map(toDoseEvent),
   ),
 );
+
+/**
+ * The vial each consuming dose draws from, keyed by entry id — stored override
+ * or FIFO start vial (see `attributeVials`). Reactive to vials + doses.
+ */
+const vialAttribution = derived<
+  [typeof rawPrescriptions, typeof rawEntries],
+  Map<string, VialAttribution>
+>([rawPrescriptions, rawEntries], ([$prescriptions, $entries]) =>
+  attributeVials($prescriptions.map(toVialSpec), $entries.filter(isConsumingDose).map(toDoseEvent)),
+);
+
+/**
+ * Effective vial id per consuming dose (stored OR auto). The inputs table reads
+ * this for the dose chip so the vial number always shows, regardless of whether
+ * the local row's stored attribution has synced yet.
+ */
+export const vialByEntryId = derived(vialAttribution, ($attr) => {
+  const out = new Map<string, string>();
+  for (const [id, a] of $attr) out.set(id, a.vialId);
+  return out;
+});
+
+/**
+ * Only the doses still needing a permanent attribution (auto, not yet frozen).
+ * The inputs table persists these as `prescriptionId`.
+ */
+export const autoVialByEntryId = derived(vialAttribution, ($attr) => {
+  const out = new Map<string, string>();
+  for (const [id, a] of $attr) if (a.auto) out.set(id, a.vialId);
+  return out;
+});
 
 export const medicationRows = derived(
   [rawPrescriptions, vialLevels],

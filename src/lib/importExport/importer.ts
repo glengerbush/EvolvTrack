@@ -17,9 +17,8 @@ import {
   cleanOptionalString,
   cleanString,
   EMPTY_IMPORT_DATA,
-  makeInjectionEntry,
+  makeHealthEntry,
   makePrescription,
-  makeWeightEntry,
   mapObjectByNormalizedHeaders,
   mergeWarnings,
   normalizeHeader,
@@ -39,11 +38,10 @@ import {
 import type {
   DosageColKey,
   HealthColKey,
-  InjectionEntry,
+  HealthEntry,
   Prescription,
   ProfileSettings,
   VialColKey,
-  WeightEntry,
   WeightUnit,
 } from '$lib/domain/types';
 import type { ThemeName } from '$lib/theme/dashboardTheme';
@@ -151,10 +149,9 @@ function medicationWarning(rawMedication: unknown) {
   return `Unrecognized medication "${cleaned}" was imported without a medication value.`;
 }
 
-function parseHealthLikeTable(table: ObjectTable): { data: Pick<ImportData, 'weights' | 'injections'>; warnings: string[] } {
+function parseHealthLikeTable(table: ObjectTable): { data: Pick<ImportData, 'entries'>; warnings: string[] } {
   const warnings: string[] = [];
-  const weights = [];
-  const injections = [];
+  const entries = [];
   const unitHint = detectWeightUnit(table.headers);
 
   for (const rawRow of table.rows) {
@@ -172,40 +169,41 @@ function parseHealthLikeTable(table: ObjectTable): { data: Pick<ImportData, 'wei
     const notes = cleanOptionalString(pickField(row, NOTE_FIELDS));
     const doseMg = parseNumber(pickField(row, DOSE_FIELDS));
     const hasDose = doseMg != null && doseMg > 0;
-    const hasWeightData = (
+    const hasAnyData =
       weightLbs != null ||
       wellness != null ||
-      (!hasDose && (symptoms.length > 0 || notes != null)) ||
-      cleanString(pickField(row, WEIGHT_ID_FIELDS))
-    );
+      symptoms.length > 0 ||
+      notes != null ||
+      hasDose ||
+      cleanString(pickField(row, WEIGHT_ID_FIELDS)) ||
+      cleanString(pickField(row, INJECTION_ID_FIELDS));
 
-    if (hasWeightData) {
-      weights.push(makeWeightEntry({
-        id: pickField(row, WEIGHT_ID_FIELDS),
+    if (!hasAnyData) continue;
+
+    // One row = one entry. A combined row carries both weigh-in and dose; a
+    // weigh-in-only or dose-only row carries just its side.
+    entries.push(
+      makeHealthEntry({
+        id: pickField(row, WEIGHT_ID_FIELDS) || pickField(row, INJECTION_ID_FIELDS),
         date,
         weightLbs,
         wellness,
         symptoms,
         notes,
-      }));
-    }
-
-    if (hasDose) {
-      injections.push(makeInjectionEntry({
-        id: pickField(row, INJECTION_ID_FIELDS),
-        date,
-        amountMg: doseMg,
-        medication: rawMedication,
-        site: pickField(row, SITE_FIELDS),
-        symptoms,
-        notes,
-        planned: pickField(row, STATUS_FIELDS),
-        confirmedAt: pickField(row, CONFIRMED_FIELDS),
-      }));
-    }
+        ...(hasDose
+          ? {
+              amountMg: doseMg,
+              medication: rawMedication,
+              site: pickField(row, SITE_FIELDS),
+              planned: pickField(row, STATUS_FIELDS),
+              confirmedAt: pickField(row, CONFIRMED_FIELDS),
+            }
+          : {}),
+      }),
+    );
   }
 
-  return { data: { weights, injections }, warnings: [...new Set(warnings)] };
+  return { data: { entries }, warnings: [...new Set(warnings)] };
 }
 
 function parsePrescriptionTable(table: ObjectTable): { prescriptions: Prescription[]; warnings: string[] } {
@@ -290,7 +288,7 @@ function parseSettingsTable(table: ObjectTable | null): ProfileSettings | undefi
 }
 
 function parseGenericTables(tables: ObjectTable[]) {
-  const data: ImportData = { weights: [], injections: [], prescriptions: [] };
+  const data: ImportData = { entries: [], prescriptions: [] };
   const warnings: string[] = [];
 
   for (const table of tables) {
@@ -301,8 +299,7 @@ function parseGenericTables(tables: ObjectTable[]) {
       warnings.push(...parsed.warnings);
     } else if (classification === 'health') {
       const parsed = parseHealthLikeTable(table);
-      data.weights.push(...parsed.data.weights);
-      data.injections.push(...parsed.data.injections);
+      data.entries.push(...parsed.data.entries);
       warnings.push(...parsed.warnings);
     }
   }
@@ -317,18 +314,19 @@ function parseEvolvTrackSpreadsheet(workbook: SpreadsheetWorkbook): ImportParseR
   const medicationTable = tableFromSheet(workbookSheet(workbook, 'Medication'));
   const settingsTable = tableFromSheet(workbookSheet(workbook, 'Settings'));
   const warnings: string[] = [];
-  const data: ImportData = { weights: [], injections: [], prescriptions: [] };
+  const data: ImportData = { entries: [], prescriptions: [] };
 
   if (healthTable) {
     const parsed = parseHealthLikeTable(healthTable);
-    data.weights = parsed.data.weights;
-    data.injections = parsed.data.injections;
+    data.entries = parsed.data.entries;
     warnings.push(...parsed.warnings);
   }
 
-  if (data.injections.length === 0 && injectionsTable) {
+  // Fall back to a dedicated Injections sheet only when the Health Log carried
+  // no doses (older exports kept doses separate).
+  if (!data.entries.some((e) => e.amountMg != null) && injectionsTable) {
     const parsed = parseHealthLikeTable(injectionsTable);
-    data.injections = parsed.data.injections;
+    data.entries.push(...parsed.data.entries.filter((e) => e.amountMg != null));
     warnings.push(...parsed.warnings);
   }
 
@@ -397,8 +395,7 @@ async function parseJsonFile(file: File): Promise<ImportParseResult> {
       source: 'EvolvTrack backup',
       sourceDetail: `app ${backup.appVersion}, backup v${backup.formatVersion}`,
       data: {
-        weights: backup.data.weights,
-        injections: backup.data.injections,
+        entries: backup.data.entries,
         prescriptions: backup.data.prescriptions,
         profile: backup.data.profile,
       },
@@ -449,7 +446,7 @@ async function parseSpreadsheet(file: File): Promise<ImportParseResult> {
 }
 
 function hasImportData(data: ImportData) {
-  return data.weights.length > 0 || data.injections.length > 0 || data.prescriptions.length > 0 || Boolean(data.profile);
+  return data.entries.length > 0 || data.prescriptions.length > 0 || Boolean(data.profile);
 }
 
 export async function parseTrackingFile(file: File): Promise<ImportParseResult> {
@@ -479,19 +476,17 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
 /** Day + recorded weight identify a weight reading. Weight-less rows
  * (wellness/symptom-only) collapse by day alone so re-imports of them also
  * dedupe. Rounded to 0.1 lb so trivial float noise doesn't defeat the match. */
-function weightDedupeKey(w: Pick<WeightEntry, 'date' | 'weightLbs'>): string {
-  const lbs = w.weightLbs != null ? Math.round(w.weightLbs * 10) / 10 : 'none';
-  return `${w.date}#${lbs}`;
-}
-
-function doseDedupeKey(date: string, amountMg: number): string {
-  return `${date}#${amountMg.toFixed(3)}`;
+function entryDedupeKey(
+  e: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>,
+): string {
+  const lbs = e.weightLbs != null ? Math.round(e.weightLbs * 10) / 10 : 'none';
+  const dose = e.amountMg != null ? e.amountMg.toFixed(3) : 'none';
+  return `${e.date}#${lbs}#${dose}#${e.medication ?? ''}`;
 }
 
 export type DedupeResult = {
   data: ImportData;
-  skippedWeights: number;
-  skippedInjections: number;
+  skipped: number;
 };
 
 /**
@@ -510,50 +505,22 @@ export type DedupeResult = {
  */
 export function dedupeAgainstExisting(
   data: ImportData,
-  existing: { weights: Pick<WeightEntry, 'date' | 'weightLbs'>[]; injections: Pick<InjectionEntry, 'date' | 'amountMg' | 'medication'>[] },
+  existing: { entries: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>[] },
 ): DedupeResult {
-  const seenWeights = new Set(existing.weights.map(weightDedupeKey));
-  const weights: WeightEntry[] = [];
-  let skippedWeights = 0;
-  for (const w of data.weights) {
-    const key = weightDedupeKey(w);
-    if (seenWeights.has(key)) {
-      skippedWeights += 1;
+  const seen = new Set(existing.entries.map(entryDedupeKey));
+  const entries: HealthEntry[] = [];
+  let skipped = 0;
+  for (const e of data.entries) {
+    const key = entryDedupeKey(e);
+    if (seen.has(key)) {
+      skipped += 1;
       continue;
     }
-    seenWeights.add(key);
-    weights.push(w);
+    seen.add(key);
+    entries.push(e);
   }
 
-  // Per (day, dose), the set of medications already seen ('' = unknown drug).
-  const dayDoseMeds = new Map<string, Set<string>>();
-  const note = (date: string, amountMg: number, med: string) => {
-    const key = doseDedupeKey(date, amountMg);
-    const set = dayDoseMeds.get(key) ?? new Set<string>();
-    set.add(med);
-    dayDoseMeds.set(key, set);
-  };
-  const isDuplicateDose = (date: string, amountMg: number, med: string): boolean => {
-    const set = dayDoseMeds.get(doseDedupeKey(date, amountMg));
-    if (!set || set.size === 0) return false;
-    // Blank drug on either side ⇒ assume the same drug logged that day.
-    return med === '' || set.has('') || set.has(med);
-  };
-  for (const i of existing.injections) note(i.date, i.amountMg, i.medication ?? '');
-
-  const injections: InjectionEntry[] = [];
-  let skippedInjections = 0;
-  for (const i of data.injections) {
-    const med = i.medication ?? '';
-    if (isDuplicateDose(i.date, i.amountMg, med)) {
-      skippedInjections += 1;
-      continue;
-    }
-    note(i.date, i.amountMg, med);
-    injections.push(i);
-  }
-
-  return { data: { ...data, weights, injections }, skippedWeights, skippedInjections };
+  return { data: { ...data, entries }, skipped };
 }
 
 async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): Promise<void> {
@@ -561,17 +528,10 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
   // in the same file) so re-importing doesn't create copies. Replace mode wipes
   // first, so there's nothing to dedupe against.
   if (mode === 'merge') {
-    const [existingWeights, existingInjections] = await Promise.all([
-      db.weights.toArray(),
-      db.injections.toArray(),
-    ]);
-    const deduped = dedupeAgainstExisting(parsed.data, {
-      weights: existingWeights,
-      injections: existingInjections,
-    });
-    parsed.data.weights = deduped.data.weights;
-    parsed.data.injections = deduped.data.injections;
-    const skipped = deduped.skippedWeights + deduped.skippedInjections;
+    const existingEntries = await db.entries.toArray();
+    const deduped = dedupeAgainstExisting(parsed.data, { entries: existingEntries });
+    parsed.data.entries = deduped.data.entries;
+    const skipped = deduped.skipped;
     if (skipped > 0) {
       parsed.warnings = [
         ...parsed.warnings,
@@ -587,43 +547,36 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
   // outbox entry (not one for `parsed.data.profile` and a second for the
   // newly-registered symptoms).
   const importedSymptoms = new Set<string>();
-  for (const w of parsed.data.weights) {
-    for (const s of w.symptoms ?? []) importedSymptoms.add(s);
-  }
-  for (const i of parsed.data.injections) {
-    for (const s of i.symptoms ?? []) importedSymptoms.add(s);
+  for (const e of parsed.data.entries) {
+    for (const s of e.symptoms ?? []) importedSymptoms.add(s);
   }
 
   let mergedProfile: ProfileSettings | undefined;
-  const tables = [db.weights, db.injections, db.prescriptions, db.profile, db.outbox];
+  const tables = [db.entries, db.prescriptions, db.profile, db.outbox];
   await db.transaction('rw', tables, async () => {
-    let deletedIds: { weights: string[]; injections: string[]; prescriptions: string[] } | undefined;
+    let deletedIds: { entries: string[]; prescriptions: string[] } | undefined;
     if (mode === 'replace') {
       // Capture pre-clear primary keys so the outbox can publish delete
       // tombstones for them. Without this, replace-mode imports drop local
       // rows but leave the cloud copies in place, and the next pull
       // resurrects them.
-      const [weightIds, injectionIds, prescriptionIds] = await Promise.all([
-        db.weights.toCollection().primaryKeys(),
-        db.injections.toCollection().primaryKeys(),
+      const [entryIds, prescriptionIds] = await Promise.all([
+        db.entries.toCollection().primaryKeys(),
         db.prescriptions.toCollection().primaryKeys(),
       ]);
       deletedIds = {
-        weights: weightIds as string[],
-        injections: injectionIds as string[],
+        entries: entryIds as string[],
         prescriptions: prescriptionIds as string[],
       };
       await Promise.all([
-        db.weights.clear(),
-        db.injections.clear(),
+        db.entries.clear(),
         db.prescriptions.clear(),
         replaceProfile ? db.profile.clear() : Promise.resolve(),
       ]);
     }
 
     await Promise.all([
-      parsed.data.weights.length ? db.weights.bulkPut(parsed.data.weights) : Promise.resolve(),
-      parsed.data.injections.length ? db.injections.bulkPut(parsed.data.injections) : Promise.resolve(),
+      parsed.data.entries.length ? db.entries.bulkPut(parsed.data.entries) : Promise.resolve(),
       parsed.data.prescriptions.length ? db.prescriptions.bulkPut(parsed.data.prescriptions) : Promise.resolve(),
     ]);
 
@@ -640,19 +593,15 @@ async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): P
   if (mergedProfile) hydrateSymptomStoresFromProfile(mergedProfile);
 
   // Notify the in-memory health cache about the bulk write so it doesn't go stale.
-  if (mode === 'replace') {
-    emitHealthChange({ kind: 'weight', action: 'reset' });
-    emitHealthChange({ kind: 'injection', action: 'reset' });
-  }
-  for (const w of parsed.data.weights) emitHealthChange({ kind: 'weight', action: 'add', entity: w });
-  for (const i of parsed.data.injections) emitHealthChange({ kind: 'injection', action: 'add', entity: i });
+  if (mode === 'replace') emitHealthChange({ action: 'reset' });
+  for (const e of parsed.data.entries) emitHealthChange({ action: 'add', entity: e });
 
-  const earliest = parsed.data.weights
-    .filter((w) => w.weightLbs != null)
-    .reduce<typeof parsed.data.weights[number] | null>((acc, w) => {
-      if (!acc) return w;
-      if (w.date < acc.date) return w;
-      if (w.date === acc.date && w.createdAt < acc.createdAt) return w;
+  const earliest = parsed.data.entries
+    .filter((e) => e.weightLbs != null)
+    .reduce<typeof parsed.data.entries[number] | null>((acc, e) => {
+      if (!acc) return e;
+      if (e.date < acc.date) return e;
+      if (e.date === acc.date && e.createdAt < acc.createdAt) return e;
       return acc;
     }, null);
   if (earliest?.weightLbs != null) void setStartWeightIfUnset(earliest.weightLbs);
@@ -670,9 +619,11 @@ export async function importTrackingFile(file: File, mode: ImportMode): Promise<
 export function importResultSummary(result: Pick<ImportApplyResult, 'source' | 'sourceDetail' | 'data' | 'mode'>) {
   const detail = result.sourceDetail ? ` from ${result.sourceDetail}` : '';
   const action = result.mode === 'replace' ? 'Replaced data with' : 'Imported';
+  const weighIns = result.data.entries.filter((e) => e.weightLbs != null).length;
+  const doses = result.data.entries.filter((e) => e.amountMg != null).length;
   const counts = [
-    `${result.data.weights.length} weight entr${result.data.weights.length === 1 ? 'y' : 'ies'}`,
-    `${result.data.injections.length} injection${result.data.injections.length === 1 ? '' : 's'}`,
+    `${weighIns} weight entr${weighIns === 1 ? 'y' : 'ies'}`,
+    `${doses} injection${doses === 1 ? '' : 's'}`,
     `${result.data.prescriptions.length} medication row${result.data.prescriptions.length === 1 ? '' : 's'}`,
   ];
   if (result.data.profile) counts.push('settings');
@@ -681,8 +632,7 @@ export function importResultSummary(result: Pick<ImportApplyResult, 'source' | '
 
 export function emptyImportData(): ImportData {
   return {
-    weights: [...EMPTY_IMPORT_DATA.weights],
-    injections: [...EMPTY_IMPORT_DATA.injections],
+    entries: [...EMPTY_IMPORT_DATA.entries],
     prescriptions: [...EMPTY_IMPORT_DATA.prescriptions],
   };
 }

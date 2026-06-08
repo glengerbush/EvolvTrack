@@ -1,9 +1,8 @@
 import { DB_SCHEMA_VERSION, db, type EncryptedRecord } from '$lib/db/schema';
 import { nanoid } from 'nanoid';
 import {
-  getAllInjections,
+  getAllEntries,
   getAllPrescriptions,
-  getAllWeights,
   getProfile,
   getProfileSyncMode,
   saveProfile,
@@ -180,22 +179,15 @@ function profilePayload(profile: ProfileSettings): unknown {
 }
 
 async function collectBackfillItems(): Promise<BackfillItem[]> {
-  const [weights, injections, prescriptions, profile] = await Promise.all([
-    getAllWeights(),
-    getAllInjections(),
+  const [entries, prescriptions, profile] = await Promise.all([
+    getAllEntries(),
     getAllPrescriptions(),
     getProfile(),
   ]);
 
   const items: BackfillItem[] = [
-    ...weights.map((record) => ({
-      aggregate: 'weight' as const,
-      id: record.id,
-      updatedAt: record.updatedAt,
-      payload: record,
-    })),
-    ...injections.map((record) => ({
-      aggregate: 'injection' as const,
+    ...entries.map((record) => ({
+      aggregate: 'entry' as const,
       id: record.id,
       updatedAt: record.updatedAt,
       payload: record,

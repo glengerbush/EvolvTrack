@@ -36,10 +36,8 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('$lib/domain/repo', () => ({
-  getAllWeights: vi.fn(async () => [
+  getAllEntries: vi.fn(async () => [
     { id: 'w1', date: '2026-05-01', weightLbs: 180, updatedAt: '2026-05-01T00:00:00.000Z' },
-  ]),
-  getAllInjections: vi.fn(async () => [
     { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Sema', updatedAt: '2026-05-01T00:00:00.000Z' },
   ]),
   getAllPrescriptions: vi.fn(async () => []),
@@ -206,7 +204,7 @@ import {
   MigrationSupersededError,
   SyncTransitionConflictError,
 } from '$lib/sync/account-state';
-import { getAllWeights, getAllInjections } from '$lib/domain/repo';
+import { getAllEntries } from '$lib/domain/repo';
 import {
   decryptRecord,
   derivePassphraseKek,
@@ -349,7 +347,7 @@ describe('startE2EEMigration — happy path from plain', () => {
     const entries = await db.migrationBackfill.toArray();
     expect(entries.length).toBe(3);
     const aggregates = new Set(entries.map((e) => e.aggregate));
-    expect(aggregates).toEqual(new Set(['weight', 'injection', 'profile']));
+    expect(aggregates).toEqual(new Set(['entry', 'entry', 'profile']));
   });
 
   it('marks the profile as passphraseEnabled and syncMode=e2ee on success', async () => {
@@ -563,9 +561,9 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
       {
         id: 'r-1',
-        aggregate: 'weight',
+        aggregate: 'entry',
         op: 'upsert',
-        ciphertext: 'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99"}}',
+        ciphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99"}}',
         iv: 'iv',
         protocolVersion: 1,
         encryptionVersion: 1,
@@ -585,7 +583,7 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     expect(pushPlainChangesMock).toHaveBeenCalledTimes(1);
     const eventsArg = pushPlainChangesMock.mock.calls[0]?.[0] as Array<{ aggregate: string }>;
     expect(Array.isArray(eventsArg)).toBe(true);
-    expect(eventsArg[0].aggregate).toBe('weight');
+    expect(eventsArg[0].aggregate).toBe('entry');
   });
 
   it('decrypts only the active DEK version (skips orphan-version rows that would crash the decrypt)', async () => {
@@ -606,9 +604,9 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
   it('folds rows already in the plaintext table into the conversion set (handles both tables)', async () => {
     fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
       {
-        id: 'weight:w99',
+        id: 'entry:w99',
         ciphertext:
-          'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99","updatedAt":"2026-04-01T00:00:00.000Z"}}',
+          'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99","updatedAt":"2026-04-01T00:00:00.000Z"}}',
         iv: 'iv',
         protocolVersion: 1,
         encryptionVersion: 1,
@@ -620,8 +618,8 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     // was underway (RLS lets plain writes through in migrating_to_plain).
     fetchRemotePlainChangesMock.mockResolvedValueOnce([
       {
-        id: 'injection:i50',
-        aggregate: 'injection',
+        id: 'entry:i50',
+        aggregate: 'entry',
         op: 'upsert',
         payload: { id: 'i50' },
         protocolVersion: 1,
@@ -635,8 +633,8 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
 
     const pushed = pushPlainChangesMock.mock.calls[0]?.[0] as Array<{ id: string }>;
     const ids = pushed.map((c) => c.id);
-    expect(ids).toContain('weight:w99'); // converted from the encrypted table
-    expect(ids).toContain('injection:i50'); // preserved from the plaintext table
+    expect(ids).toContain('entry:w99'); // converted from the encrypted table
+    expect(ids).toContain('entry:i50'); // preserved from the plaintext table
   });
 
   it('emits canonical `${aggregate}:${entityId}` ids and the record as payload (so pullPlain can read it back)', async () => {
@@ -646,11 +644,11 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     // shape that pullPlain decoded to a null record.
     fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
       {
-        id: 'mig-abc:weight:w99',
-        aggregate: 'weight',
+        id: 'mig-abc:entry:w99',
+        aggregate: 'entry',
         op: 'upsert',
         ciphertext:
-          'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99","weightLbs":180,"updatedAt":"2026-04-02T00:00:00.000Z"}}',
+          'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99","weightLbs":180,"updatedAt":"2026-04-02T00:00:00.000Z"}}',
         iv: 'iv',
         protocolVersion: 1,
         encryptionVersion: 1,
@@ -664,8 +662,8 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     await startE2EEDisableMigration('pw');
 
     const change = (pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>)[0];
-    expect(change.id).toBe('weight:w99'); // canonical, not migrationId-prefixed
-    expect(change.aggregate).toBe('weight');
+    expect(change.id).toBe('entry:w99'); // canonical, not migrationId-prefixed
+    expect(change.aggregate).toBe('entry');
     expect(change.op).toBe('upsert');
     expect(change.payload).toMatchObject({ id: 'w99', weightLbs: 180 }); // raw record
     expect(change.createdAt).toBe('2026-04-02T00:00:00.000Z'); // the record's own LWW clock
@@ -680,8 +678,8 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
     const ids = changes.map((c) => c.id);
     // weights(w1) + injections(i1) + profile come from the repo mock.
-    expect(ids).toContain('weight:w1');
-    expect(ids).toContain('injection:i1');
+    expect(ids).toContain('entry:w1');
+    expect(ids).toContain('entry:i1');
     expect(ids).toContain('profile:profile');
     expect(ids.every((id) => !String(id).includes(':plain:'))).toBe(true);
   });
@@ -716,9 +714,9 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
   it('clears local encrypted + migrationBackfill tables on success', async () => {
     await db.migrationBackfill.put({
       id: 'leftover',
-      aggregate: 'weight',
+      aggregate: 'entry',
       op: 'upsert',
-      payloadCiphertext: 'ct:{"aggregate":"weight","op":"upsert","record":{"id":"w99"}}',
+      payloadCiphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99"}}',
       payloadIv: 'iv',
       protocolVersion: 1,
       encryptionVersion: 1,
@@ -726,8 +724,8 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
       createdAt: '2026-05-01T00:00:00.000Z',
     });
     await db.encrypted.put({
-      id: 'weight:w99',
-      entity: 'weight',
+      id: 'entry:w99',
+      entity: 'entry',
       ciphertext: 'ct',
       iv: 'iv',
       keyVersion: 1,
@@ -976,8 +974,8 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
     expect(fetchRemoteEncryptedChangesMock).not.toHaveBeenCalled();
     const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
     const ids = changes.map((c) => c.id);
-    expect(ids).toContain('weight:w1');
-    expect(ids).toContain('injection:i1');
+    expect(ids).toContain('entry:w1');
+    expect(ids).toContain('entry:i1');
     expect(result.pushed).toBe(3);
   });
 
@@ -1007,8 +1005,7 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
   });
 
   it('refuses (and deletes nothing) when this device has no data to keep', async () => {
-    vi.mocked(getAllWeights).mockResolvedValueOnce([]);
-    vi.mocked(getAllInjections).mockResolvedValueOnce([]);
+    vi.mocked(getAllEntries).mockResolvedValueOnce([]);
     // getAllPrescriptions already returns [] in the repo mock.
 
     await expect(resetEncryptionToPlain()).rejects.toThrow(/no data on this device/i);

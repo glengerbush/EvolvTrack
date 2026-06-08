@@ -7,8 +7,8 @@ export type HealthSystemAmount = SystemDrugAmount & {
 };
 
 export type HealthInputRow = {
-  weightId?: string;
-  injectionId?: string;
+  /** The backing HealthEntry id (one record per row). */
+  entryId?: string;
   day: string;
   date: IsoDate;
   system: string;
@@ -18,6 +18,8 @@ export type HealthInputRow = {
   doseConfirmedAt?: string;
   doseSkipped: boolean;
   medication: string;
+  /** Manual per-dose vial override (a Prescription.id); absent = auto-FIFO. */
+  prescriptionId?: string;
   weight: string;
   wellness: string;
   loss: string;

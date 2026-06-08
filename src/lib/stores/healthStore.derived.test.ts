@@ -5,7 +5,7 @@ import '../../test/dexie-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { iso } from '../../test/iso';
-import type { InjectionEntry, WeightEntry } from '$lib/domain/types';
+import type { HealthEntry } from '$lib/domain/types';
 
 vi.mock('$app/environment', () => ({ browser: true }));
 
@@ -13,11 +13,11 @@ const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)' as const;
 const TS = '2026-05-10T12:00:00.000Z';
 
-function weight(id: string, date: string, weightLbs?: number, extra: Partial<WeightEntry> = {}): WeightEntry {
-  return { id, date: iso(date), weightLbs, createdAt: TS, updatedAt: TS, ...extra };
+function weighIn(id: string, date: string, weightLbs?: number, extra: Partial<HealthEntry> = {}): HealthEntry {
+  return { id, date: iso(date), weightLbs, symptoms: [], createdAt: TS, updatedAt: TS, ...extra };
 }
 
-function injection(id: string, date: string, amountMg: number, extra: Partial<InjectionEntry> = {}): InjectionEntry {
+function dose(id: string, date: string, amountMg: number, extra: Partial<HealthEntry> = {}): HealthEntry {
   return {
     id,
     date: iso(date),
@@ -49,46 +49,36 @@ async function setup() {
 }
 
 describe('healthStore — latestWeightLbs', () => {
-  it('starts null with no weight rows', async () => {
+  it('starts null with no weigh-in rows', async () => {
     const { latestWeightLbs } = await setup();
     expect(get(latestWeightLbs)).toBeNull();
   });
 
-  it('returns the lbs of the weight with the latest date', async () => {
+  it('returns the lbs of the weigh-in with the latest date', async () => {
     const { latestWeightLbs, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180) });
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-05', 175) });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: weighIn('w2', '2026-05-05', 175) });
     expect(get(latestWeightLbs)).toBe(175);
   });
 
   it('uses the latest date, not insertion order, when a later-added row is older', async () => {
-    // Regression: the store is seeded in insertion order, so adding an
-    // older-dated weigh-in after a newer one must not change "current weight".
     const { latestWeightLbs, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-05', 175) });
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-05', 175) });
+    emitHealthChange({ action: 'add', entity: weighIn('w2', '2026-05-01', 180) });
     expect(get(latestWeightLbs)).toBe(175);
   });
 
-  it('breaks a same-date tie by createdAt, preferring the later-created row', async () => {
+  it('averages multiple weigh-ins on the latest date', async () => {
     const { latestWeightLbs, emitHealthChange } = await setup();
-    emitHealthChange({
-      kind: 'weight',
-      action: 'add',
-      entity: weight('w1', '2026-05-05', 175, { createdAt: '2026-05-05T08:00:00.000Z' }),
-    });
-    emitHealthChange({
-      kind: 'weight',
-      action: 'add',
-      entity: weight('w2', '2026-05-05', 172, { createdAt: '2026-05-05T20:00:00.000Z' }),
-    });
-    expect(get(latestWeightLbs)).toBe(172);
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-05', 176) });
+    emitHealthChange({ action: 'add', entity: weighIn('w2', '2026-05-05', 172) });
+    expect(get(latestWeightLbs)).toBe(174);
   });
 
-  it('skips entries that have no weightLbs and returns the next valid one', async () => {
+  it('skips entries that have no weightLbs and returns the next valid date', async () => {
     const { latestWeightLbs, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180) });
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-05') });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: weighIn('w2', '2026-05-05') });
     expect(get(latestWeightLbs)).toBe(180);
   });
 });
@@ -99,97 +89,86 @@ describe('healthStore — healthEntries', () => {
     expect(get(healthEntries)).toEqual([]);
   });
 
-  it('builds one row per unique date sorted ascending', async () => {
+  it('builds rows sorted by date ascending', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-05', 175) });
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w2', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-05', 175) });
+    emitHealthChange({ action: 'add', entity: weighIn('w2', '2026-05-01', 180) });
     const rows = get(healthEntries);
     expect(rows.map((r) => r.date)).toEqual([iso('2026-05-01'), iso('2026-05-05')]);
   });
 
-  it('renders weight rows with the numeric weight as a string and empty dose', async () => {
+  it('renders weigh-in rows with the numeric weight as a string and empty dose', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180.5) });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-01', 180.5) });
     const [row] = get(healthEntries);
     expect(row.weight).toBe('180.5');
     expect(row.dose).toBe('');
-    expect(row.weightId).toBe('w1');
+    expect(row.entryId).toBe('w1');
   });
 
-  it('renders injection rows with dose and medication', async () => {
+  it('renders dose rows with dose and medication', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2.5) });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5) });
     const [row] = get(healthEntries);
     expect(row.dose).toBe('2.5');
     expect(row.medication).toBe(SEMA);
-    expect(row.injectionId).toBe('i1');
+    expect(row.entryId).toBe('i1');
   });
 
-  it('blanks the dose / system fields for a skipped injection', async () => {
+  it('blanks the dose / system fields for a skipped dose', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({
-      kind: 'injection',
-      action: 'add',
-      entity: injection('i1', '2026-05-01', 2.5, { skipped: true }),
-    });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5, { skipped: true }) });
     const [row] = get(healthEntries);
     expect(row.doseSkipped).toBe(true);
     expect(row.system).toBe('');
     expect(row.systemAmounts).toEqual([]);
   });
 
-  it('pairs same-date weight and injection into a single row', async () => {
+  it('keeps a same-date weigh-in and dose as TWO independent rows (no merge)', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180) });
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2.5) });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5) });
     const rows = get(healthEntries);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ weightId: 'w1', injectionId: 'i1', weight: '180', dose: '2.5' });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.entryId).sort()).toEqual(['i1', 'w1']);
   });
 
-  it('produces one row per distinct injection date', async () => {
+  it('produces one row per distinct dose date', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2) });
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i2', '2026-05-02', 2) });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2) });
+    emitHealthChange({ action: 'add', entity: dose('i2', '2026-05-02', 2) });
     const rows = get(healthEntries);
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.medication === SEMA)).toBe(true);
   });
 
-  it('switches to multi-medication system labelling when ≥2 drugs are present', async () => {
+  it('records distinct medications across rows when ≥2 drugs are present', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2) });
-    emitHealthChange({
-      kind: 'injection',
-      action: 'add',
-      entity: injection('i2', '2026-05-02', 5, { medication: TIRZ }),
-    });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2) });
+    emitHealthChange({ action: 'add', entity: dose('i2', '2026-05-02', 5, { medication: TIRZ }) });
     const rows = get(healthEntries);
-    expect(rows.length).toBeGreaterThan(0);
-    // Distinct medications recorded in their respective rows.
-    expect(new Set(rows.map((r) => r.medication).filter(Boolean)).size).toBeGreaterThanOrEqual(1);
+    expect(new Set(rows.map((r) => r.medication).filter(Boolean)).size).toBe(2);
   });
 
-  it('reflects a patch on an injection', async () => {
+  it('reflects a patch on a dose entry', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2.5) });
-    emitHealthChange({ kind: 'injection', action: 'patch', id: 'i1', patch: { amountMg: 5 } });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5) });
+    emitHealthChange({ action: 'patch', id: 'i1', patch: { amountMg: 5 } });
     expect(get(healthEntries)[0].dose).toBe('5');
   });
 
-  it('removes a row when its injection is deleted and no weight remains for that date', async () => {
+  it('removes a row when its entry is deleted', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2.5) });
-    emitHealthChange({ kind: 'injection', action: 'delete', id: 'i1' });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5) });
+    emitHealthChange({ action: 'delete', id: 'i1' });
     expect(get(healthEntries)).toEqual([]);
   });
 
-  it('clears all rows on a weight + injection reset', async () => {
+  it('clears all rows on reset', async () => {
     const { healthEntries, emitHealthChange } = await setup();
-    emitHealthChange({ kind: 'weight', action: 'add', entity: weight('w1', '2026-05-01', 180) });
-    emitHealthChange({ kind: 'injection', action: 'add', entity: injection('i1', '2026-05-01', 2.5) });
-    emitHealthChange({ kind: 'weight', action: 'reset' });
-    emitHealthChange({ kind: 'injection', action: 'reset' });
+    emitHealthChange({ action: 'add', entity: weighIn('w1', '2026-05-01', 180) });
+    emitHealthChange({ action: 'add', entity: dose('i1', '2026-05-01', 2.5) });
+    emitHealthChange({ action: 'reset' });
     expect(get(healthEntries)).toEqual([]);
   });
 });

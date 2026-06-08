@@ -320,7 +320,7 @@
     gap: 0.75rem;
   }
   .way.featured {
-    border: 2px solid var(--brand);
+    border: 1px solid var(--brand);
   }
   .way-tag {
     align-self: flex-start;

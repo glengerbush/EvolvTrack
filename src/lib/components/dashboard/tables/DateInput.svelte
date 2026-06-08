@@ -2,9 +2,13 @@
   let {
     value = $bindable(''),
     onchange,
+    onkeydown,
+    onblur,
   }: {
     value?: string;
     onchange?: (value: string) => void;
+    onkeydown?: (e: KeyboardEvent) => void;
+    onblur?: (e: FocusEvent) => void;
   } = $props();
 
   function handle(e: Event) {
@@ -14,4 +18,4 @@
   }
 </script>
 
-<input type="date" {value} oninput={handle} onchange={handle} />
+<input type="date" {value} oninput={handle} onchange={handle} {onkeydown} {onblur} />

@@ -59,6 +59,29 @@ export function cloneRow<T extends HealthInputRow>(row: T): T {
   return { ...row, symptoms: [...row.symptoms], systemAmounts: [...(row.systemAmounts ?? [])] };
 }
 
+/**
+ * The per-date **average** body weight (lbs) across all weigh-ins on each date.
+ * Since rows are no longer merged by date, a day can have multiple weigh-ins;
+ * the weight line, `loss`, the PK weigh-in personalisation, and latest/earliest
+ * weight all use this single representative-per-date value. Dates with no
+ * weigh-in are omitted.
+ */
+export function averageWeightLbsByDate(
+  rows: Array<{ date: IsoDate; weightLbs?: number | null }>,
+): Map<IsoDate, number> {
+  const sums = new Map<IsoDate, { sum: number; n: number }>();
+  for (const row of rows) {
+    if (row.weightLbs == null || !Number.isFinite(row.weightLbs)) continue;
+    const cur = sums.get(row.date) ?? { sum: 0, n: 0 };
+    cur.sum += row.weightLbs;
+    cur.n += 1;
+    sums.set(row.date, cur);
+  }
+  const avg = new Map<IsoDate, number>();
+  for (const [date, { sum, n }] of sums) avg.set(date, sum / n);
+  return avg;
+}
+
 export function enrichSystemAmounts(amounts: SystemDrugAmount[]): HealthSystemAmount[] {
   return amounts.map((amount) => ({
     ...amount,
@@ -139,10 +162,26 @@ export function recalculateDerived(
   const systemAmountsByDate = new Map<IsoDate, HealthSystemAmount[]>();
 
   // Weigh-ins (kg) individualize the PK model; row weights are stored in pounds.
-  const weighIns: WeighIn[] = [];
-  for (const row of ascending) {
-    const lbs = parseWeight(row.weight);
-    if (lbs !== null) weighIns.push({ date: row.date, weightKg: lbs * KG_PER_LB });
+  // A date can have multiple weigh-ins now, so use the per-date average (one
+  // weigh-in per date) — same value that drives the weight line and `loss`.
+  const avgWeightByDate = averageWeightLbsByDate(
+    ascending.map((row) => ({ date: row.date, weightLbs: parseWeight(row.weight) })),
+  );
+  const weighIns: WeighIn[] = [...avgWeightByDate].map(([date, lbs]) => ({
+    date,
+    weightKg: lbs * KG_PER_LB,
+  }));
+
+  // `loss` is day-over-day on the per-date average: prev averaged-date minus this
+  // averaged-date, shown on each weighed row of the date.
+  const lossByDate = new Map<IsoDate, string>();
+  {
+    let prevAvg: number | null = null;
+    for (const date of [...avgWeightByDate.keys()].sort()) {
+      const avg = avgWeightByDate.get(date)!;
+      lossByDate.set(date, prevAvg === null ? '' : (prevAvg - avg).toFixed(1));
+      prevAvg = avg;
+    }
   }
 
   const getSystemAmountsForDate = (date: IsoDate): HealthSystemAmount[] => {
@@ -177,11 +216,6 @@ export function recalculateDerived(
   }
 
   // `full` scope.
-  let previousWeight = '';
-  for (let i = 0; i < recomputeFromIdx; i++) {
-    if (parseWeight(ascending[i].weight) !== null) previousWeight = ascending[i].weight;
-  }
-
   const processed = ascending.map((row, i) => {
     if (i < recomputeFromIdx) {
       const nextRow = cloneRow(row);
@@ -192,7 +226,7 @@ export function recalculateDerived(
     }
     const nextRow = cloneRow(row);
     nextRow.day = calculateDay(nextRow.date);
-    nextRow.loss = calculateLoss(nextRow.weight, previousWeight);
+    nextRow.loss = parseWeight(nextRow.weight) !== null ? (lossByDate.get(nextRow.date) ?? '') : '';
 
     if (nextRow.doseSkipped) {
       nextRow.systemAmounts = [];
@@ -201,10 +235,6 @@ export function recalculateDerived(
       const systemAmounts = getSystemAmountsForDate(nextRow.date);
       nextRow.systemAmounts = systemAmounts;
       nextRow.system = formatSystemAmounts(systemAmounts, showMedicationLetters);
-    }
-
-    if (parseWeight(nextRow.weight) !== null) {
-      previousWeight = nextRow.weight;
     }
 
     return nextRow;

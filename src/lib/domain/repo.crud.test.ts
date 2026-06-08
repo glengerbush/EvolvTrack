@@ -5,15 +5,13 @@ import { db } from '$lib/db/schema';
 import {
   DEFAULT_SYNC_MODE,
   MigrationInProgressError,
-  addInjection,
+  addEntry,
   addPrescription,
-  addWeight,
   applyRemoteChange,
   clearAllData,
   deletePrescription,
-  getAllInjections,
+  getAllEntries,
   getAllPrescriptions,
-  getAllWeights,
   getProfile,
   getProfileSyncMode,
   saveProfile,
@@ -318,27 +316,19 @@ describe('getProfileSyncMode', () => {
 });
 
 describe('clearAllData', () => {
-  it('empties weights, injections, prescriptions, and profile in one shot', async () => {
-    await addWeight({ date: TODAY, weightLbs: 180 });
-    await addInjection({
-      date: TODAY,
-      amountMg: 5,
-      medication: SEMA,
-      site: '',
-      symptoms: [],
-    });
+  it('empties entries, prescriptions, and profile in one shot', async () => {
+    await addEntry({ date: TODAY, weightLbs: 180 });
+    await addEntry({ date: TODAY, amountMg: 5, medication: SEMA, site: '' });
     await addPrescription({ type: SEMA });
     await saveProfile({ startWeight: 200 });
 
-    expect(await getAllWeights()).toHaveLength(1);
-    expect(await getAllInjections()).toHaveLength(1);
+    expect(await getAllEntries()).toHaveLength(2);
     expect(await getAllPrescriptions()).toHaveLength(1);
     expect(await getProfile()).toBeDefined();
 
     await clearAllData();
 
-    expect(await getAllWeights()).toEqual([]);
-    expect(await getAllInjections()).toEqual([]);
+    expect(await getAllEntries()).toEqual([]);
     expect(await getAllPrescriptions()).toEqual([]);
     expect(await getProfile()).toBeUndefined();
   });
@@ -355,31 +345,31 @@ describe('edit gating during an E2EE migration', () => {
       await setLocalProfileSyncState({ syncMode: mode });
 
       await expect(
-        addWeight({ date: TODAY, weightLbs: 180 }),
+        addEntry({ date: TODAY, weightLbs: 180 }),
       ).rejects.toBeInstanceOf(MigrationInProgressError);
 
       // The throw aborts the transaction: nothing persisted, nothing queued.
-      expect(await getAllWeights()).toEqual([]);
+      expect(await getAllEntries()).toEqual([]);
       expect(await db.outbox.count()).toBe(0);
     });
   }
 
   it('still allows edits in steady-state e2ee (only migrating modes are gated)', async () => {
     await setLocalProfileSyncState({ syncMode: 'e2ee' });
-    const created = await addWeight({ date: TODAY, weightLbs: 180 });
+    const created = await addEntry({ date: TODAY, weightLbs: 180 });
     expect(created.id).toBeTruthy();
-    expect(await getAllWeights()).toHaveLength(1);
+    expect(await getAllEntries()).toHaveLength(1);
   });
 
   it('re-allows edits once the migration completes (mode returns to plain)', async () => {
     await setLocalProfileSyncState({ syncMode: 'migrating_to_e2ee' });
-    await expect(addWeight({ date: TODAY, weightLbs: 180 })).rejects.toBeInstanceOf(
+    await expect(addEntry({ date: TODAY, weightLbs: 180 })).rejects.toBeInstanceOf(
       MigrationInProgressError,
     );
 
     await setLocalProfileSyncState({ syncMode: 'plain' });
-    await addWeight({ date: TODAY, weightLbs: 181 });
-    expect(await getAllWeights()).toHaveLength(1);
+    await addEntry({ date: TODAY, weightLbs: 181 });
+    expect(await getAllEntries()).toHaveLength(1);
   });
 
   it('does NOT block sync-apply writes (the migration drives those)', async () => {
@@ -388,7 +378,7 @@ describe('edit gating during an E2EE migration', () => {
     // applyRemoteChange is the inbound counterpart — it bypasses the outbox and
     // must keep working so a migration's snapshot pull can land remote rows.
     const applied = await applyRemoteChange({
-      aggregate: 'weight',
+      aggregate: 'entry',
       entityId: 'w-remote',
       op: 'upsert',
       record: { id: 'w-remote', date: TODAY, weightLbs: 200, updatedAt: '2026-05-10T00:00:00.000Z' },
@@ -396,6 +386,6 @@ describe('edit gating during an E2EE migration', () => {
     });
 
     expect(applied).toBe(true);
-    expect(await getAllWeights()).toHaveLength(1);
+    expect(await getAllEntries()).toHaveLength(1);
   });
 });

@@ -19,7 +19,7 @@ export type SyncMode =
   | 'e2ee'
   | 'migrating_to_plain'
   | 'rotating_e2ee_key';
-export type SyncAggregate = 'weight' | 'injection' | 'prescription' | 'profile';
+export type SyncAggregate = 'entry' | 'prescription' | 'profile';
 export type E2EEMigrationDirection = 'enable' | 'disable' | 'rotate';
 
 /**
@@ -107,41 +107,45 @@ export type HealthColKey =
   | 'shotLocation'
   | 'notes';
 
-export interface WeightEntry {
+/**
+ * A single health-log row — the unified record that replaces the old
+ * weight/injection split. Each table row is exactly one `HealthEntry` with its
+ * own id; nothing is merged by date, so a day can hold any number of entries
+ * (multiple doses, weigh-ins, notes). A dose is present iff `amountMg != null`.
+ */
+export interface HealthEntry {
   id: string;
   date: IsoDate;
+  // Weigh-in / day fields
   weightLbs?: number;
   wellness?: number;
-  systemMg?: number;
   symptoms?: string[];
   notes?: string;
-  createdAt: IsoDateTime;
-  updatedAt: IsoDateTime;
+  // Dose fields (present when this row logs a dose)
+  amountMg?: number;
+  /** Empty string permitted for in-progress drafts; persisted doses are a Medication. */
+  medication?: Medication | '';
+  /** Shot location. */
+  site?: string;
   /**
-   * Per-field last-writer-wins clocks. Optional for backward compatibility
-   * with records written before per-field LWW landed; absent stamps fall back
-   * to row `updatedAt` in `mergeRecord`. New writes via `addWeight` /
-   * `updateWeight` always populate this for every persistent field.
+   * The vial this dose draws from (a `Prescription.id`). Auto-chosen by table
+   * order when the dose is entered, then stored permanently so editing the
+   * medications table never re-attributes it; the user can override it. The
+   * dose drains exactly this vial (see `computeVialLevels` / `attributeVials`).
+   * Absent = unassigned (drains no vial until one is attributed).
    */
-  fieldUpdatedAt?: Record<string, IsoDateTime>;
-}
-
-export interface InjectionEntry {
-  id: string;
-  date: IsoDate;
-  amountMg: number;
-  site: string;
-  // Empty string is permitted for in-progress draft saves where the user
-  // hasn't picked a medication yet; persisted rows should be a Medication.
-  medication: Medication | '';
-  symptoms: string[];
-  notes?: string;
+  prescriptionId?: string;
   planned?: boolean;
   confirmedAt?: IsoDateTime;
   skipped?: boolean;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
-  /** Per-field LWW clocks; see WeightEntry.fieldUpdatedAt for the format. */
+  /**
+   * Per-field last-writer-wins clocks. Optional for backward compatibility
+   * with records written before per-field LWW landed; absent stamps fall back
+   * to row `updatedAt` in `mergeRecord`. New writes always populate this for
+   * every persistent field.
+   */
   fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 
@@ -181,7 +185,7 @@ export interface Prescription {
   archived?: boolean;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
-  /** Per-field LWW clocks; see WeightEntry.fieldUpdatedAt for the format. */
+  /** Per-field LWW clocks; see HealthEntry.fieldUpdatedAt for the format. */
   fieldUpdatedAt?: Record<string, IsoDateTime>;
 }
 

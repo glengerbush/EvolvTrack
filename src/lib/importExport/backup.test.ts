@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
-import { addInjection, addWeight, getAllInjections, getAllWeights } from '$lib/domain/repo';
+import { addEntry, getAllEntries } from '$lib/domain/repo';
 import {
   BACKUP_APP_ID,
   BACKUP_FORMAT_VERSION,
@@ -20,32 +20,34 @@ describe('createBackup', () => {
     expect(backup.formatVersion).toBe(BACKUP_FORMAT_VERSION);
     expect(backup.exportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(backup.data).toEqual({
-      weights: [],
-      injections: [],
+      entries: [],
       prescriptions: [],
       profile: undefined,
     });
   });
 
-  it('includes existing weights and injections from the DB', async () => {
-    await addWeight({ date: iso('2026-05-10'), weightLbs: 180 });
-    await addInjection({
+  it('includes existing entries from the DB', async () => {
+    await addEntry({ date: iso('2026-05-10'), weightLbs: 180 });
+    await addEntry({
       date: iso('2026-05-10'),
       amountMg: 5,
       medication: SEMA,
       site: 'belly',
-      symptoms: [],
     });
 
     const backup = await createBackup();
-    expect(backup.data.weights).toHaveLength(1);
-    expect(backup.data.weights[0]).toMatchObject({ date: '2026-05-10', weightLbs: 180 });
-    expect(backup.data.injections).toHaveLength(1);
-    expect(backup.data.injections[0]).toMatchObject({ amountMg: 5, medication: SEMA });
+    expect(backup.data.entries).toHaveLength(2);
+    expect(backup.data.entries.find((e) => e.weightLbs != null)).toMatchObject({
+      date: '2026-05-10',
+      weightLbs: 180,
+    });
+    expect(backup.data.entries.find((e) => e.amountMg != null)).toMatchObject({
+      amountMg: 5,
+      medication: SEMA,
+    });
 
     // sanity check: repo returns the same rows we serialized
-    expect(await getAllWeights()).toHaveLength(1);
-    expect(await getAllInjections()).toHaveLength(1);
+    expect(await getAllEntries()).toHaveLength(2);
   });
 });
 
@@ -59,7 +61,7 @@ describe('parseBackupPayload', () => {
       dbSchemaVersion: 1,
       exportedAt: '2026-05-10T12:00:00.000Z',
       data: {
-        weights: [
+        entries: [
           {
             id: 'w1',
             date: '2026-05-10',
@@ -68,7 +70,6 @@ describe('parseBackupPayload', () => {
             updatedAt: '2026-05-10T12:00:00.000Z',
           },
         ],
-        injections: [],
         prescriptions: [],
       },
     };
@@ -78,7 +79,7 @@ describe('parseBackupPayload', () => {
     const parsed = parseBackupPayload(validPayload());
     expect(parsed).not.toBeNull();
     expect(parsed!.formatVersion).toBe(BACKUP_FORMAT_VERSION);
-    expect(parsed!.data.weights).toHaveLength(1);
+    expect(parsed!.data.entries).toHaveLength(1);
   });
 
   it('returns null when the app field is wrong', () => {
@@ -101,7 +102,7 @@ describe('parseBackupPayload', () => {
 
   it('returns null when required arrays are missing', () => {
     const payload = validPayload() as Record<string, unknown>;
-    payload.data = { weights: [], injections: [] }; // prescriptions missing
+    payload.data = { entries: [] }; // prescriptions missing
     expect(parseBackupPayload(payload)).toBeNull();
   });
 

@@ -11,7 +11,12 @@ type StoreSchema = Record<string, string | null>;
 // (see `$lib/domain/merge`). Older clients pulling v2 payloads ignore the
 // extra key and fall back to row-clock LWW, so the bump is observability
 // only — no migration required in either direction.
-export const DB_SCHEMA_VERSION = 2;
+//
+// v3: weights + injections are unified into one `entries` store — one record
+// per row, each with its own id. The protocol bump means clients speak the
+// `entry` aggregate; there is no backward-compat with the old split (pre-launch
+// coordinated ship).
+export const DB_SCHEMA_VERSION = 3;
 
 export const schemaV1: StoreSchema = {
   weights: 'id,date,updatedAt',
@@ -33,7 +38,72 @@ export const schemaV2: StoreSchema = {
   wrappedKeys: 'id,dekVersion,updatedAt',
 };
 
+// Dexie v3 unifies weights + injections into a single `entries` store.
+export const schemaV3: StoreSchema = {
+  ...schemaV2,
+  entries: 'id,date,updatedAt',
+  weights: null,
+  injections: null,
+};
+
+// One-time conversion of the old split tables into unified entries. Same-date
+// weight+injection pairs are zipped into one entry (preserving how the table
+// looked); extras on a date become their own entries.
+async function migrateToUnifiedEntries(tx: {
+  table: (name: string) => {
+    toArray: () => Promise<Record<string, unknown>[]>;
+    bulkAdd: (rows: Record<string, unknown>[]) => Promise<unknown>;
+  };
+}) {
+  const [weights, injections] = await Promise.all([
+    tx.table('weights').toArray(),
+    tx.table('injections').toArray(),
+  ]);
+
+  const byDate = new Map<string, { weights: Record<string, unknown>[]; injections: Record<string, unknown>[] }>();
+  const bucket = (date: string) => {
+    let b = byDate.get(date);
+    if (!b) { b = { weights: [], injections: [] }; byDate.set(date, b); }
+    return b;
+  };
+  for (const w of weights) bucket(String(w.date)).weights.push(w);
+  for (const i of injections) bucket(String(i.date)).injections.push(i);
+
+  const maxIso = (a?: unknown, b?: unknown): string =>
+    (String(a ?? '') > String(b ?? '') ? String(a ?? '') : String(b ?? '')) || new Date().toISOString();
+
+  const entries: Record<string, unknown>[] = [];
+  for (const [date, { weights: ws, injections: is }] of byDate) {
+    const rowCount = Math.max(ws.length, is.length, 0);
+    for (let i = 0; i < rowCount; i++) {
+      const w = ws[i];
+      const inj = is[i];
+      if (!w && !inj) continue;
+      entries.push({
+        id: (inj?.id ?? w?.id) as string,
+        date,
+        weightLbs: w?.weightLbs,
+        wellness: w?.wellness,
+        symptoms: (w?.symptoms ?? inj?.symptoms ?? []) as string[],
+        notes: inj?.notes ?? w?.notes,
+        amountMg: inj?.amountMg,
+        medication: inj?.medication,
+        site: inj?.site,
+        prescriptionId: inj?.prescriptionId,
+        planned: inj?.planned,
+        confirmedAt: inj?.confirmedAt,
+        skipped: inj?.skipped,
+        createdAt: (inj?.createdAt ?? w?.createdAt) as string,
+        updatedAt: maxIso(inj?.updatedAt, w?.updatedAt),
+      });
+    }
+  }
+
+  if (entries.length) await tx.table('entries').bulkAdd(entries);
+}
+
 export function defineDatabaseVersions(db: Dexie) {
   db.version(1).stores(schemaV1);
   db.version(2).stores(schemaV2);
+  db.version(3).stores(schemaV3).upgrade(migrateToUnifiedEntries as never);
 }

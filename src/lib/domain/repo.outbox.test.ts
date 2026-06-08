@@ -3,33 +3,30 @@ import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
 import {
-  addInjection,
+  addEntry,
   addPrescription,
-  addWeight,
   applyRemoteChange,
-  deleteInjection,
+  deleteEntry,
   deletePrescription,
-  deleteWeight,
   getProfile,
   onOutboxChange,
   saveProfile,
   setLocalProfileSyncState,
-  updateInjection,
+  updateEntry,
   updatePrescription,
-  updateWeight,
 } from '$lib/domain/repo';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 const TODAY = iso('2026-05-10');
 
 describe('outbox capture — weights', () => {
-  it('addWeight enqueues an upsert keyed by aggregate:id with the full record', async () => {
-    const created = await addWeight({ date: TODAY, weightLbs: 180 });
+  it('addEntry enqueues an upsert keyed by aggregate:id with the full record', async () => {
+    const created = await addEntry({ date: TODAY, weightLbs: 180 });
 
-    const entry = await db.outbox.get(`weight:${created.id}`);
+    const entry = await db.outbox.get(`entry:${created.id}`);
     expect(entry).toMatchObject({
-      id: `weight:${created.id}`,
-      aggregate: 'weight',
+      id: `entry:${created.id}`,
+      aggregate: 'entry',
       entityId: created.id,
       op: 'upsert',
       updatedAt: created.updatedAt,
@@ -37,60 +34,60 @@ describe('outbox capture — weights', () => {
     expect(entry!.payload).toMatchObject({ id: created.id, weightLbs: 180 });
   });
 
-  it('updateWeight coalesces onto the same row with the updated payload', async () => {
-    const created = await addWeight({ date: TODAY, weightLbs: 180 });
-    await updateWeight(created.id, { weightLbs: 178 });
+  it('updateEntry coalesces onto the same row with the updated payload', async () => {
+    const created = await addEntry({ date: TODAY, weightLbs: 180 });
+    await updateEntry(created.id, { weightLbs: 178 });
 
     expect(await db.outbox.count()).toBe(1);
-    const entry = await db.outbox.get(`weight:${created.id}`);
+    const entry = await db.outbox.get(`entry:${created.id}`);
     expect(entry!.op).toBe('upsert');
     expect(entry!.payload).toMatchObject({ id: created.id, weightLbs: 178 });
     expect((entry!.payload as { updatedAt: string }).updatedAt).toBe(entry!.updatedAt);
   });
 
-  it('deleteWeight replaces the row with a delete tombstone (null payload)', async () => {
-    const created = await addWeight({ date: TODAY, weightLbs: 180 });
-    await deleteWeight(created.id);
+  it('deleteEntry replaces the row with a delete tombstone (null payload)', async () => {
+    const created = await addEntry({ date: TODAY, weightLbs: 180 });
+    await deleteEntry(created.id);
 
     expect(await db.outbox.count()).toBe(1);
-    const entry = await db.outbox.get(`weight:${created.id}`);
+    const entry = await db.outbox.get(`entry:${created.id}`);
     expect(entry).toMatchObject({ op: 'delete', entityId: created.id, payload: null });
   });
 
-  it('deleteWeight against an unknown id does not enqueue a tombstone', async () => {
-    await deleteWeight('does-not-exist');
+  it('deleteEntry against an unknown id does not enqueue a tombstone', async () => {
+    await deleteEntry('does-not-exist');
     expect(await db.outbox.count()).toBe(0);
   });
 });
 
 describe('outbox capture — injections', () => {
   it('add, update, then delete coalesce into a single delete row', async () => {
-    const created = await addInjection({
+    const created = await addEntry({
       date: TODAY,
       amountMg: 5,
       medication: SEMA,
       site: '',
       symptoms: [],
     });
-    await updateInjection(created.id, { amountMg: 7 });
-    await deleteInjection(created.id);
+    await updateEntry(created.id, { amountMg: 7 });
+    await deleteEntry(created.id);
 
     expect(await db.outbox.count()).toBe(1);
-    const entry = await db.outbox.get(`injection:${created.id}`);
-    expect(entry).toMatchObject({ aggregate: 'injection', op: 'delete', payload: null });
+    const entry = await db.outbox.get(`entry:${created.id}`);
+    expect(entry).toMatchObject({ aggregate: 'entry', op: 'delete', payload: null });
   });
 
-  it('updateInjection enqueues the post-update record', async () => {
-    const created = await addInjection({
+  it('updateEntry enqueues the post-update record', async () => {
+    const created = await addEntry({
       date: TODAY,
       amountMg: 5,
       medication: SEMA,
       site: '',
       symptoms: [],
     });
-    await updateInjection(created.id, { amountMg: 7 });
+    await updateEntry(created.id, { amountMg: 7 });
 
-    const entry = await db.outbox.get(`injection:${created.id}`);
+    const entry = await db.outbox.get(`entry:${created.id}`);
     expect(entry!.payload).toMatchObject({ id: created.id, amountMg: 7 });
   });
 });
@@ -189,7 +186,7 @@ describe('onOutboxChange', () => {
       calls += 1;
     });
     try {
-      await addWeight({ date: TODAY, weightLbs: 180 });
+      await addEntry({ date: TODAY, weightLbs: 180 });
       expect(calls).toBe(1);
     } finally {
       off();
@@ -203,7 +200,7 @@ describe('onOutboxChange', () => {
     });
     try {
       await applyRemoteChange({
-        aggregate: 'weight',
+        aggregate: 'entry',
         entityId: 'remote-1',
         op: 'upsert',
         record: {
@@ -227,9 +224,9 @@ describe('onOutboxChange', () => {
     const off = onOutboxChange(() => {
       calls += 1;
     });
-    await addWeight({ date: TODAY, weightLbs: 180 });
+    await addEntry({ date: TODAY, weightLbs: 180 });
     off();
-    await addWeight({ date: TODAY, weightLbs: 181 });
+    await addEntry({ date: TODAY, weightLbs: 181 });
     expect(calls).toBe(1);
   });
 });

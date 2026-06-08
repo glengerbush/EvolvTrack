@@ -1,13 +1,12 @@
 import { nanoid } from 'nanoid';
-import type { InjectionEntry, IsoDate, Medication, Prescription, ProfileSettings, WeightEntry } from '$lib/domain/types';
+import type { HealthEntry, IsoDate, Medication, Prescription, ProfileSettings } from '$lib/domain/types';
 import { isMedication } from '$lib/domain/types';
 import { asIsoDate } from '$lib/utils/dateKeys';
 
 export type ImportMode = 'merge' | 'replace';
 
 export type ImportData = {
-  weights: WeightEntry[];
-  injections: InjectionEntry[];
+  entries: HealthEntry[];
   prescriptions: Prescription[];
   profile?: ProfileSettings;
 };
@@ -31,8 +30,7 @@ export type ImportApplyResult = ImportParseResult & {
 };
 
 export const EMPTY_IMPORT_DATA: ImportData = {
-  weights: [],
-  injections: [],
+  entries: [],
   prescriptions: [],
 };
 
@@ -186,17 +184,26 @@ export function round(value: number, places = 2) {
   return Math.round(value * factor) / factor;
 }
 
-export function makeWeightEntry(input: {
+// One unified row per import record. Dose fields are only set when a dose is
+// present, so a weigh-in-only row stays dose-free (and vice versa).
+export function makeHealthEntry(input: {
   id?: unknown;
   date: IsoDate;
   weightLbs?: number;
   wellness?: number;
   symptoms?: string[];
   notes?: string;
+  amountMg?: number;
+  medication?: unknown;
+  site?: unknown;
+  planned?: unknown;
+  confirmedAt?: unknown;
+  prescriptionId?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
-}): WeightEntry {
+}): HealthEntry {
   const timestamp = nowIso();
+  const hasDose = input.amountMg != null && Number.isFinite(input.amountMg) && input.amountMg > 0;
   return {
     id: cleanString(input.id) || nanoid(),
     date: input.date,
@@ -204,36 +211,12 @@ export function makeWeightEntry(input: {
     wellness: input.wellness,
     symptoms: input.symptoms ?? [],
     notes: input.notes,
-    createdAt: parseDateTime(input.createdAt) ?? timestamp,
-    updatedAt: parseDateTime(input.updatedAt) ?? timestamp,
-  };
-}
-
-export function makeInjectionEntry(input: {
-  id?: unknown;
-  date: IsoDate;
-  amountMg: number;
-  medication?: unknown;
-  site?: unknown;
-  symptoms?: string[];
-  notes?: string;
-  planned?: unknown;
-  confirmedAt?: unknown;
-  createdAt?: unknown;
-  updatedAt?: unknown;
-}): InjectionEntry {
-  const timestamp = nowIso();
-  const planned = parseBoolean(input.planned);
-  return {
-    id: cleanString(input.id) || nanoid(),
-    date: input.date,
-    amountMg: input.amountMg,
-    medication: normalizeMedication(input.medication),
-    site: cleanString(input.site),
-    symptoms: input.symptoms ?? [],
-    notes: input.notes,
-    planned,
-    confirmedAt: parseDateTime(input.confirmedAt),
+    amountMg: hasDose ? input.amountMg : undefined,
+    medication: hasDose ? normalizeMedication(input.medication) : undefined,
+    site: hasDose ? cleanString(input.site) : undefined,
+    prescriptionId: hasDose ? cleanString(input.prescriptionId) || undefined : undefined,
+    planned: hasDose ? parseBoolean(input.planned) : undefined,
+    confirmedAt: hasDose ? parseDateTime(input.confirmedAt) : undefined,
     createdAt: parseDateTime(input.createdAt) ?? timestamp,
     updatedAt: parseDateTime(input.updatedAt) ?? timestamp,
   };

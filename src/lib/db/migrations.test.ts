@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import '../../test/dexie-setup';
 import Dexie from 'dexie';
-import { DB_SCHEMA_VERSION, defineDatabaseVersions, schemaV1, schemaV2 } from '$lib/db/migrations';
+import { DB_SCHEMA_VERSION, defineDatabaseVersions, schemaV1, schemaV2, schemaV3 } from '$lib/db/migrations';
 
 describe('DB_SCHEMA_VERSION', () => {
   it('is exported as a positive integer', () => {
@@ -9,8 +9,8 @@ describe('DB_SCHEMA_VERSION', () => {
     expect(DB_SCHEMA_VERSION).toBeGreaterThanOrEqual(1);
   });
 
-  it('is currently version 2 (bump this assertion when migrations are added)', () => {
-    expect(DB_SCHEMA_VERSION).toBe(2);
+  it('is currently version 3 (bump this assertion when migrations are added)', () => {
+    expect(DB_SCHEMA_VERSION).toBe(3);
   });
 });
 
@@ -91,8 +91,20 @@ describe('schemaV2', () => {
   });
 });
 
+describe('schemaV3', () => {
+  it('unifies weights+injections into an entries store and drops the old tables', () => {
+    expect(schemaV3.entries).toBeTruthy();
+    expect(schemaV3.weights).toBeNull();
+    expect(schemaV3.injections).toBeNull();
+    const tokens = (schemaV3.entries as string).split(',').map((t) => t.trim());
+    expect(tokens[0]).toBe('id');
+    expect(schemaV3.entries).toContain('date');
+    expect(schemaV3.entries).toContain('updatedAt');
+  });
+});
+
 describe('defineDatabaseVersions', () => {
-  it('registers schemaV1 and schemaV2 against a Dexie instance', () => {
+  it('registers schemaV1, schemaV2, and schemaV3 against a Dexie instance', () => {
     const dexie = new Dexie('migrations-test-define');
     const versionSpy = vi.spyOn(dexie, 'version');
 
@@ -100,6 +112,7 @@ describe('defineDatabaseVersions', () => {
 
     expect(versionSpy).toHaveBeenCalledWith(1);
     expect(versionSpy).toHaveBeenCalledWith(2);
+    expect(versionSpy).toHaveBeenCalledWith(3);
     dexie.close();
   });
 
@@ -113,15 +126,46 @@ describe('defineDatabaseVersions', () => {
     const tableNames = dexie.tables.map((t) => t.name).sort();
     expect(tableNames).toEqual([
       'encrypted',
-      'injections',
+      'entries',
       'migrationBackfill',
       'outbox',
       'prescriptions',
       'profile',
-      'weights',
       'wrappedKeys',
     ]);
 
     dexie.close();
+  });
+
+  it('migrates old weights + injections into unified entries, merging same-date pairs', async () => {
+    // Seed a v2 database with the old split tables, then open at v3 and assert
+    // the upgrade collapses them into entries (same-date weight+dose = one row).
+    const name = 'migrations-test-upgrade';
+    const v2 = new Dexie(name);
+    v2.version(1).stores(schemaV1);
+    v2.version(2).stores(schemaV2);
+    await v2.open();
+    await v2.table('weights').bulkPut([
+      { id: 'w1', date: '2026-06-01', weightLbs: 180, symptoms: [], createdAt: 't', updatedAt: 't' },
+      { id: 'w2', date: '2026-06-02', weightLbs: 179, symptoms: [], createdAt: 't', updatedAt: 't' },
+    ]);
+    await v2.table('injections').bulkPut([
+      { id: 'i1', date: '2026-06-01', amountMg: 2.5, medication: 'Semaglutide (Ozempic / Wegovy)', symptoms: [], createdAt: 't', updatedAt: 't' },
+    ]);
+    v2.close();
+
+    const v3 = new Dexie(name);
+    defineDatabaseVersions(v3);
+    await v3.open();
+    const entries = await v3.table('entries').toArray();
+    // 06-01 weight + dose merge into one entry; 06-02 weight stays its own.
+    expect(entries).toHaveLength(2);
+    const june1 = entries.find((e) => e.date === '2026-06-01');
+    expect(june1?.weightLbs).toBe(180);
+    expect(june1?.amountMg).toBe(2.5);
+    const june2 = entries.find((e) => e.date === '2026-06-02');
+    expect(june2?.weightLbs).toBe(179);
+    expect(june2?.amountMg).toBeUndefined();
+    v3.close();
   });
 });

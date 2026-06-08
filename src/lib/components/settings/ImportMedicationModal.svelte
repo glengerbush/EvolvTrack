@@ -88,7 +88,7 @@
   .modal {
     background: var(--surface);
     color: var(--text);
-    border: 3px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     border-radius: 12px;
     padding: 1.25rem;
     max-width: 28rem;
@@ -123,7 +123,7 @@
     font: inherit;
     font-weight: 400;
     padding: 0.35rem 0.4rem;
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, white 40%);
     border-radius: 8px;
   }
 
@@ -143,13 +143,13 @@
 
   .modal-actions .ghost {
     background: var(--surface);
-    border: 2px solid color-mix(in oklab, var(--cardBorder) 55%, white 45%);
+    border: 1px solid color-mix(in oklab, var(--cardBorder) 55%, white 45%);
     color: var(--text);
   }
 
   .modal-actions .primary {
     background: var(--headerBg);
-    border: 2px solid var(--cardBorder);
+    border: 1px solid var(--cardBorder);
     color: var(--headerText);
   }
 </style>
