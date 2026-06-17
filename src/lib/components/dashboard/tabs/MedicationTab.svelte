@@ -18,6 +18,7 @@
   import SaveIcon from '$lib/components/icons/SaveIcon.svelte';
   import TrashIcon from '$lib/components/icons/TrashIcon.svelte';
   import ArchiveIcon from '$lib/components/icons/ArchiveIcon.svelte';
+  import CloseIcon from '$lib/components/icons/CloseIcon.svelte';
   import { GridSelection } from '$lib/grid/gridSelection.svelte';
   import { isMobile } from '$lib/stores/viewport';
   import { addDays, daysBetween, formatLocaleDate, formatShortDate, localDateKey } from '$lib/utils/dateKeys';
@@ -1266,11 +1267,11 @@
   <span class="card-header-actions">
     {#if isRowMobileEditing(id)}
       <button type="button" class="card-action-btn card-save" aria-label="Save" title="Save" onclick={saveMobileEdit}><SaveIcon size="1.1rem" /></button>
-      <button type="button" class="card-action-btn card-cancel" onclick={cancelMobileEdit}>Cancel</button>
       {#if vialArchivable(id)}
         <button type="button" class="card-action-btn card-archive" aria-label={archived ? 'Restore' : 'Archive'} title={archived ? 'Restore' : 'Archive'} onclick={() => setVialArchived(id, !archived)}><ArchiveIcon size="1.15rem" /></button>
       {/if}
       <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => (vialDeleteRequest = id)}><TrashIcon size="1.15rem" /></button>
+      <button type="button" class="card-action-btn card-cancel" aria-label="Cancel" title="Cancel" onclick={cancelMobileEdit}><CloseIcon size="1.1rem" /></button>
     {:else}
       <EditPencil ariaLabel={`Edit vial ${id}`} onclick={() => startMobileEdit(id)} />
     {/if}
@@ -2643,6 +2644,17 @@
       width: auto;
     }
 
+    /* While a card is being edited, give every editable field a visible 1px
+       border so it's obvious which values can be changed (in display mode the
+       fields render as plain text). */
+    .med-table-card .medication-table tr.mobile-card-editing td :global(input),
+    .med-table-card .medication-table tr.mobile-card-editing td :global(select),
+    .med-table-card .medication-table tr.mobile-card-editing td :global(textarea) {
+      border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, transparent);
+      border-radius: 6px;
+      padding: 0.2rem 0.35rem;
+    }
+
     /* Drag-to-reorder is a pointer affordance; the empty drop row is noise here. */
     .med-table-card .medication-table tr.drop-sentinel {
       display: none;
@@ -2662,16 +2674,17 @@
       font-weight: 400;
     }
 
-    /* Icon buttons (Save/Archive/Delete) are compact squares; Cancel keeps text. */
+    /* Save / Archive / Delete / Cancel are all uniform icon squares with
+       radiused corners, matching the Edit pencil. */
     .card-action-btn {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
       border-radius: 8px;
-      padding: 0.35rem 0.55rem;
-      font-weight: 700;
-      font-size: 0.9rem;
       line-height: 0;
       cursor: pointer;
       border: 1.5px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
@@ -2679,15 +2692,18 @@
       color: var(--text);
     }
 
+    /* Muted fills: the green save used the vivid --accent; --success is the
+       theme's softer green. Delete's red is toned down toward the surface so it
+       reads less alarming. */
     .card-action-btn.card-save {
       border-color: transparent;
-      background: var(--accent, var(--text));
-      color: var(--surface);
+      background: color-mix(in oklab, var(--success) 88%, var(--surface) 12%);
+      color: white;
     }
 
     .card-action-btn.card-delete {
       border-color: transparent;
-      background: var(--danger);
+      background: color-mix(in oklab, var(--danger) 78%, var(--surface) 22%);
       color: white;
     }
 

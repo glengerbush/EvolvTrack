@@ -292,11 +292,11 @@
   );
   const showMedicationInTooltip = $derived(chartModel.systemSeries.length > 1);
 
-  function onPlotMouseMove(event: MouseEvent) {
+  function setCrosshairFromClient(clientX: number, clientY: number) {
     if (!dataScrollEl || !chartModel.hasAnyData) return;
     const rect = dataScrollEl.getBoundingClientRect();
-    const cssX = event.clientX - rect.left + dataScrollEl.scrollLeft;
-    const cssY = event.clientY - rect.top;
+    const cssX = clientX - rect.left + dataScrollEl.scrollLeft;
+    const cssY = clientY - rect.top;
     if (cssY < PLOT.top || cssY > PLOT.bottom) {
       hoverY = null;
       hoverDate = null;
@@ -306,11 +306,55 @@
     hoverDate = chartModel.dateForCssX(cssX);
   }
 
+  function onPlotMouseMove(event: MouseEvent) {
+    setCrosshairFromClient(event.clientX, event.clientY);
+  }
+
   function clearCrosshair() {
     hoverY = null;
     hoverDate = null;
     hoverDose = null;
   }
+
+  // ── Touch ────────────────────────────────────────────────────────────────
+  // The plot area scrolls horizontally, so a touch *drag* must stay a scroll. We
+  // treat a touch that barely moves as a *tap* and read the value at that point
+  // (mouse keeps its hover crosshair). On touch there's no mouseleave, so dose
+  // tooltips are opened by tap and dismissed by tapping elsewhere (or off-chart),
+  // instead of sticking forever.
+  let touchTapStart: { x: number; y: number; t: number } | null = null;
+  function onPlotPointerDown(event: PointerEvent) {
+    if (event.pointerType === 'mouse') return;
+    touchTapStart = { x: event.clientX, y: event.clientY, t: performance.now() };
+  }
+  function onPlotPointerUp(event: PointerEvent) {
+    if (event.pointerType === 'mouse' || !touchTapStart) return;
+    const moved = Math.hypot(event.clientX - touchTapStart.x, event.clientY - touchTapStart.y);
+    const heldMs = performance.now() - touchTapStart.t;
+    touchTapStart = null;
+    if (moved > 10 || heldMs > 500) return; // it was a scroll/drag, not a tap
+    hoverDose = null; // tapping the plot background dismisses a dot tooltip
+    setCrosshairFromClient(event.clientX, event.clientY);
+  }
+  function showDoseTooltipOnTouch(event: PointerEvent, marker: { label: string; color: string; x: number; y: number }) {
+    if (event.pointerType === 'mouse') return; // mouse uses hover (enter/leave)
+    event.stopPropagation(); // don't let the plot's tap handler clear it
+    hoverDose = marker;
+  }
+
+  // Dismiss a touch-opened crosshair / dose tooltip when tapping outside the plot.
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const onDocPointerDown = (event: PointerEvent) => {
+      if (event.pointerType === 'mouse') return;
+      if (dataScrollEl && event.target instanceof Node && dataScrollEl.contains(event.target)) return;
+      hoverDose = null;
+      hoverY = null;
+      hoverDate = null;
+    };
+    window.addEventListener('pointerdown', onDocPointerDown);
+    return () => window.removeEventListener('pointerdown', onDocPointerDown);
+  });
 
   function formatHoverWeight(v: number): string {
     return `${v.toFixed(1)} ${$weightUnit}`;
@@ -700,6 +744,8 @@
           use:attachViewportObserver
           onmousemove={onPlotMouseMove}
           onmouseleave={clearCrosshair}
+          onpointerdown={onPlotPointerDown}
+          onpointerup={onPlotPointerUp}
         >
           <svg
             class="data-svg"
@@ -786,6 +832,12 @@
                         y: dot.y,
                       })}
                       onmouseleave={() => (hoverDose = null)}
+                      onpointerdown={(e) => showDoseTooltipOnTouch(e, {
+                        label: doseTooltipText(dot),
+                        color: series.color,
+                        x: dot.x,
+                        y: dot.y,
+                      })}
                     />
                   {/each}
                   {#each series.plannedDosePoints as dot (dot.date)}
@@ -803,6 +855,12 @@
                         y: dot.y,
                       })}
                       onmouseleave={() => (hoverDose = null)}
+                      onpointerdown={(e) => showDoseTooltipOnTouch(e, {
+                        label: `${doseTooltipText(dot)} (planned)`,
+                        color: series.color,
+                        x: dot.x,
+                        y: dot.y,
+                      })}
                     />
                   {/each}
                 {/if}
@@ -1742,13 +1800,22 @@
     text-align: right;
   }
   /* When the input is the in-cell editor, drop its own chrome so the cell ring
-     is the only indicator (matches the inputs table). */
+     is the only indicator (matches the inputs table). It's overlaid absolutely
+     so the cell keeps exactly the size of the static value in both modes — a
+     `width:100%` number input still contributes its large default intrinsic
+     width to the auto-sized column, which is what made the field grow on click.
+     `inset:0` + matching padding makes the editor fill the same box without
+     inflating the column. */
   .progress-input.cell-input {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    width: auto;
     border: 0;
     border-radius: 0;
+    padding: 0.4rem 0.45rem;
     background: transparent;
     outline: none;
-    width: 100%;
   }
 
   .empty-value {
@@ -1792,13 +1859,15 @@
       margin-bottom: calc(-1 * var(--tab-skirt));
     }
 
-    /* Action buttons take the chip shape: rounded-top, same skirt, no pill
-     * shadow. height:auto lets them stretch to the section-chip's height; the
-     * icon stays centred above the skirt (place-items:center in each button).
-     * The :global reaches the EditPencil child component's button. */
+    /* The inputs-card toolbar buttons take the chip shape: rounded-top, same
+     * skirt, no pill shadow. height:auto lets them stretch to the section-chip's
+     * height; the icon stays centred above the skirt (place-items:center).
+     * NB: do NOT include the EditPencil here — the only `.edit-pencil`s inside
+     * `.inputs-card` are the per-card edit buttons rendered by <InputsTable>, and
+     * the tab shape would give them two rounded + two square corners. They keep
+     * their own 2rem square. */
     .inputs-card .add-row-button,
-    .inputs-card .settings-btn,
-    .inputs-card :global(.edit-pencil) {
+    .inputs-card .settings-btn {
       height: auto;
       border-radius: 12px 12px 0 0;
       padding: 0 0 var(--tab-skirt);

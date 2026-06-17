@@ -300,19 +300,37 @@ export function buildChartModel(
     const filterForSeries = (dose: DosePoint) =>
       isUnified || dose.medication === series.medication;
     const pointsByDate = new Map(points.map((p) => [p.date, p]));
-    const toMarkers = (source: DosePoint[]): ChartDoseMarker[] =>
-      source.filter(filterForSeries).flatMap((dose) => {
-        const point = pointsByDate.get(dose.date);
-        return point
-          ? [{
-              date: dose.date,
-              x: point.x,
-              y: point.y,
-              amountMg: dose.amountMg,
-              medication: dose.medication,
-            }]
-          : [];
+    // Several doses can land on the same date (e.g. a split dose, or two drugs
+    // dosed together). They share one x/y on the curve, so collapse them into a
+    // single marker carrying the summed mg — otherwise the dots stack invisibly
+    // and only one is reachable. (The keyed {#each} over markers also requires a
+    // unique date per series.) Medications are unioned so the tooltip can name
+    // them; the running order of `source` is date-sorted, and Map preserves
+    // insertion order, so markers stay in date order.
+    const toMarkers = (source: DosePoint[]): ChartDoseMarker[] => {
+      const byDate = new Map<IsoDate, { amountMg: number; medications: string[] }>();
+      for (const dose of source) {
+        if (!filterForSeries(dose) || !pointsByDate.has(dose.date)) continue;
+        const agg = byDate.get(dose.date);
+        if (agg) {
+          agg.amountMg += dose.amountMg;
+          if (!agg.medications.includes(dose.medication)) agg.medications.push(dose.medication);
+        } else {
+          byDate.set(dose.date, { amountMg: dose.amountMg, medications: [dose.medication] });
+        }
+      }
+      return [...byDate].map(([date, agg]) => {
+        const point = pointsByDate.get(date)!;
+        return {
+          date,
+          x: point.x,
+          y: point.y,
+          // Round to undo float drift from summing (e.g. 0.1 + 0.2).
+          amountMg: Math.round(agg.amountMg * 1000) / 1000,
+          medication: agg.medications.join(', '),
+        };
       });
+    };
 
     return {
       key: series.key,

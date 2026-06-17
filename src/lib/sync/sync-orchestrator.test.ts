@@ -106,6 +106,9 @@ vi.mock('$lib/auth/supabase', () => ({
         h.onAuthStateChange(cb),
     },
   },
+  supabaseUrl: 'https://example.supabase.co',
+  // Best-effort server-clock probe — stubbed so the cycle never hits the network.
+  fetchServerTimeMs: async () => null,
 }));
 
 vi.mock('$lib/stores/setupWizardStore', () => ({

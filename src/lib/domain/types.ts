@@ -38,8 +38,14 @@ export interface WrappedKeyBundle {
   dekVersion: number;
   passphraseSaltB64: string;
   passphraseWrapped: { ciphertext: string; iv: string };
+  /** PBKDF2 iterations the passphrase KEK was derived with. Stored so a raised
+   *  work factor never locks out keys wrapped under the old one. */
+  passphraseIterations: number;
   recoverySaltB64: string;
   recoveryWrapped: { ciphertext: string; iv: string };
+  /** PBKDF2 iterations the recovery KEK was derived with (can differ from the
+   *  passphrase half — e.g. after a recovery-code rotation). */
+  recoveryIterations: number;
   updatedAt: IsoDateTime;
 }
 

@@ -47,6 +47,27 @@ export const supabase = createClient(url || 'https://example.supabase.co', publi
   }
 });
 
+/**
+ * The server's "now" in epoch-ms, read from the `Date` response header of a cheap
+ * HEAD against the REST root. Used to anchor LWW timestamps to the server clock
+ * (see `$lib/sync/clock`). Returns null on any failure — callers treat it as
+ * best-effort and keep their last known offset.
+ */
+export async function fetchServerTimeMs(): Promise<number | null> {
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/`, {
+      method: 'HEAD',
+      headers: { apikey: publishableKey || 'demo-key' },
+    });
+    const date = res.headers.get('date');
+    if (!date) return null;
+    const ms = new Date(date).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function signInWithPassword(identifier: string, password: string) {
   return supabase.auth.signInWithPassword({ email: toAuthEmail(identifier), password });
 }

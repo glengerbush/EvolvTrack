@@ -54,6 +54,8 @@ vi.mock('$lib/domain/repo', () => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
+  PBKDF2_ITERATIONS: 600000,
+  LEGACY_PBKDF2_ITERATIONS: 210000,
   generateDek: vi.fn(async () => {
     state.generatedDekCounter += 1;
     return `DEK_${state.generatedDekCounter}`;
@@ -161,7 +163,13 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
   }),
 }));
 
-const reEncryptServerRowsMock = vi.fn(async (..._args: unknown[]) => 3);
+// The rotation re-encrypts in a convergence loop (re-runs until a pass converts
+// nothing, to sweep up stragglers). Model that: the first pass converts 3 rows,
+// the mop-up pass finds none. `reEncryptCalls` is reset in beforeEach.
+let reEncryptCalls = 0;
+const reEncryptServerRowsMock = vi.fn(
+  async (..._args: unknown[]): Promise<number> => (reEncryptCalls++ === 0 ? 3 : 0),
+);
 
 vi.mock('$lib/sync/sync-engine', () => ({
   reEncryptServerRows: (...args: unknown[]) => reEncryptServerRowsMock(...args),
@@ -184,8 +192,10 @@ function bundle(passphrase: string, dekToken: string, dekVersion: number): Wrapp
     dekVersion,
     passphraseSaltB64: 'SALT',
     passphraseWrapped: { ciphertext: `wrap(KEK(${passphrase}),${dekToken})`, iv: 'wiv' },
+    passphraseIterations: 600_000,
     recoverySaltB64: 'SALT',
     recoveryWrapped: { ciphertext: `wrap(RKEK(OLD_CODE),${dekToken})`, iv: 'wiv' },
+    recoveryIterations: 600_000,
     updatedAt: '2026-05-01T00:00:00.000Z',
   };
 }
@@ -216,7 +226,7 @@ beforeEach(() => {
   state.generatedDekCounter = 0;
   state.generatedRecoveryCounter = 0;
   reEncryptServerRowsMock.mockClear();
-  reEncryptServerRowsMock.mockResolvedValue(3);
+  reEncryptCalls = 0;
   vi.mocked(generateDek).mockClear();
   vi.mocked(generateRecoveryCode).mockClear();
   vi.mocked(setSessionKey).mockClear();
@@ -266,7 +276,9 @@ describe('startE2EEKeyRotation — change-passphrase happy path', () => {
 
   it('re-encrypts the server rows from the old DEK to the new DEK (not local data)', async () => {
     await startE2EEKeyRotation('OLD_PW', 'NEW_PW');
-    expect(reEncryptServerRowsMock).toHaveBeenCalledTimes(1);
+    // Two calls: the bulk pass (converts 3) then a convergence mop-up that finds
+    // nothing and stops the loop.
+    expect(reEncryptServerRowsMock).toHaveBeenCalledTimes(2);
     expect(reEncryptServerRowsMock.mock.calls[0][0]).toMatchObject({
       oldDek: 'OLD_DEK',
       oldVersion: 3,
@@ -278,6 +290,23 @@ describe('startE2EEKeyRotation — change-passphrase happy path', () => {
   it('caches the new DEK as the session key', async () => {
     await startE2EEKeyRotation('OLD_PW', 'NEW_PW');
     expect(setSessionKey).toHaveBeenCalledWith('DEK_1');
+  });
+
+  it('keeps sweeping until a pass converts nothing, catching rows pushed mid-rotation', async () => {
+    // Bulk pass converts 3; a device that hadn't learned of the rotation pushes 1
+    // more old-DEK row during the bulk pass; the third pass finds none and stops.
+    reEncryptServerRowsMock.mockClear();
+    reEncryptServerRowsMock
+      .mockResolvedValueOnce(3)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0);
+
+    await startE2EEKeyRotation('OLD_PW', 'NEW_PW');
+
+    expect(reEncryptServerRowsMock).toHaveBeenCalledTimes(3);
+    // The old bundle is dropped only after the sweep converged, so the straggler
+    // is on the new version first.
+    expect(state.deletedBundleVersions).toContain(3);
   });
 
   it('records account-state transitions: rotating_e2ee_key then e2ee, with the active version', async () => {

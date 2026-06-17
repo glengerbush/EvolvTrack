@@ -26,7 +26,9 @@ import {
   generateSymptomColor,
 } from '$lib/utils/symptoms';
 
-const now = () => new Date().toISOString();
+// Server-anchored, monotonic timestamps so cross-device LWW isn't decided by
+// whichever device's wall clock drifts furthest. See `$lib/sync/clock`.
+import { now } from '$lib/sync/clock';
 export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
 
 // ── Edit gating during an E2EE change ────────────────────────────────────────

@@ -3,17 +3,34 @@ import { cryptoWorker } from '$lib/crypto/worker-client';
 export const ENCRYPTION_FORMAT_VERSION = 1;
 
 /**
+ * PBKDF2-HMAC-SHA256 work factor for newly-minted wrapped-key bundles. 600k is
+ * the OWASP 2023 minimum. The count a bundle was wrapped under is stored on the
+ * bundle (`passphraseIterations` / `recoveryIterations`) so unwrapping always
+ * uses the right one — that's what lets us raise this without locking out keys
+ * wrapped under the old value.
+ */
+export const PBKDF2_ITERATIONS = 600_000;
+
+/**
+ * Work factor used before iteration counts were stored on the bundle. Bundles
+ * (local rows or server rows) that predate the `*_iterations` columns are
+ * assumed to have been wrapped with this, so they still unwrap.
+ */
+export const LEGACY_PBKDF2_ITERATIONS = 210_000;
+
+/**
  * PBKDF2 the passphrase + bundle's passphrase salt to derive the KEK that
- * wraps the DEK. The caller pulls the salt out of the wrapped-key bundle —
- * there's no implicit `et.salt` lookup, so the dependency is explicit at
- * every call site.
+ * wraps the DEK. The caller pulls the salt and iteration count out of the
+ * wrapped-key bundle — there's no implicit lookup, so the dependency is
+ * explicit at every call site.
  */
 export async function derivePassphraseKek(
   passphrase: string,
   saltB64: string,
+  iterations: number,
 ): Promise<string> {
   if (!passphrase) throw new Error('Passphrase is required.');
-  const { keyB64 } = await cryptoWorker.call('derive-key', { passphrase, saltB64 });
+  const { keyB64 } = await cryptoWorker.call('derive-key', { passphrase, saltB64, iterations });
   return keyB64;
 }
 
@@ -65,10 +82,10 @@ export function generateSaltB64(): string {
 }
 
 /** PBKDF2 the (normalized) recovery code with the recovery salt to get a KEK. */
-export async function deriveRecoveryKek(code: string, saltB64: string): Promise<string> {
+export async function deriveRecoveryKek(code: string, saltB64: string, iterations: number): Promise<string> {
   const passphrase = normalizeRecoveryCode(code);
   if (!passphrase) throw new Error('Recovery code is empty.');
-  const { keyB64 } = await cryptoWorker.call('derive-key', { passphrase, saltB64 });
+  const { keyB64 } = await cryptoWorker.call('derive-key', { passphrase, saltB64, iterations });
   return keyB64;
 }
 

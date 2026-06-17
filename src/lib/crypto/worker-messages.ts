@@ -7,7 +7,7 @@ export type WorkerAction =
   | 'unwrap-key';
 
 export type WorkerPayloadMap = {
-  'derive-key': { passphrase: string; saltB64: string };
+  'derive-key': { passphrase: string; saltB64: string; iterations: number };
   encrypt: { keyB64: string; plaintext: string };
   decrypt: { keyB64: string; ciphertext: string; iv: string };
   'generate-dek': Record<string, never>;

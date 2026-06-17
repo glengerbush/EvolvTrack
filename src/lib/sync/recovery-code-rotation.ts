@@ -12,6 +12,7 @@
  */
 import type { WrappedKeyBundle } from '$lib/domain/types';
 import {
+  PBKDF2_ITERATIONS,
   derivePassphraseKek,
   deriveRecoveryKek,
   generateRecoveryCode,
@@ -40,7 +41,11 @@ export async function rotateRecoveryCode(currentPassphrase: string): Promise<Rec
 
   // Unwrap the DEK with the current passphrase — proof of possession AND the
   // value we'll rewrap under the new recovery KEK.
-  const passphraseKek = await derivePassphraseKek(currentPassphrase, existing.passphraseSaltB64);
+  const passphraseKek = await derivePassphraseKek(
+    currentPassphrase,
+    existing.passphraseSaltB64,
+    existing.passphraseIterations,
+  );
   const dek = await unwrapDek(
     passphraseKek,
     existing.passphraseWrapped.ciphertext,
@@ -49,13 +54,16 @@ export async function rotateRecoveryCode(currentPassphrase: string): Promise<Rec
 
   const recoveryCode = generateRecoveryCode();
   const recoverySaltB64 = generateSaltB64();
-  const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64);
+  // The fresh recovery KEK uses the current (raised) work factor; the passphrase
+  // half is left untouched, so its own iteration count is preserved.
+  const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64, PBKDF2_ITERATIONS);
   const recoveryWrapped = await wrapDek(recoveryKek, dek);
 
   const updated: WrappedKeyBundle = {
     ...existing,
     recoverySaltB64,
     recoveryWrapped,
+    recoveryIterations: PBKDF2_ITERATIONS,
     updatedAt: new Date().toISOString(),
   };
 

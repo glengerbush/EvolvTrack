@@ -82,6 +82,44 @@ describe('buildChartModel — planned dose marker', () => {
   });
 });
 
+describe('buildChartModel — same-day doses combine into one marker', () => {
+  it('collapses two same-day, same-drug doses into one marker with the summed mg', () => {
+    const rows = [
+      row({ date: iso('2026-05-01'), dose: '5', medication: SEMA, weight: '180' }),
+      // Two confirmed doses logged on the same day, same drug.
+      row({ date: iso('2026-05-08'), dose: '2.5', medication: SEMA }),
+      row({ date: iso('2026-05-08'), dose: '2.5', medication: SEMA }),
+    ];
+    const model = build(rows);
+    const series = model.systemSeries[0];
+
+    const onDate = series.dosePoints.filter((p) => p.date === '2026-05-08');
+    expect(onDate).toHaveLength(1);
+    expect(onDate[0].amountMg).toBe(5);
+  });
+
+  it('keeps two different drugs dosed the same day as separate markers', () => {
+    const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
+    const rows = [
+      row({ date: iso('2026-05-01'), dose: '5', medication: SEMA, weight: '180' }),
+      row({ date: iso('2026-05-01'), dose: '10', medication: TIRZ }),
+      row({ date: iso('2026-05-08'), dose: '5', medication: SEMA }),
+      row({ date: iso('2026-05-08'), dose: '10', medication: TIRZ }),
+    ];
+    const model = build(rows);
+    // Multiple drugs split into one per-drug series each; the shared date stays
+    // one dot *per drug* (different curve heights), never merged across drugs.
+    const semaSeries = model.systemSeries.find((s) => s.medication === SEMA);
+    const tirzSeries = model.systemSeries.find((s) => s.medication === TIRZ);
+    const semaDot = semaSeries?.dosePoints.filter((p) => p.date === '2026-05-08') ?? [];
+    const tirzDot = tirzSeries?.dosePoints.filter((p) => p.date === '2026-05-08') ?? [];
+    expect(semaDot).toHaveLength(1);
+    expect(semaDot[0].amountMg).toBe(5);
+    expect(tirzDot).toHaveLength(1);
+    expect(tirzDot[0].amountMg).toBe(10);
+  });
+});
+
 describe('buildChartModel — projection start (same-day-zero rule)', () => {
   it("a planned dose today doesn't dash the line at today", () => {
     const rows = [

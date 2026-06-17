@@ -20,7 +20,12 @@
 <style>
   .edit-pencil {
     border: 0;
-    border-radius: 10px;
+    border-radius: 8px;
+    /* Hold a true 2rem square even inside a tight flex row (e.g. the mobile card
+       header), so it never gets shrunk into a vertical rectangle and stays the
+       same size/shape as the Save/Delete action squares. */
+    flex: 0 0 auto;
+    box-sizing: border-box;
     width: 2rem;
     height: 2rem;
     padding: 0;
@@ -30,7 +35,7 @@
     display: inline-grid;
     place-items: center;
     box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
-    --edit-icon-scale: 60%;
+    --edit-icon-scale: 80%;
   }
 
   .edit-pencil.active {

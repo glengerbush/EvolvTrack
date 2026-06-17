@@ -12,6 +12,8 @@ const state = vi.hoisted(() => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
+  PBKDF2_ITERATIONS: 600000,
+  LEGACY_PBKDF2_ITERATIONS: 210000,
   generateRecoveryCode: vi.fn(() => {
     state.generatedCodeCounter += 1;
     return `CODE_${state.generatedCodeCounter}`;
@@ -59,11 +61,15 @@ function existingBundle(): WrappedKeyBundle {
       ciphertext: 'wrap(KEK(pw|SALT_PW),DEK_BYTES)',
       iv: 'wiv',
     },
+    // Legacy work factor: the passphrase half must survive a recovery-code
+    // rotation untouched, while the fresh recovery half is minted at 600k.
+    passphraseIterations: 210_000,
     recoverySaltB64: 'SALT_OLD',
     recoveryWrapped: {
       ciphertext: 'wrap(RKEK(OLD_CODE|SALT_OLD),DEK_BYTES)',
       iv: 'wiv',
     },
+    recoveryIterations: 210_000,
     updatedAt: '2026-04-01T00:00:00.000Z',
   };
 }
@@ -118,6 +124,14 @@ describe('rotateRecoveryCode — happy path', () => {
     expect(state.localBundle?.recoveryWrapped.ciphertext).toBe(
       'wrap(RKEK(CODE_1|SALT_1),DEK_BYTES)',
     );
+  });
+
+  it('raises the recovery half to the new work factor but preserves the passphrase half', async () => {
+    // The existing bundle is at the legacy 210k; only the recovery half is
+    // re-minted here, so it moves to 600k while the passphrase half stays put.
+    await rotateRecoveryCode('pw');
+    expect(state.localBundle?.recoveryIterations).toBe(600000);
+    expect(state.localBundle?.passphraseIterations).toBe(210000);
   });
 
   it('uploads to the server before saving locally so a remote failure leaves local untouched', async () => {

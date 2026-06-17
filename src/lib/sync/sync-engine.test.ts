@@ -106,6 +106,8 @@ vi.mock('$lib/domain/repo', () => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
+  PBKDF2_ITERATIONS: 600000,
+  LEGACY_PBKDF2_ITERATIONS: 210000,
   encryptRecord: (keyB64: string, record: unknown) => h.encryptImpl(keyB64, record),
   decryptRecord: (keyB64: string, ciphertext: string, iv: string) =>
     h.decryptImpl(keyB64, ciphertext, iv),

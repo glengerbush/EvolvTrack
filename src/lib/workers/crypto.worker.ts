@@ -1,13 +1,14 @@
 import type { WorkerRequest } from '$lib/crypto/worker-messages';
+import { fromB64, toB64 } from '$lib/crypto/base64';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
 
-async function deriveAesKey(passphrase: string, saltB64: string): Promise<CryptoKey> {
+async function deriveAesKey(passphrase: string, saltB64: string, iterations: number): Promise<CryptoKey> {
   const salt = Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0));
   const material = await crypto.subtle.importKey('raw', te.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 210000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
     material,
     { name: 'AES-GCM', length: 256 },
     true,
@@ -30,14 +31,6 @@ async function importRawKey(keyB64: string): Promise<CryptoKey> {
   );
 }
 
-function toB64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-function fromB64(v: string): Uint8Array {
-  return Uint8Array.from(atob(v), (c) => c.charCodeAt(0));
-}
-
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const out = new Uint8Array(bytes.byteLength);
   out.set(bytes);
@@ -48,8 +41,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const msg = event.data;
   try {
     if (msg.type === 'derive-key') {
-      const { passphrase, saltB64 } = msg.payload;
-      const key = await deriveAesKey(passphrase, saltB64);
+      const { passphrase, saltB64, iterations } = msg.payload;
+      const key = await deriveAesKey(passphrase, saltB64, iterations);
       const keyB64 = await exportRawKey(key);
       self.postMessage({ id: msg.id, ok: true, data: { keyB64 } });
       return;

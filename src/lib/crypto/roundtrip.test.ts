@@ -6,17 +6,10 @@
 // "OperationError: The operation failed for an operation-specific reason"
 // from a real sync cycle.
 import { describe, expect, it } from 'vitest';
+import { fromB64, toB64 } from './base64';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
-
-function toB64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-function fromB64(v: string): Uint8Array {
-  return Uint8Array.from(atob(v), (c) => c.charCodeAt(0));
-}
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const out = new Uint8Array(bytes.byteLength);

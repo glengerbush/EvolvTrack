@@ -133,13 +133,20 @@ describe('upsertRemoteWrappedKeys', () => {
       dekVersion: 2,
       passphraseSaltB64: 'ps',
       passphraseWrapped: { ciphertext: 'pc', iv: 'pi' },
+      passphraseIterations: 600_000,
       recoverySaltB64: 'rs',
       recoveryWrapped: { ciphertext: 'rc', iv: 'ri' },
+      recoveryIterations: 600_000,
       updatedAt: '2026-06-03T00:00:00.000Z',
     };
     await upsertRemoteWrappedKeys(bundle);
     expect(builder.calls.onConflict).toBe('user_id,dek_version');
-    expect(builder.calls.payload).toMatchObject({ user_id: 'user-1', dek_version: 2 });
+    expect(builder.calls.payload).toMatchObject({
+      user_id: 'user-1',
+      dek_version: 2,
+      passphrase_iterations: 600_000,
+      recovery_iterations: 600_000,
+    });
   });
 });
 

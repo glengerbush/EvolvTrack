@@ -19,7 +19,8 @@ import { refreshLicenseActive } from '$lib/sync/license';
 import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
 import { clearLocalWrappedKeys, fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import { clearPullCursor } from '$lib/sync/pull-cursor';
-import { supabase, supabaseUrl } from '$lib/auth/supabase';
+import { fetchServerTimeMs, supabase, supabaseUrl } from '$lib/auth/supabase';
+import { recordServerTime } from '$lib/sync/clock';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
 import { clearSession, rehydrateSession } from '$lib/sync/session-key';
 import { errorMessage } from '$lib/utils/errorMessage';
@@ -329,6 +330,12 @@ export function createSyncOrchestrator(): SyncOrchestrator {
         syncStatus.set('idle');
         return;
       }
+
+      // Anchor LWW timestamps to the server clock so a device with a skewed wall
+      // clock doesn't win (or lose) every cross-device conflict. Best-effort: a
+      // failed sample just leaves the last known offset in place.
+      const serverMs = await fetchServerTimeMs();
+      if (serverMs !== null) recordServerTime(serverMs);
 
       // Cloud sync is gated by an active license. If we don't know the state
       // yet, fetch it once. If inactive, skip the cycle entirely — no pull,

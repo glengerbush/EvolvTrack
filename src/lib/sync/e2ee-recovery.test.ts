@@ -44,6 +44,8 @@ vi.mock('$lib/domain/repo', () => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
+  PBKDF2_ITERATIONS: 600000,
+  LEGACY_PBKDF2_ITERATIONS: 210000,
   generateDek: vi.fn(async () => {
     state.generatedDekCounter += 1;
     return `DEK_${state.generatedDekCounter}`;
@@ -165,11 +167,13 @@ function bundleForCode(code: string, dekToken: string, passphraseToken = 'OLD_PW
       ciphertext: `wrap(KEK(${passphraseToken}),${dekToken})`,
       iv: 'wiv',
     },
+    passphraseIterations: 600_000,
     recoverySaltB64: 'SALT',
     recoveryWrapped: {
       ciphertext: `wrap(RKEK(${code}),${dekToken})`,
       iv: 'wiv',
     },
+    recoveryIterations: 600_000,
     updatedAt: '2026-04-01T00:00:00.000Z',
   };
 }

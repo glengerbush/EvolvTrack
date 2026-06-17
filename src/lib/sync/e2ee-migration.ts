@@ -18,6 +18,7 @@ import type {
 } from '$lib/domain/types';
 import {
   ENCRYPTION_FORMAT_VERSION,
+  PBKDF2_ITERATIONS,
   decryptRecord,
   derivePassphraseKek,
   deriveRecoveryKek,
@@ -420,8 +421,8 @@ async function mintBundle(
   const recoverySaltB64 = generateSaltB64();
   const recoveryCode = generateRecoveryCode();
 
-  const passphraseKek = await derivePassphraseKek(passphrase, passphraseSaltB64);
-  const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64);
+  const passphraseKek = await derivePassphraseKek(passphrase, passphraseSaltB64, PBKDF2_ITERATIONS);
+  const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64, PBKDF2_ITERATIONS);
 
   const passphraseWrapped = await wrapDek(passphraseKek, dek);
   const recoveryWrapped = await wrapDek(recoveryKek, dek);
@@ -430,8 +431,10 @@ async function mintBundle(
     dekVersion: options.dekVersion,
     passphraseSaltB64,
     passphraseWrapped,
+    passphraseIterations: PBKDF2_ITERATIONS,
     recoverySaltB64,
     recoveryWrapped,
+    recoveryIterations: PBKDF2_ITERATIONS,
     updatedAt: nowIso(),
   });
   await upsertRemoteWrappedKeys(bundle);
@@ -448,7 +451,7 @@ async function unwrapDekWithPassphrase(passphrase: string): Promise<string> {
   if (!bundle) {
     throw new Error('No wrapped-key bundle is present locally. Start the encryption migration again.');
   }
-  const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64);
+  const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64, bundle.passphraseIterations);
   return unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);
 }
 
@@ -896,7 +899,7 @@ export async function resumeE2EEDisableMigration(passphrase: string): Promise<E2
 
 /** Unwrap a DEK from a specific bundle with a passphrase (forward-secrecy KEK). */
 async function deriveDekFromBundle(bundle: WrappedKeyBundle, passphrase: string): Promise<string> {
-  const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64);
+  const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64, bundle.passphraseIterations);
   return unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);
 }
 
@@ -930,7 +933,27 @@ async function driveRotationImpl(
   try {
     setSessionKey(newDek);
     const report = createProgressReporter(migration);
-    const converted = await reEncryptServerRows({ oldDek, oldVersion, newDek, newVersion, onProgress: report });
+    // Re-encrypt every old-version row to the new DEK, then converge: loop until
+    // a pass converts nothing. A device that hasn't yet reconciled the rotating
+    // mode can still push a row under the OLD dek (RLS permits encrypted writes
+    // while `rotating_e2ee_key`), and one landing *after* the first pass's scan
+    // would otherwise be orphaned — stranded on the old version, filtered out of
+    // every future pull once the old bundle is dropped below. Each pass only
+    // touches rows still on the old version, so this is idempotent and never
+    // double-counts; the cap bounds the rare case of a device that keeps pushing
+    // (it stops once it adopts the rotation mode a cycle later).
+    let converted = 0;
+    for (let pass = 0; pass < 5; pass += 1) {
+      const n = await reEncryptServerRows({
+        oldDek,
+        oldVersion,
+        newDek,
+        newVersion,
+        onProgress: pass === 0 ? report : undefined,
+      });
+      converted += n;
+      if (n === 0) break;
+    }
     const updatedMigration: E2EEMigrationState = {
       ...migration,
       encryptedEventCount: converted,
@@ -1356,7 +1379,7 @@ export async function recoverWithCode(
   // Unwrap the (old) DEK with the recovery KEK. A failure here is the canonical
   // "wrong code" signal — surface it as a clean error rather than a paused
   // migration, since nothing destructive has happened yet.
-  const recoveryKek = await deriveRecoveryKek(recoveryCode, bundle.recoverySaltB64);
+  const recoveryKek = await deriveRecoveryKek(recoveryCode, bundle.recoverySaltB64, bundle.recoveryIterations);
   let oldDek: string;
   try {
     oldDek = await unwrapDek(

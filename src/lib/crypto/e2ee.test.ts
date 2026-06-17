@@ -37,17 +37,18 @@ describe('ENCRYPTION_FORMAT_VERSION', () => {
 
 describe('derivePassphraseKek', () => {
   it('rejects an empty passphrase', async () => {
-    await expect(derivePassphraseKek('', 'SALT')).rejects.toThrow(/passphrase is required/i);
+    await expect(derivePassphraseKek('', 'SALT', 600_000)).rejects.toThrow(/passphrase is required/i);
     expect(callMock).not.toHaveBeenCalled();
   });
 
-  it('forwards passphrase + salt to the worker and returns the KEK bytes', async () => {
+  it('forwards passphrase + salt + iterations to the worker and returns the KEK bytes', async () => {
     callMock.mockResolvedValueOnce({ keyB64: 'KEK_XYZ' });
-    const result = await derivePassphraseKek('hunter2', 'SALT_XYZ');
+    const result = await derivePassphraseKek('hunter2', 'SALT_XYZ', 600_000);
     expect(result).toBe('KEK_XYZ');
     expect(callMock).toHaveBeenCalledWith('derive-key', {
       passphrase: 'hunter2',
       saltB64: 'SALT_XYZ',
+      iterations: 600_000,
     });
   });
 });
@@ -140,17 +141,18 @@ describe('deriveRecoveryKek', () => {
   it('normalizes the code before sending it to the worker', async () => {
     callMock.mockResolvedValueOnce({ keyB64: 'KEK_R' });
 
-    const result = await deriveRecoveryKek(' abcd-efgh ', 'SALT_R');
+    const result = await deriveRecoveryKek(' abcd-efgh ', 'SALT_R', 600_000);
 
     expect(result).toBe('KEK_R');
     expect(callMock).toHaveBeenCalledWith('derive-key', {
       passphrase: 'ABCDEFGH',
       saltB64: 'SALT_R',
+      iterations: 600_000,
     });
   });
 
   it('refuses an empty (post-normalization) code', async () => {
-    await expect(deriveRecoveryKek('  --  ', 'SALT_R')).rejects.toThrow(/empty/i);
+    await expect(deriveRecoveryKek('  --  ', 'SALT_R', 600_000)).rejects.toThrow(/empty/i);
     expect(callMock).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { getProfile, saveProfile } from '$lib/domain/repo';
+import { KG_PER_LB } from '$lib/utils/pharmacokinetics';
 import type { WeightUnit } from '$lib/domain/types';
 
 export type { WeightUnit };
@@ -42,7 +43,7 @@ export function displayWeight(lbsStr: string, unit: WeightUnit): string {
   if (!lbsStr) return '';
   const n = parseFloat(lbsStr);
   if (!isFinite(n)) return lbsStr;
-  if (unit === 'kg') return (n * 0.453592).toFixed(1);
+  if (unit === 'kg') return (n * KG_PER_LB).toFixed(1);
   return n % 1 === 0 ? String(n) : parseFloat(n.toFixed(1)).toString();
 }
 
@@ -51,6 +52,6 @@ export function toStoredLbs(inputStr: string, unit: WeightUnit): string {
   if (!inputStr) return '';
   const n = parseFloat(inputStr);
   if (!isFinite(n)) return inputStr;
-  if (unit === 'kg') return String(n / 0.453592);
+  if (unit === 'kg') return String(n / KG_PER_LB);
   return inputStr;
 }

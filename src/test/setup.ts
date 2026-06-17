@@ -5,6 +5,16 @@
 //
 // This is also where to mount any other globals tests rely on.
 
+import { beforeEach } from 'vitest';
+import { __resetClockForTests } from '$lib/sync/clock';
+
+// The server-anchored clock keeps a module-global monotonic high-water mark.
+// Reset it before each test so a fake-timer test in one case can't leave a
+// future peak that "holds" a later test's timestamps (silent ordering flakes).
+beforeEach(() => {
+  __resetClockForTests();
+});
+
 class MemoryStorage implements Storage {
   private map = new Map<string, string>();
   get length() {

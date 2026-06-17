@@ -1,3 +1,4 @@
+import { KG_PER_LB } from '$lib/utils/pharmacokinetics';
 import type { WeightUnit } from '$lib/stores/unitStore';
 
 /** Max decimal places (up to `max`) actually used across a set of numbers. */
@@ -25,5 +26,5 @@ export function fmtNum(value: number, decimals: number): string {
 export function lbsToDisplayNum(lbsStr: string, unit: WeightUnit): number {
   const n = parseFloat(lbsStr);
   if (!isFinite(n)) return NaN;
-  return unit === 'kg' ? n * 0.453592 : n;
+  return unit === 'kg' ? n * KG_PER_LB : n;
 }

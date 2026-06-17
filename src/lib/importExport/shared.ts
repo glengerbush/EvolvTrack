@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid';
 import type { HealthEntry, IsoDate, Medication, Prescription, ProfileSettings } from '$lib/domain/types';
 import { isMedication } from '$lib/domain/types';
 import { asIsoDate } from '$lib/utils/dateKeys';
+import { KG_PER_LB } from '$lib/utils/pharmacokinetics';
 
 export type ImportMode = 'merge' | 'replace';
 
@@ -34,7 +35,9 @@ export const EMPTY_IMPORT_DATA: ImportData = {
   prescriptions: [],
 };
 
-const LBS_PER_KG = 2.2046226218;
+// Reciprocal of the single source-of-truth lb→kg factor, so importer and the
+// PK/display paths agree to the last digit.
+const LBS_PER_KG = 1 / KG_PER_LB;
 
 export function nowIso() {
   return new Date().toISOString();

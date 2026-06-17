@@ -14,6 +14,7 @@
 import { db } from '$lib/db/schema';
 import { supabase } from '$lib/auth/supabase';
 import { requireAuthenticatedUser } from '$lib/sync/account-state';
+import { LEGACY_PBKDF2_ITERATIONS } from '$lib/crypto/e2ee';
 import type { WrappedKeyBundle } from '$lib/domain/types';
 
 const BUNDLE_KEY = 'self' as const;
@@ -23,9 +24,11 @@ type WrappedKeyRow = {
   passphrase_salt_b64: string;
   passphrase_wrapped_ciphertext: string;
   passphrase_wrapped_iv: string;
+  passphrase_iterations: number | null;
   recovery_salt_b64: string;
   recovery_wrapped_ciphertext: string;
   recovery_wrapped_iv: string;
+  recovery_iterations: number | null;
   updated_at: string;
 };
 
@@ -38,17 +41,30 @@ function rowToBundle(row: WrappedKeyRow): WrappedKeyBundle {
       ciphertext: row.passphrase_wrapped_ciphertext,
       iv: row.passphrase_wrapped_iv,
     },
+    passphraseIterations: row.passphrase_iterations ?? LEGACY_PBKDF2_ITERATIONS,
     recoverySaltB64: row.recovery_salt_b64,
     recoveryWrapped: {
       ciphertext: row.recovery_wrapped_ciphertext,
       iv: row.recovery_wrapped_iv,
     },
+    recoveryIterations: row.recovery_iterations ?? LEGACY_PBKDF2_ITERATIONS,
     updatedAt: row.updated_at,
   };
 }
 
+/** Backfill iteration counts on a bundle read from a store that predates the
+ *  `*_iterations` fields, so legacy local rows still unwrap. */
+function withIterationDefaults(bundle: WrappedKeyBundle): WrappedKeyBundle {
+  return {
+    ...bundle,
+    passphraseIterations: bundle.passphraseIterations ?? LEGACY_PBKDF2_ITERATIONS,
+    recoveryIterations: bundle.recoveryIterations ?? LEGACY_PBKDF2_ITERATIONS,
+  };
+}
+
 export async function getLocalWrappedKeys(): Promise<WrappedKeyBundle | undefined> {
-  return db.wrappedKeys.get(BUNDLE_KEY);
+  const bundle = await db.wrappedKeys.get(BUNDLE_KEY);
+  return bundle ? withIterationDefaults(bundle) : undefined;
 }
 
 export async function saveLocalWrappedKeys(
@@ -108,9 +124,11 @@ export async function upsertRemoteWrappedKeys(bundle: WrappedKeyBundle): Promise
       passphrase_salt_b64: bundle.passphraseSaltB64,
       passphrase_wrapped_ciphertext: bundle.passphraseWrapped.ciphertext,
       passphrase_wrapped_iv: bundle.passphraseWrapped.iv,
+      passphrase_iterations: bundle.passphraseIterations,
       recovery_salt_b64: bundle.recoverySaltB64,
       recovery_wrapped_ciphertext: bundle.recoveryWrapped.ciphertext,
       recovery_wrapped_iv: bundle.recoveryWrapped.iv,
+      recovery_iterations: bundle.recoveryIterations,
       updated_at: bundle.updatedAt,
     },
     { onConflict: 'user_id,dek_version' },

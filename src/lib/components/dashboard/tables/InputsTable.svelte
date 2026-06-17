@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { SvelteSet, SvelteMap } from 'svelte/reactivity';
   import CustomPicker from '$lib/components/dashboard/tables/CustomPicker.svelte';
   import MultiPicker from '$lib/components/dashboard/tables/MultiPicker.svelte';
@@ -9,6 +9,7 @@
   import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
   import SaveIcon from '$lib/components/icons/SaveIcon.svelte';
   import TrashIcon from '$lib/components/icons/TrashIcon.svelte';
+  import CloseIcon from '$lib/components/icons/CloseIcon.svelte';
   import { isMobile } from '$lib/stores/viewport';
   import type { HealthInputRow, HealthSystemAmount } from '$lib/stores/healthTypes';
   import { weightUnit, displayWeight, toStoredLbs } from '$lib/stores/unitStore';
@@ -329,6 +330,8 @@
     mobileEditSnapshot = mobileEditId ? cloneRow(row) : null;
   }
   function saveMobileEdit(row: EditableInputRow) {
+    // Flush any deferred dose PK recompute so the saved/derived state is current.
+    commitDosePk();
     // Clear edit state first so the autosave guard no longer suppresses the
     // persist; `queueRowSaveFor` re-resolves the row by identity, so passing the
     // (possibly stale after recalc) row object is safe.
@@ -337,6 +340,8 @@
     queueRowSaveFor(row);
   }
   function cancelMobileEdit(row: EditableInputRow) {
+    // Discarding edits — drop any pending dose PK recompute too.
+    cancelDosePk();
     const id = rowIdentity(row);
     const snap = mobileEditSnapshot;
     mobileEditId = null;
@@ -501,6 +506,7 @@
   }
 
   function cancelEdit() {
+    cancelDosePk();
     if (selRow !== null && editSnapshotRow) {
       const r = selRow;
       const snap = editSnapshotRow;
@@ -615,6 +621,8 @@
       editing = false;
       return;
     }
+    // Flush a deferred dose PK recompute first so the re-sort + save see it.
+    commitDosePk();
     const r = selRow;
     const c = selCol;
     const id = rowIdentity(tableRows[r]);
@@ -753,11 +761,15 @@
   // An editor lost focus (tab/click away): persist and leave edit mode, but
   // don't pull focus back — let it land wherever the user sent it.
   function editorBlur(row: EditableInputRow) {
+    // Flush a deferred dose PK recompute so the save reflects the typed dose.
+    commitDosePk();
     editing = false;
     queueRowSaveFor(row);
   }
 
   function clearCell(r: number, key: ColumnKey) {
+    // This computes its own derived state; drop any deferred dose recompute.
+    cancelDosePk();
     if (key === 'symptoms') updateCell(r, 'symptoms', []);
     else if (key === 'dose') {
       // Clearing a dose also drops its vial override / medication attribution.
@@ -1748,6 +1760,59 @@ function markRowsAsBaseline() {
     tableRows = recalculateDerived(nextRows, true, earliest || undefined, scopeForColumnKey(key));
   }
 
+  // ── Dose entry: defer the PK recompute ───────────────────────────────────────
+  // A dose change recomputes "mg in system" for that date and every later row, so
+  // doing it on every keystroke makes typing a dose on an old row block the main
+  // thread (badly so on phones). Apply the raw value immediately (cheap), then
+  // run the one expensive PK pass on a short debounce and flush it on commit, so
+  // the curve still updates promptly but never per-keystroke.
+  let doseRecalcTimer: ReturnType<typeof setTimeout> | undefined;
+  let flushDosePk: (() => void) | null = null;
+
+  function onDoseInput(index: number, value: string) {
+    const nextRows = [...tableRows];
+    const nextRow = cloneRow(nextRows[index]);
+    nextRow.dose = value;
+    if (!nextRow.medication && Number.isFinite(parseFloat(value)) && parseFloat(value) > 0) {
+      nextRow.medication = defaultMedication;
+    }
+    nextRows[index] = nextRow;
+    // 'local' scope applies the typed value without touching PK — O(rows) clone,
+    // no pharmacokinetics.
+    tableRows = recalculateDerived(nextRows, true, undefined, 'local');
+
+    const date = nextRow.date;
+    if (doseRecalcTimer) clearTimeout(doseRecalcTimer);
+    // Re-resolve the row by identity at flush time: a debounce or commit can fire
+    // after the table re-sorted, so the original index may be stale.
+    const id = rowIdentity(nextRow);
+    flushDosePk = () => {
+      if (doseRecalcTimer) clearTimeout(doseRecalcTimer);
+      doseRecalcTimer = undefined;
+      flushDosePk = null;
+      const recalcDate = id
+        ? tableRows.find((r) => rowIdentity(r) === id)?.date ?? date
+        : date;
+      tableRows = recalculateDerived(tableRows.map(cloneRow), true, recalcDate || undefined, 'pk');
+    };
+    doseRecalcTimer = setTimeout(() => flushDosePk?.(), 180);
+  }
+
+  // Run any pending dose PK recompute now (commit paths call this so a save/sort
+  // never races a deferred recalc).
+  function commitDosePk() {
+    flushDosePk?.();
+  }
+
+  // Drop a pending dose PK recompute without running it (cancel paths).
+  function cancelDosePk() {
+    if (doseRecalcTimer) clearTimeout(doseRecalcTimer);
+    doseRecalcTimer = undefined;
+    flushDosePk = null;
+  }
+
+  onDestroy(cancelDosePk);
+
   function scopeForColumnKey(key: ColumnKey): RecalcScope {
     switch (key) {
       case 'date':
@@ -2119,6 +2184,44 @@ function markRowsAsBaseline() {
         </tr>
       </thead>
       <tbody>
+        <!-- The due-confirm `!` badge + its Taken/Skip panel. Shared so it can
+             render in the card gutter on desktop and inline next to the date on
+             mobile, with identical behaviour. -->
+        {#snippet dueBadge(rowIndex: number, row: EditableInputRow, isExpanded: boolean)}
+          <div class="due-action-wrap">
+            <button
+              type="button"
+              class="due-action-btn"
+              class:expanded={isExpanded}
+              class:selected={isDueSelected(rowIndex)}
+              data-due-row={rowIndex}
+              tabindex={$isMobile ? undefined : (isDueSelected(rowIndex) ? 0 : -1)}
+              aria-label="Confirm whether this dose was taken"
+              aria-expanded={isExpanded}
+              title="Confirm whether this dose was taken"
+              onclick={() => activateDueFromClick(rowIndex, row)}
+              onkeydown={$isMobile ? undefined : dueButtonKeydown}
+            >!</button>
+            {#if isExpanded}
+              <div class="due-action-panel" role="group" aria-label="Confirm planned dose" data-due-row={rowIndex}>
+                <button
+                  type="button"
+                  class="due-action-confirm"
+                  class:selected={duePanelNav === 'taken' && isDueSelected(rowIndex)}
+                  onclick={() => confirmDue(row, 'taken')}
+                  onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
+                >Taken</button>
+                <button
+                  type="button"
+                  class="due-action-skip"
+                  class:selected={duePanelNav === 'skipped' && isDueSelected(rowIndex)}
+                  onclick={() => confirmDue(row, 'skipped')}
+                  onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
+                >Skip</button>
+              </div>
+            {/if}
+          </div>
+        {/snippet}
         {#if topSpacerHeight > 0}
           <tr aria-hidden="true" class="virtual-spacer">
             <td colspan={activeColumns.length + 1} style={`height:${topSpacerHeight}px`}></td>
@@ -2155,40 +2258,8 @@ function markRowsAsBaseline() {
                     />
                   </svg>
                 </button>
-              {:else if dueConfirm}
-                <div class="due-action-wrap">
-                  <button
-                    type="button"
-                    class="due-action-btn"
-                    class:expanded={isExpanded}
-                    class:selected={isDueSelected(rowIndex)}
-                    data-due-row={rowIndex}
-                    tabindex={$isMobile ? undefined : (isDueSelected(rowIndex) ? 0 : -1)}
-                    aria-label="Confirm whether this dose was taken"
-                    aria-expanded={isExpanded}
-                    title="Confirm whether this dose was taken"
-                    onclick={() => activateDueFromClick(rowIndex, row)}
-                    onkeydown={$isMobile ? undefined : dueButtonKeydown}
-                  >!</button>
-                  {#if isExpanded}
-                    <div class="due-action-panel" role="group" aria-label="Confirm planned dose" data-due-row={rowIndex}>
-                      <button
-                        type="button"
-                        class="due-action-confirm"
-                        class:selected={duePanelNav === 'taken' && isDueSelected(rowIndex)}
-                        onclick={() => confirmDue(row, 'taken')}
-                        onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
-                      >Taken</button>
-                      <button
-                        type="button"
-                        class="due-action-skip"
-                        class:selected={duePanelNav === 'skipped' && isDueSelected(rowIndex)}
-                        onclick={() => confirmDue(row, 'skipped')}
-                        onkeydown={$isMobile ? undefined : (e) => duePanelKeydown(e, row)}
-                      >Skip</button>
-                    </div>
-                  {/if}
-                </div>
+              {:else if dueConfirm && !$isMobile}
+                {@render dueBadge(rowIndex, row, isExpanded)}
               {/if}
             </td>
             {#each activeColumns as column, colIndex (column.key)}
@@ -2267,23 +2338,27 @@ function markRowsAsBaseline() {
                       medication={row.medication}
                       vials={vialOptions}
                       drugOptions={medicationOptions}
-                      forceOpen={editing && isVialSelected(rowIndex)}
-                      vialSelected={isVialSelected(rowIndex)}
-                      onActivate={() => setVialSelection(rowIndex, true)}
-                      onRequestClose={() => exitToVial(rowIndex)}
+                      forceOpen={!$isMobile && editing && isVialSelected(rowIndex)}
+                      vialSelected={!$isMobile && isVialSelected(rowIndex)}
+                      onActivate={$isMobile ? undefined : () => setVialSelection(rowIndex, true)}
+                      onRequestClose={$isMobile ? undefined : () => exitToVial(rowIndex)}
                       ariaLabel={isDraftRow(row) ? 'Vial or drug for new dose' : 'Vial or drug for this dose'}
                       onPickVial={(dbId, type) => pickVial(rowIndex, dbId, type)}
                       onPickDrug={(med) => pickDrug(rowIndex, med)}
                       onClear={() => clearVialOverride(rowIndex)}
                     />
                     {/if}
-                    {#if editingCell && !selVial}
+                    <!-- On mobile the dose editor must never be gated by `selVial`
+                         (a desktop grid concept) — clicking the vial chip there
+                         opens the picker without engaging the grid, so selVial
+                         stays put and the field would otherwise vanish. -->
+                    {#if editingCell && (!selVial || $isMobile)}
                       <input
                         class="cell-input dose-input"
                         type="text"
                         size="1"
                         value={row.dose}
-                        oninput={(event) => updateCell(rowIndex, 'dose', event.currentTarget.value)}
+                        oninput={(event) => onDoseInput(rowIndex, event.currentTarget.value)}
                         onblur={() => editorBlur(row)}
                         onkeydown={$isMobile ? undefined : editorKeydown}
                         placeholder={isDraftRow(row) ? 'New dose' : undefined}
@@ -2312,14 +2387,20 @@ function markRowsAsBaseline() {
                   {:else}
                     <span class="cell-static">{formatLocaleDate(row.date)}</span>
                   {/if}
+                  <!-- Mobile only: the due-confirm `!` sits inline, just to the
+                       right of the date and vertically centered with it. On
+                       desktop the same badge floats in the card gutter instead. -->
+                  {#if $isMobile && dueConfirm && !rowEditing}
+                    {@render dueBadge(rowIndex, row, isExpanded)}
+                  {/if}
                   <!-- Mobile-only per-card controls live in the card's header (date)
                        row: the pencil (read) ↔ Save/Cancel/Delete (edit). Hidden on
                        desktop via .card-header-actions{display:none}. -->
                   <span class="card-header-actions">
                     {#if isRowMobileEditing(row)}
                       <button type="button" class="card-action-btn card-save" aria-label="Save" title="Save" onclick={() => saveMobileEdit(row)}><SaveIcon size="1.1rem" /></button>
-                      <button type="button" class="card-action-btn card-cancel" onclick={() => cancelMobileEdit(row)}>Cancel</button>
                       <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => (rowDeleteRequest = row)}><TrashIcon size="1.15rem" /></button>
+                      <button type="button" class="card-action-btn card-cancel" aria-label="Cancel" title="Cancel" onclick={() => cancelMobileEdit(row)}><CloseIcon size="1.1rem" /></button>
                     {:else}
                       <EditPencil ariaLabel={`Edit entry for ${row.date}`} onclick={() => startMobileEdit(row)} />
                     {/if}
@@ -2329,7 +2410,7 @@ function markRowsAsBaseline() {
                     <input
                       class="cell-input"
                       type="text"
-                      value={weightDrafts.has(rowKey(row, rowIndex)) ? (weightDrafts.get(rowKey(row, rowIndex)) ?? '') : displayWeight(row.weight, $weightUnit)}
+                      value={weightDrafts.has(rowKey(row, rowIndex)) ? (weightDrafts.get(rowKey(row, rowIndex)) ?? '') : (row.weight ? fmtNum(lbsToDisplayNum(row.weight, $weightUnit), weightDecimals) : '')}
                       oninput={(event) => { weightDrafts.set(rowKey(row, rowIndex), event.currentTarget.value); }}
                       onblur={() => editorBlur(row)}
                       onkeydown={$isMobile ? undefined : editorKeydown}
@@ -2704,10 +2785,10 @@ function markRowsAsBaseline() {
     border: 1px solid var(--inputs-grid);
   }
 
-  .inputs-table th:not(.due-action-header),
+/*  .inputs-table th:not(.due-action-header),
   .inputs-table td:not(.due-action-cell) {
     border: 1px solid var(--inputs-grid);
-  }
+  }*/
 
   .inputs-table tr.virtual-spacer td {
     border: 0;
@@ -3251,11 +3332,10 @@ function markRowsAsBaseline() {
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 0.25rem 0.75rem;
       text-align: right;
       border: none;
       border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 22%, transparent);
-      padding: 0.34rem 0;
+      padding: 0.2rem 0.0rem;
       overflow: visible;
       white-space: normal;
     }
@@ -3283,12 +3363,15 @@ function markRowsAsBaseline() {
      * the top of the card. */
     .inputs-table td.date {
       order: -1;
-      justify-content: space-between;
+      /* date value + due `!` group on the left; the action cluster is pushed to
+         the far right via margin-left:auto below. */
+      justify-content: flex-start;
       align-items: center;
       flex-wrap: wrap;
       column-gap: 0.5rem;
       border-bottom: 1px solid color-mix(in oklab, var(--cardBorder) 32%, transparent);
-      padding-top: 0.1rem;
+      padding-right: 0.25rem;
+      padding-bottom: 0.6rem;
       margin-bottom: 0.15rem;
       font-weight: 700;
       font-size: 1.05rem;
@@ -3305,6 +3388,8 @@ function markRowsAsBaseline() {
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 0.4rem;
+      /* Hug the right edge so the due `!` can sit beside the date on the left. */
+      margin-left: auto;
     }
 
     /* In edit mode the date editor keeps a sensible width; the compact icon
@@ -3313,33 +3398,11 @@ function markRowsAsBaseline() {
       flex: 1 1 7rem;
     }
 
-    /* Due-confirm `!` sits just left of the pencil (a fixed 2rem button anchored
-     * to the card's top-right); absent ones vanish, and it hides while editing. */
+    /* The dedicated due-action gutter cell is unused on mobile — the `!` badge is
+       rendered inline in the date header instead (see the date cell). Collapse
+       the empty cell entirely. */
     .inputs-table td.due-action-cell {
-      position: absolute;
-      top: 0.5rem;
-      right: 3rem;
-      width: auto;
-      padding: 0;
-      border: none;
-    }
-
-    .inputs-table td.due-action-cell:not(:has(.due-action-wrap)) {
       display: none;
-    }
-
-    .inputs-table tr.mobile-card-editing td.due-action-cell {
-      display: none;
-    }
-
-    .inputs-table td.due-action-cell::before {
-      content: none;
-    }
-
-    /* Anchor the Taken/Skip popover to the card edge, not off-screen right. */
-    .inputs-table td.due-action-cell .due-action-panel {
-      left: auto;
-      right: 0;
     }
 
     /* The desktop overlay (position:absolute) doesn't apply to the card layout —
@@ -3357,11 +3420,30 @@ function markRowsAsBaseline() {
       max-width: 62%;
     }
 
-    /* Richer value blocks wrap to full width under their label. */
+    /* While a card is being edited, give every editable field a visible 1px
+       border so it's obvious which values can be changed (in display mode the
+       fields render as plain text). */
+    .inputs-table tr.mobile-card-editing td :global(input),
+    .inputs-table tr.mobile-card-editing td :global(select),
+    .inputs-table tr.mobile-card-editing td :global(textarea) {
+      border: 1px solid color-mix(in oklab, var(--cardBorder) 60%, transparent);
+      border-radius: 6px;
+      padding: 0.2rem 0.35rem;
+    }
+
+    /* Dose and mg-in-system sit beside their label on the same line (not on a
+       full-width line below it). They take the width the label leaves and
+       right-align their content, so when the value has to wrap — extra drug rows
+       in the stack, or a vial chip + number too wide to sit beside "Dose" — every
+       line keeps that same reduced width and stays right-aligned. */
     .inputs-table td .dose-entry,
     .inputs-table td .system-stack {
-      flex: 1 1 100%;
+      flex: 1 1 auto;
       min-width: 0;
+    }
+
+    .inputs-table td .dose-entry {
+      flex-wrap: wrap;
     }
 
     .inputs-table td .system-stack {
@@ -3369,16 +3451,17 @@ function markRowsAsBaseline() {
     }
 
     /* ── Per-card edit action buttons (shown in the header row when editing) ──
-       Icon buttons (Save/Delete) are compact squares; Cancel keeps its text. */
+       Save / Delete / Cancel are all uniform icon squares with radiused corners,
+       matching the Edit pencil. */
     .card-action-btn {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
       border-radius: 8px;
-      padding: 0.35rem 0.55rem;
-      font-weight: 700;
-      font-size: 0.9rem;
       line-height: 0;
       cursor: pointer;
       border: 1.5px solid color-mix(in oklab, var(--cardBorder) 35%, #d4d4d4 65%);
@@ -3386,15 +3469,18 @@ function markRowsAsBaseline() {
       color: var(--text);
     }
 
+    /* Muted fills: the green save used the vivid --accent; --success is the
+       theme's softer green. Delete's red is toned down toward the surface so it
+       reads less alarming. */
     .card-action-btn.card-save {
       border-color: transparent;
-      background: var(--accent, var(--text));
-      color: var(--surface);
+      background: color-mix(in oklab, var(--success) 88%, var(--surface) 12%);
+      color: white;
     }
 
     .card-action-btn.card-delete {
       border-color: transparent;
-      background: var(--danger);
+      background: color-mix(in oklab, var(--danger) 78%, var(--surface) 22%);
       color: white;
     }
 

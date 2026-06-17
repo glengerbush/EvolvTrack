@@ -44,13 +44,13 @@ describe('cryptoWorker.call', () => {
   it('constructs a single Worker lazily on the first call and reuses it', async () => {
     const { cryptoWorker } = await import('./worker-client');
 
-    const p1 = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT' });
+    const p1 = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 });
     expect(FakeWorker.instances).toHaveLength(1);
 
     const worker = FakeWorker.instances[0];
     expect(worker.posted).toHaveLength(1);
     expect(worker.posted[0].type).toBe('derive-key');
-    expect(worker.posted[0].payload).toEqual({ passphrase: 'pw', saltB64: 'SALT' });
+    expect(worker.posted[0].payload).toEqual({ passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 });
 
     // Resolve the first call so it doesn't dangle.
     worker.respond({ id: worker.posted[0].id, ok: true, data: { keyB64: 'S' } });
@@ -66,14 +66,14 @@ describe('cryptoWorker.call', () => {
 
   it('configures the worker as a module', async () => {
     const { cryptoWorker } = await import('./worker-client');
-    void cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT' });
+    void cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 });
     expect(FakeWorker.instances[0].options).toEqual({ type: 'module' });
   });
 
   it('routes a successful response back to the matching call', async () => {
     const { cryptoWorker } = await import('./worker-client');
 
-    const promise = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT' });
+    const promise = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 });
     const worker = FakeWorker.instances[0];
     const { id } = worker.posted[0];
     worker.respond({ id, ok: true, data: { keyB64: 'OK' } });
@@ -99,7 +99,7 @@ describe('cryptoWorker.call', () => {
   it('ignores responses with unknown ids (does not throw)', async () => {
     const { cryptoWorker } = await import('./worker-client');
 
-    const promise = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT' });
+    const promise = cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 });
     const worker = FakeWorker.instances[0];
     worker.respond({ id: 'not-a-real-id', ok: true, data: { keyB64: 'X' } });
 
@@ -111,8 +111,8 @@ describe('cryptoWorker.call', () => {
   it('routes concurrent calls to their own promises (no cross-talk)', async () => {
     const { cryptoWorker } = await import('./worker-client');
 
-    const p1 = cryptoWorker.call('derive-key', { passphrase: 'a', saltB64: 'SALT' });
-    const p2 = cryptoWorker.call('derive-key', { passphrase: 'b', saltB64: 'SALT' });
+    const p1 = cryptoWorker.call('derive-key', { passphrase: 'a', saltB64: 'SALT', iterations: 600_000 });
+    const p2 = cryptoWorker.call('derive-key', { passphrase: 'b', saltB64: 'SALT', iterations: 600_000 });
 
     const worker = FakeWorker.instances[0];
     expect(worker.posted).toHaveLength(2);
@@ -130,7 +130,7 @@ describe('cryptoWorker.call (non-browser)', () => {
     vi.resetModules();
     vi.doMock('$app/environment', () => ({ browser: false }));
     const { cryptoWorker } = await import('./worker-client');
-    expect(() => cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT' })).toThrow(/only available in the browser/i);
+    expect(() => cryptoWorker.call('derive-key', { passphrase: 'pw', saltB64: 'SALT', iterations: 600_000 })).toThrow(/only available in the browser/i);
     vi.doUnmock('$app/environment');
   });
 });

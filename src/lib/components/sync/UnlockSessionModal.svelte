@@ -96,7 +96,7 @@
         busy = false;
         return;
       }
-      const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64);
+      const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64, bundle.passphraseIterations);
       let dek: string;
       try {
         dek = await unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);

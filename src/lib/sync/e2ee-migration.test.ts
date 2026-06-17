@@ -59,6 +59,8 @@ vi.mock('$lib/domain/repo', () => ({
 
 vi.mock('$lib/crypto/e2ee', () => ({
   ENCRYPTION_FORMAT_VERSION: 1,
+  PBKDF2_ITERATIONS: 600000,
+  LEGACY_PBKDF2_ITERATIONS: 210000,
   generateDek: vi.fn(async () => 'DEK_BYTES'),
   generateRecoveryCode: vi.fn(() => 'TEST-RECO-CODE-2026'),
   generateSaltB64: vi.fn(() => 'SALT'),
@@ -236,8 +238,10 @@ function bundleFor(passphrase: string): WrappedKeyBundle {
       ciphertext: `wrap(KEK(${passphrase}),DEK_BYTES)`,
       iv: 'wiv',
     },
+    passphraseIterations: 600_000,
     recoverySaltB64: 'SALT',
     recoveryWrapped: { ciphertext: 'wrap(RKEK,DEK_BYTES)', iv: 'wiv' },
+    recoveryIterations: 600_000,
     updatedAt: '2026-05-01T00:00:00.000Z',
   };
 }
@@ -314,8 +318,8 @@ describe('startE2EEMigration — happy path from plain', () => {
 
     expect(generateDek).toHaveBeenCalledTimes(1);
     expect(generateRecoveryCode).toHaveBeenCalledTimes(1);
-    expect(derivePassphraseKek).toHaveBeenCalledWith('hunter2', expect.any(String));
-    expect(deriveRecoveryKek).toHaveBeenCalledWith('TEST-RECO-CODE-2026', expect.any(String));
+    expect(derivePassphraseKek).toHaveBeenCalledWith('hunter2', expect.any(String), 600000);
+    expect(deriveRecoveryKek).toHaveBeenCalledWith('TEST-RECO-CODE-2026', expect.any(String), 600000);
     // DEK wrapped under both KEKs.
     expect(wrapDek).toHaveBeenCalledTimes(2);
     expect(saveLocalWrappedKeys).toHaveBeenCalledTimes(1);
