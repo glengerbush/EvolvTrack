@@ -2803,10 +2803,14 @@ function markRowsAsBaseline() {
     border: 1px solid var(--inputs-grid);
   }
 
-/*  .inputs-table th:not(.due-action-header),
-  .inputs-table td:not(.due-action-cell) {
+  /* Full gridlines: every header/cell divider. Kept at low specificity so the
+     special cases below (0-width due-action gutter, the merged week rail, and
+     the virtualization spacers) override it without fighting !important. The
+     ≤640px card layout resets these to 0 (cards have their own borders). */
+  .inputs-table th,
+  .inputs-table td {
     border: 1px solid var(--inputs-grid);
-  }*/
+  }
 
   .inputs-table tr.virtual-spacer td {
     border: 0;
@@ -2840,6 +2844,9 @@ function markRowsAsBaseline() {
       text-align: center;
       color: color-mix(in oklab, var(--headerText) 78%, var(--text) 22%);
       background: color-mix(in oklab, var(--headerBg) 14%, transparent);
+      /* Drop the generic cell gridlines so same-week rows still merge; keep only
+         the divider to the next column (.week-top re-adds block separators). */
+      border: 0;
       border-right: 1px solid var(--inputs-grid);
     }
 
@@ -2867,6 +2874,12 @@ function markRowsAsBaseline() {
     background: color-mix(in oklab, var(--headerBg) 60%, white 40%);
     color: var(--headerText);
     text-align: center;
+    /* The default --inputs-grid line is the same colour as this header fill, so
+       it vanishes here. Tint the header dividers toward the header text instead,
+       which contrasts the fill in any theme. */
+    border-color: var(--headerText);
+    padding-left: 5px;
+    padding-right: 5px;
   }
 
   .inputs-table td {
@@ -2898,8 +2911,8 @@ function markRowsAsBaseline() {
      which is the flat accent ring above). */
   .inputs-table td.cell-editing:not(.symptoms):not(.shotLocation) {
     box-shadow:
-      inset 0 0 0 2.5px color-mix(in oklab, var(--accent) 30%, var(--text) 70%),
-      inset 0 0 18px 4px color-mix(in oklab, var(--accent) 60%, transparent);
+      inset 0 0 0 2.5px color-mix(in oklab, var(--accent) 80%, var(--text) 20%),
+      inset 0 0 16px 3px color-mix(in oklab, var(--accent) 42%, transparent);
     border-radius: 4px;
   }
 
@@ -3128,6 +3141,7 @@ function markRowsAsBaseline() {
     vertical-align: middle;
     overflow: visible;
     position: relative;
+    border: 0;
   }
 
   .due-action-wrap {
