@@ -24,6 +24,7 @@
     type GraphSeriesKey,
   } from '$lib/utils/chartModel';
   import { localDateKey } from '$lib/utils/dateKeys';
+  import { buildEfficacyRows } from '$lib/utils/efficacy';
   import { lbsToDisplayNum } from '$lib/utils/format';
   import type { DrugShape } from '$lib/utils/pharmacokinetics';
 
@@ -496,53 +497,10 @@
   });
   const hasUnsavedChanges = $derived(hasUnsavedProgress);
 
-  type EfficacyRow = {
-    week: number;
-    doseDisplay: string;
-    lossLbs: number | null;
-  };
-
-  function isoAddDays(iso: string, n: number): string {
-    const [y, m, d] = iso.split('-').map(Number);
-    const date = new Date(y, m - 1, d + n);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  }
-
-  const efficacyRows = $derived.by((): EfficacyRow[] => {
-    const weightRows = sortedHealthRows.filter(
-      (r) => r.weight !== '' && Number.isFinite(parseFloat(r.weight)),
-    );
-    if (weightRows.length < 2) return [];
-
-    const anchor = weightRows[0].date;
-    const rows: EfficacyRow[] = [];
-    let prevWeightLbs: number = parseFloat(weightRows[0].weight);
-
-    for (let week = 1; week <= 52; week++) {
-      const windowStart = isoAddDays(anchor, (week - 1) * 7);
-      const windowEnd = isoAddDays(anchor, week * 7);
-
-      const weekWeightRows = weightRows.filter((r) => r.date > windowStart && r.date <= windowEnd);
-      const weekDoseRows = sortedHealthRows.filter(
-        (r) => r.dose !== '' && !r.doseSkipped && r.date > windowStart && r.date <= windowEnd,
-      );
-
-      if (weekWeightRows.length === 0 && weekDoseRows.length === 0) break;
-
-      const lastWeightRow = weekWeightRows[weekWeightRows.length - 1];
-      const lastWeightLbs = lastWeightRow ? parseFloat(lastWeightRow.weight) : null;
-
-      const lastDoseRow = weekDoseRows[weekDoseRows.length - 1];
-      const doseDisplay = lastDoseRow?.dose ? `${parseFloat(lastDoseRow.dose)} mg` : '';
-
-      const lossLbs = lastWeightLbs !== null ? prevWeightLbs - lastWeightLbs : null;
-      if (lastWeightLbs !== null) prevWeightLbs = lastWeightLbs;
-
-      rows.push({ week, doseDisplay, lossLbs });
-    }
-
-    return rows.reverse();
-  });
+  // Week numbering is anchored on the earliest logged day (shared with the
+  // inputs-table rail), gap weeks render with dashes instead of truncating the
+  // table — see buildEfficacyRows.
+  const efficacyRows = $derived(buildEfficacyRows(sortedHealthRows));
 
   function toggleGraphSeries(key: GraphSeriesKey) {
     if (hiddenGraphSeries.has(key)) {
@@ -1211,7 +1169,7 @@
               {#each efficacyRows as row (row.week)}
                 <tr>
                   <td>W{row.week}</td>
-                  <td>{row.doseDisplay}</td>
+                  <td>{row.doseDisplay || '—'}</td>
                   <td>
                     {#if row.lossLbs !== null}
                       {lbsToDisplayNum(String(row.lossLbs), $weightUnit).toFixed(1)}
