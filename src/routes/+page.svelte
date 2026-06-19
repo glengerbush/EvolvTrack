@@ -18,30 +18,17 @@
 <div class="page">
   <div class="container">
     <header class="topbar">
-      <a href="/" class="brand">✽ EVOLVETRACK</a>
+      <a href="/" class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        EvolvTrack
+      </a>
       <nav class="top-actions">
-        <button type="button" class="btn btn-ghost" onclick={continueOffline}>
-          Continue offline
-        </button>
         <a class="btn btn-primary" href="/auth">Log In / Sign Up</a>
       </nav>
     </header>
 
     <section class="hero">
       <div class="chart-frame card">
-        <svg viewBox="0 0 500 260" aria-label="weight trend chart" role="img">
-          <g class="grid">
-            <path d="M30 20v220M70 20v220M110 20v220M150 20v220M190 20v220M230 20v220M270 20v220M310 20v220M350 20v220M390 20v220M430 20v220M470 20v220"/>
-            <path d="M20 40h460M20 80h460M20 120h460M20 160h460M20 200h460"/>
-          </g>
-          <path
-            class="trend"
-            d="M30 35 L65 45 L80 60 L110 70 L130 95 L170 110 L210 145 L230 135 L260 148 L295 165 L305 190 L340 190 L365 204 L400 218 L430 230 L445 256 L475 260"
-            fill="none"
-            stroke-width="4"
-          />
-        </svg>
-
         <div class="chart-overlay">
           <h1>Your progress should belong to you.</h1>
           <p class="lede">Track dose, shot location, medication levels, and weight trends — offline first, end-to-end encrypted when you sync.</p>
@@ -186,9 +173,32 @@
     flex-wrap: wrap;
   }
   .brand {
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
     font-size: 1.1rem;
+    color: var(--text);
+    text-decoration: none;
+  }
+  /* Real app mark (masked /logo.svg), matching the in-app header lockup. */
+  .brand-mark {
+    width: 1.7rem;
+    height: 1.7rem;
+    flex: 0 0 auto;
+    position: relative;
+    border-radius: 7px;
+    border: 1px solid var(--brand);
+    background-color: var(--brand);
+  }
+  .brand-mark::before {
+    content: '';
+    position: absolute;
+    inset: 5% 5% 0 0;
+    background-color: #ffffff;
+    -webkit-mask: url('/logo.svg') no-repeat center / 120% 120%;
+    mask: url('/logo.svg') no-repeat center / 120% 120%;
   }
   .top-actions {
     display: flex;
@@ -203,19 +213,9 @@
   .chart-frame {
     position: relative;
     overflow: hidden;
+    background: transparent !important;
   }
-  /* The chart is a faded backdrop: absolutely positioned so it fills whatever
-   * height the overlay content needs. The overlay (below) is in normal flow and
-   * therefore sizes the frame, so the headline + button never get clipped — at
-   * any width. preserveAspectRatio on the SVG keeps it undistorted as it scales. */
-  .chart-frame svg {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
-    opacity: 0.55;
-  }
+
   .chart-frame .grid {
     stroke: var(--surface-grid);
   }
@@ -233,7 +233,7 @@
     min-height: 16rem;
     background: linear-gradient(
       to bottom,
-      color-mix(in oklab, var(--surface) 70%, transparent) 0%,
+      color-mix(in oklab, var(--surface) 5%, transparent) 0%,
       color-mix(in oklab, var(--surface) 85%, transparent) 100%
     );
   }

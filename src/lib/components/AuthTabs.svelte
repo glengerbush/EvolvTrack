@@ -150,7 +150,10 @@
 </script>
 
 <div class="auth-shell container">
-  <a class="brand" href={resolve('/')}>✽ EVOLVETRACK</a>
+  <a class="brand" href={resolve('/')}>
+    <span class="brand-mark" aria-hidden="true"></span>
+    EvolvTrack
+  </a>
 
   <section class="auth-card" aria-labelledby="auth-heading">
     <header class="intro">
@@ -294,6 +297,10 @@
     <div class="divider"><span>or</span></div>
 
     <a class="btn btn-ghost offline-cta" href={resolve('/app')}>Continue without an account</a>
+    <p class="offline-note">
+      Every browser handles data persistence differently,
+      <a href={`${resolve('/app')}#faq-offline`}>checkout our FAQ to learn more</a>.
+    </p>
   </section>
 </div>
 
@@ -309,9 +316,32 @@
   }
   .brand {
     align-self: flex-start;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
     font-size: 1.1rem;
+    color: var(--text);
+    text-decoration: none;
+  }
+  /* Real app mark (masked /logo.svg), matching the in-app header lockup. */
+  .brand-mark {
+    width: 1.7rem;
+    height: 1.7rem;
+    flex: 0 0 auto;
+    position: relative;
+    border-radius: 7px;
+    border: 1px solid var(--brand);
+    background-color: var(--brand);
+  }
+  .brand-mark::before {
+    content: '';
+    position: absolute;
+    inset: 5% 5% 0 0;
+    background-color: #ffffff;
+    -webkit-mask: url('/logo.svg') no-repeat center / 120% 120%;
+    mask: url('/logo.svg') no-repeat center / 120% 120%;
   }
 
   .auth-card {
@@ -473,5 +503,18 @@
     width: 100%;
     text-align: center;
     text-decoration: none;
+  }
+
+  .offline-note {
+    margin: 0 0 0;
+    text-align: center;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    color: var(--muted);
+  }
+
+  .offline-note a {
+    color: var(--brand);
+    text-decoration: underline;
   }
 </style>

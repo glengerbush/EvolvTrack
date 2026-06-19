@@ -48,6 +48,7 @@
   } from '$lib/domain/wellness';
   import { DRUG_PK, formatSystemMg } from '$lib/utils/pharmacokinetics';
   import { addDays, formatLocaleDate, localDateKey, maxDateKey } from '$lib/utils/dateKeys';
+  import { computeWeekCells } from '$lib/utils/weekNumber';
   import {
     calculateDay,
     cloneRow,
@@ -287,6 +288,9 @@
   // Incoming store updates are reconciled into it via syncRowsFromLiveQuery
   // (skipped while the user has uncommitted local edits).
   const displayedRows = $derived(tableRows);
+  // Left-most "week" rail: one entry per displayed row, with same-week rows
+  // grouped into a visually-merged block (see computeWeekCells / the .week CSS).
+  const weekCells = $derived(computeWeekCells(displayedRows.map((r) => r.date)));
   // Indices (into displayedRows) of rows that currently show a due-action badge.
   // Used to step the selector up/down between badges, skipping rows without one.
   const dueRowIndices = $derived(
@@ -2136,6 +2140,7 @@ function markRowsAsBaseline() {
     <table bind:this={tableEl} class="inputs-table inputs-table--editing">
       <colgroup>
         <col class="col-due-action" />
+        <col class="col-week" />
         {#each activeColumns as column (column.key)}
           <col class={`col-${column.key}`} class:stretch-column={column.key === stretchColumnKey} />
         {/each}
@@ -2143,6 +2148,7 @@ function markRowsAsBaseline() {
       <thead>
         <tr>
           <th class="due-action-header" aria-hidden="true"></th>
+          <th class="week-num-header" title="Week number" aria-label="Week number">W#</th>
           {#each activeColumns as column, colIndex (column.key)}
             <th
               class={column.key}
@@ -2224,11 +2230,12 @@ function markRowsAsBaseline() {
         {/snippet}
         {#if topSpacerHeight > 0}
           <tr aria-hidden="true" class="virtual-spacer">
-            <td colspan={activeColumns.length + 1} style={`height:${topSpacerHeight}px`}></td>
+            <td colspan={activeColumns.length + 2} style={`height:${topSpacerHeight}px`}></td>
           </tr>
         {/if}
         {#each visibleRows as row, sliceIndex (rowKey(row, firstVisibleIndex + sliceIndex))}
           {@const rowIndex = firstVisibleIndex + sliceIndex}
+          {@const weekCell = weekCells[rowIndex]}
           {@const dueConfirm = isDueConfirmation(row)}
           {@const isExpanded = !!row.entryId && expandedDueId === row.entryId}
           <tr
@@ -2260,6 +2267,17 @@ function markRowsAsBaseline() {
                 </button>
               {:else if dueConfirm && !$isMobile}
                 {@render dueBadge(rowIndex, row, isExpanded)}
+              {/if}
+            </td>
+            <td
+              class="week"
+              class:week-label={weekCell?.isLabelRow}
+              class:week-top={weekCell?.isFirstOfWeek}
+              class:week-bottom={weekCell?.isLastOfWeek}
+              data-label="Week"
+            >
+              {#if weekCell?.week !== null && weekCell?.week !== undefined}
+                <span class="week-rail-label">W{weekCell.week}</span>
               {/if}
             </td>
             {#each activeColumns as column, colIndex (column.key)}
@@ -2471,7 +2489,7 @@ function markRowsAsBaseline() {
         {/each}
         {#if bottomSpacerHeight > 0}
           <tr aria-hidden="true" class="virtual-spacer">
-            <td colspan={activeColumns.length + 1} style={`height:${bottomSpacerHeight}px`}></td>
+            <td colspan={activeColumns.length + 2} style={`height:${bottomSpacerHeight}px`}></td>
           </tr>
         {/if}
       </tbody>
@@ -2800,6 +2818,48 @@ function markRowsAsBaseline() {
 
   .inputs-table col.stretch-column {
     width: 100%;
+  }
+
+  /* ── Week rail (fixed left-most gutter column) ──────────────────────────
+   * A read-only "W#" column the user can't reorder or hide. Same-week rows are
+   * visually merged: only the block's centred row paints its number (desktop),
+   * and the dividing borders between same-week rows are suppressed so the block
+   * reads as one tall cell. Per-row cells (not an HTML rowspan) because the grid
+   * is virtualized — a spanning cell would vanish when its top row scrolls out
+   * of the render window. On mobile each card shows its own week (see ≤640px). */
+  .week-rail-label {
+    font-weight: 700;
+    font-variant: small-caps;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  @media (min-width: 641px) {
+    .inputs-table td.week {
+      vertical-align: middle;
+      text-align: center;
+      color: color-mix(in oklab, var(--headerText) 78%, var(--text) 22%);
+      background: color-mix(in oklab, var(--headerBg) 14%, transparent);
+      border-right: 1px solid var(--inputs-grid);
+    }
+
+    /* Only the block's centred row shows the number; the rest stay blank so the
+       same-week rows merge into one cell. */
+    .inputs-table td.week .week-rail-label {
+      display: none;
+    }
+    .inputs-table td.week.week-label .week-rail-label {
+      display: inline;
+    }
+
+    /* Divider between week blocks; interior (same-week) rows get none. */
+    .inputs-table td.week.week-top {
+      border-top: 1px solid var(--inputs-grid);
+    }
+  }
+
+  .inputs-table th.week-num-header {
+    padding-inline: 0.4rem;
   }
 
   .inputs-table th {
@@ -3192,7 +3252,7 @@ function markRowsAsBaseline() {
     }
   }
 
-  tbody tr.row-skipped td:not(.due-action-cell) {
+  tbody tr.row-skipped td:not(.due-action-cell):not(.week) {
     color: var(--danger);
     text-decoration: line-through;
     text-decoration-color: var(--danger);

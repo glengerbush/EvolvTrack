@@ -31,8 +31,12 @@
 
   function tabFromHash(): ActiveTab {
     if (typeof window === "undefined") return "health";
-    const hash = window.location.hash.slice(1) as ActiveTab;
-    return validTabs.has(hash) ? hash : "health";
+    const hash = window.location.hash.slice(1);
+    if (validTabs.has(hash as ActiveTab)) return hash as ActiveTab;
+    // An in-page FAQ anchor (e.g. #faq-offline) is a deep link into the Info
+    // tab's FAQ; open that tab so the Info tab can scroll to the question.
+    if (hash.startsWith("faq-")) return "info";
+    return "health";
   }
 
   let activeTab = $state<ActiveTab>(tabFromHash());
@@ -55,6 +59,9 @@
   $effect(() => {
     const nextHash = `#${activeTab}`;
     if (window.location.hash === nextHash) return;
+    // Preserve an in-page FAQ deep-link fragment (#faq-…) on the Info tab so it
+    // isn't clobbered before the Info tab scrolls to the question on load.
+    if (activeTab === "info" && window.location.hash.slice(1).startsWith("faq-")) return;
     suppressNextHashChange = true;
     window.location.hash = activeTab;
   });

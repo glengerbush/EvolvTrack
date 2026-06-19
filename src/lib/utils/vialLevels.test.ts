@@ -189,6 +189,21 @@ describe('attributeVials — auto-pick (which vial a dose draws from)', () => {
     expect(attr.get('d1')).toEqual({ vialId: 'next', auto: false });
   });
 
+  it('keeps a stored attribution non-auto even when its vial is absent (not yet synced)', () => {
+    // The vial picked on another device ('ghost') hasn't reached this one yet.
+    // The attribution must stay non-auto — otherwise it lands in the freeze
+    // candidates and the inputs table overwrites the user's pick with a local
+    // FIFO choice (the cross-device "vial reverts to the old one" bug).
+    const attr = attributeVials(
+      [top(), next()],
+      [dose({ id: 'd1', date: '2026-05-01', amountMg: 4, prescriptionId: 'ghost' })],
+    );
+    expect(attr.get('d1')).toEqual({ vialId: 'ghost', auto: false });
+    // And it is NOT re-attributed to a present vial.
+    expect(attr.get('d1')!.vialId).not.toBe('top');
+    expect(attr.get('d1')!.vialId).not.toBe('next');
+  });
+
   it('fills by table order, one vial at a time, then moves down when full', () => {
     const attr = attributeVials(
       [top(), next()],

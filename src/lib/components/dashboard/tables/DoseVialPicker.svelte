@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { drugDisplayColor, drugInitial } from '$lib/utils/pharmacokinetics';
+  import { floatingMenu } from '$lib/grid/floatingMenu';
 
   type Vial = { id: number; dbId: string; type: string };
 
@@ -41,6 +42,7 @@
 
   let isOpen = $state(false);
   let containerEl: HTMLDivElement | undefined = $state();
+  let triggerEl: HTMLButtonElement | undefined = $state();
   let focusedIndex = $state(0);
 
   const hasVials = $derived(vials.length > 0);
@@ -190,6 +192,7 @@
     aria-haspopup="listbox"
     aria-expanded={isOpen}
     aria-label={ariaLabel}
+    bind:this={triggerEl}
     title={chipVial ? `Vial #${chipVial.id} — click to change` : chipMedication || 'Pick vial / drug'}
     onclick={(e) => { e.stopPropagation(); if (isOpen) requestClose(); else if (onActivate) onActivate(); else void open(); }}
     onkeydown={handleChipKeydown}
@@ -210,7 +213,12 @@
   </button>
 
   {#if isOpen}
-    <div class="vial-menu" role="listbox" aria-label={ariaLabel}>
+    <div
+      class="vial-menu"
+      role="listbox"
+      aria-label={ariaLabel}
+      use:floatingMenu={{ anchor: triggerEl, matchAnchorWidth: false }}
+    >
       {#if hasVials}
         <button
           type="button"
@@ -296,11 +304,10 @@
     height: 0.85rem;
   }
 
+  /* Positioned (fixed, anchored to the chip) by the floatingMenu action so it
+     escapes `.table-scroll`'s overflow clip; left/top are set inline. */
   .vial-menu {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 0.22rem);
-    z-index: 12;
+    z-index: 50;
     min-width: max-content;
     max-width: min(18rem, 80vw);
     max-height: 12rem;

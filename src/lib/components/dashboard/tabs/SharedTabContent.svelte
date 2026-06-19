@@ -3,8 +3,6 @@
   import { SvelteSet } from 'svelte/reactivity';
   import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
-  import WarnBadge from '$lib/components/icons/WarnBadge.svelte';
-  import HelpBadge from '$lib/components/icons/HelpBadge.svelte';
   import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
   import { GridSelection } from '$lib/grid/gridSelection.svelte';
   import {
@@ -273,23 +271,28 @@
   // nearest day column under the cursor.
   let hoverY = $state<number | null>(null);
   let hoverDate = $state<import('$lib/domain/types').IsoDate | null>(null);
+  // Anchored at the hovered marker; `entries` is every dose marker overlapping
+  // that point (different drugs dosed the same day land on top of each other),
+  // so the tooltip can stack one row per drug.
   let hoverDose = $state<{
-    label: string;
-    color: string;
     x: number;
     y: number;
+    entries: { label: string; color: string }[];
   } | null>(null);
 
   const crosshairActive = $derived(hoverY !== null && hoverDate !== null);
-  // Format crosshair values for the axis chips. Left axis is weight (1 decimal
-  // looks right for both lb and kg); right axis is mg in system or wellness,
-  // both of which are best read as integers.
-  const hoverValueLeft = $derived(
-    hoverY != null && showLeftAxis ? chartModel.valueLeftForY(hoverY) : null,
+  // The crosshair arms snap to the hovered day's actual data instead of floating
+  // at the cursor's y: the left arm to that day's weight, the right arm to its
+  // total mg-in-system (or wellness). The cursor only chooses the day (nearest
+  // column) and gates whether we're over the plot. Each side is null when its
+  // series/axis is hidden or the day has no value there, so an arm simply
+  // disappears rather than dangling at the cursor.
+  const crosshairData = $derived(
+    crosshairActive && hoverDate ? chartModel.crosshairSnap(hoverDate) : null,
   );
-  const hoverValueRight = $derived(
-    hoverY != null && showRightAxis ? chartModel.valueRightForY(hoverY) : null,
-  );
+  const snapLeft = $derived(showLeftAxis ? crosshairData?.left ?? null : null);
+  // One arm per visible drug (or wellness) on the right axis.
+  const snapRightArms = $derived(showRightAxis ? crosshairData?.right ?? [] : []);
   const showMedicationInTooltip = $derived(chartModel.systemSeries.length > 1);
 
   function setCrosshairFromClient(clientX: number, clientY: number) {
@@ -336,10 +339,20 @@
     hoverDose = null; // tapping the plot background dismisses a dot tooltip
     setCrosshairFromClient(event.clientX, event.clientY);
   }
-  function showDoseTooltipOnTouch(event: PointerEvent, marker: { label: string; color: string; x: number; y: number }) {
+  function showDoseTooltipOnTouch(event: PointerEvent, x: number, y: number) {
     if (event.pointerType === 'mouse') return; // mouse uses hover (enter/leave)
     event.stopPropagation(); // don't let the plot's tap handler clear it
-    hoverDose = marker;
+    setHoverDoseCluster(x, y);
+  }
+
+  // Markers within this many px of each other count as overlapping — hovering any
+  // one shows the whole stack.
+  const DOSE_OVERLAP_PX = 9;
+  function setHoverDoseCluster(x: number, y: number) {
+    const entries = doseMarkers
+      .filter((m) => Math.hypot(m.x - x, m.y - y) <= DOSE_OVERLAP_PX)
+      .map((m) => ({ label: m.label, color: m.color }));
+    hoverDose = entries.length ? { x, y, entries } : null;
   }
 
   // Dismiss a touch-opened crosshair / dose tooltip when tapping outside the plot.
@@ -365,28 +378,39 @@
       : v.toFixed(1);
   }
 
-  const leftChipLabel = $derived(hoverValueLeft != null ? formatHoverWeight(hoverValueLeft) : '');
-  const rightChipLabel = $derived(hoverValueRight != null ? formatHoverRight(hoverValueRight) : '');
+  const leftChipLabel = $derived(snapLeft ? formatHoverWeight(snapLeft.value) : '');
 
   // Hug the chip background to the rendered label. getComputedTextLength returns
   // SVG user units, which equal CSS px at the axis SVG's 1:1 viewBox scale, so it
   // drops straight into the rect width. We re-measure whenever the label changes;
   // before the first measurement (or a char-width fallback) keeps it close.
   const CHIP_PAD_X = 5;
+  const CHIP_H = 18;
   let leftChipTextEl = $state<SVGTextElement | null>(null);
-  let rightChipTextEl = $state<SVGTextElement | null>(null);
   let leftChipTextW = $state(0);
-  let rightChipTextW = $state(0);
   $effect(() => {
     leftChipLabel;
     leftChipTextW = leftChipTextEl ? leftChipTextEl.getComputedTextLength() : 0;
   });
-  $effect(() => {
-    rightChipLabel;
-    rightChipTextW = rightChipTextEl ? rightChipTextEl.getComputedTextLength() : 0;
-  });
   const leftChipW = $derived((leftChipTextW || leftChipLabel.length * 6.6) + CHIP_PAD_X * 2);
-  const rightChipW = $derived((rightChipTextW || rightChipLabel.length * 6.6) + CHIP_PAD_X * 2);
+
+  // Right-axis chips: one per drug, de-overlapped vertically. Each arm/dot stays
+  // on its true data `y`; only the chip is nudged down when two would collide, so
+  // near-equal drug amounts stay readable. (Width is the char-count estimate —
+  // good enough for short "12.3 mg" labels without measuring N elements.)
+  const rightChips = $derived.by(() => {
+    const arms = [...snapRightArms].sort((a, b) => a.y - b.y);
+    const out: { value: number; y: number; chipY: number; color: string; key: string; label: string; w: number }[] = [];
+    let prevChipY = -Infinity;
+    for (const arm of arms) {
+      const label = formatHoverRight(arm.value);
+      const w = label.length * 6.6 + CHIP_PAD_X * 2;
+      const chipY = arm.y - prevChipY < CHIP_H ? prevChipY + CHIP_H : arm.y;
+      out.push({ ...arm, label, w, chipY });
+      prevChipY = chipY;
+    }
+    return out;
+  });
 
   function doseTooltipText(marker: { amountMg: number; medication: string }): string {
     const mg = `${marker.amountMg} mg`;
@@ -394,6 +418,22 @@
       ? `${mg} · ${marker.medication}`
       : mg;
   }
+
+  // Every visible dose marker (taken + planned, across all drug series) flattened
+  // with its label + colour, for overlap detection on hover (see setHoverDoseCluster).
+  const doseMarkers = $derived.by(() => {
+    const out: { x: number; y: number; label: string; color: string }[] = [];
+    for (const series of chartModel.systemSeries) {
+      if (hiddenGraphSeries.has(series.key)) continue;
+      for (const dot of series.dosePoints) {
+        out.push({ x: dot.x, y: dot.y, label: doseTooltipText(dot), color: series.color });
+      }
+      for (const dot of series.plannedDosePoints) {
+        out.push({ x: dot.x, y: dot.y, label: `${doseTooltipText(dot)} (planned)`, color: series.color });
+      }
+    }
+    return out;
+  });
   const currentWeightDisplay = $derived(
     $currentWeight != null ? lbsToDisplayNum(String($currentWeight), $weightUnit) : null,
   );
@@ -460,25 +500,7 @@
     week: number;
     doseDisplay: string;
     lossLbs: number | null;
-    status: 'good' | 'warn' | 'no-data';
   };
-
-  const efficacyMinLoss = $derived(lbsToDisplayNum('0.5', $weightUnit).toFixed(1));
-  const efficacyMaxLoss = $derived(lbsToDisplayNum('1.5', $weightUnit).toFixed(1));
-
-  const efficacyWarnTooltip = $derived(
-    `Weekly loss is outside the healthy range of ${efficacyMinLoss}–${efficacyMaxLoss} ${$weightUnit}/week.`,
-  );
-
-  const efficacyHelpTooltip = $derived(
-    [
-      "Weekly loss = previous week's last weight − this week's last weight.",
-      '',
-      `✓  On track (${efficacyMinLoss}–${efficacyMaxLoss} ${$weightUnit}/week)`,
-      `⚠  Outside healthy range`,
-      '—  No weight data for this week',
-    ].join('\n'),
-  );
 
   function isoAddDays(iso: string, n: number): string {
     const [y, m, d] = iso.split('-').map(Number);
@@ -516,10 +538,7 @@
       const lossLbs = lastWeightLbs !== null ? prevWeightLbs - lastWeightLbs : null;
       if (lastWeightLbs !== null) prevWeightLbs = lastWeightLbs;
 
-      const status: EfficacyRow['status'] =
-        lossLbs === null ? 'no-data' : lossLbs >= 0.5 && lossLbs <= 1.5 ? 'good' : 'warn';
-
-      rows.push({ week, doseDisplay, lossLbs, status });
+      rows.push({ week, doseDisplay, lossLbs });
     }
 
     return rows.reverse();
@@ -620,6 +639,11 @@
   function toggleInputSettings() {
     inputSettingsOpen = !inputSettingsOpen;
   }
+
+  // The title chip can only dismiss the settings panel, never open it.
+  function closeInputSettings() {
+    inputSettingsOpen = false;
+  }
 </script>
 
 <svelte:document onkeydown={handleProgressCommitKeydown} />
@@ -706,18 +730,18 @@
             </text>
           </g>
 
-          {#if crosshairActive && hoverY !== null && hoverValueLeft !== null}
+          {#if crosshairActive && snapLeft}
             <line
               class="crosshair horizontal"
               x1={0}
               x2={CHART.margin.left}
-              y1={hoverY}
-              y2={hoverY}
+              y1={snapLeft.y}
+              y2={snapLeft.y}
             />
             <g class="crosshair-chip left">
               <rect
                 x={CHART.margin.left - 2 - leftChipW}
-                y={hoverY - 9}
+                y={snapLeft.y - 9}
                 width={leftChipW}
                 height={18}
                 rx="3"
@@ -726,7 +750,7 @@
               <text
                 bind:this={leftChipTextEl}
                 x={CHART.margin.left - 7}
-                y={hoverY}
+                y={snapLeft.y}
                 dy="0.35em"
                 text-anchor="end"
               >
@@ -825,19 +849,9 @@
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
-                      onmouseenter={() => (hoverDose = {
-                        label: doseTooltipText(dot),
-                        color: series.color,
-                        x: dot.x,
-                        y: dot.y,
-                      })}
+                      onmouseenter={() => setHoverDoseCluster(dot.x, dot.y)}
                       onmouseleave={() => (hoverDose = null)}
-                      onpointerdown={(e) => showDoseTooltipOnTouch(e, {
-                        label: doseTooltipText(dot),
-                        color: series.color,
-                        x: dot.x,
-                        y: dot.y,
-                      })}
+                      onpointerdown={(e) => showDoseTooltipOnTouch(e, dot.x, dot.y)}
                     />
                   {/each}
                   {#each series.plannedDosePoints as dot (dot.date)}
@@ -848,19 +862,9 @@
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
-                      onmouseenter={() => (hoverDose = {
-                        label: `${doseTooltipText(dot)} (planned)`,
-                        color: series.color,
-                        x: dot.x,
-                        y: dot.y,
-                      })}
+                      onmouseenter={() => setHoverDoseCluster(dot.x, dot.y)}
                       onmouseleave={() => (hoverDose = null)}
-                      onpointerdown={(e) => showDoseTooltipOnTouch(e, {
-                        label: `${doseTooltipText(dot)} (planned)`,
-                        color: series.color,
-                        x: dot.x,
-                        y: dot.y,
-                      })}
+                      onpointerdown={(e) => showDoseTooltipOnTouch(e, dot.x, dot.y)}
                     />
                   {/each}
                 {/if}
@@ -922,10 +926,12 @@
               {/each}
             </g>
 
-            <!-- Crosshair: vertical line snapped to nearest day, horizontal at
-                 cursor y. The vertical line gets an extra date label below the
-                 axis when it lands between decimated ticks. -->
-            {#if crosshairActive && hoverDate && hoverY !== null}
+            <!-- Crosshair: vertical line snapped to the nearest day. Each
+                 horizontal arm snaps to that day's data — the left arm to weight,
+                 the right arm to mg-in-system — meeting the vertical line at the
+                 actual data points (marked with a dot). The vertical line gets an
+                 extra date label below the axis when it lands between ticks. -->
+            {#if crosshairActive && hoverDate}
               {@const xhX = chartModel.cssXForDate(hoverDate) + CHART.margin.left}
               <line
                 class="crosshair vertical"
@@ -934,13 +940,27 @@
                 y1={PLOT.top}
                 y2={PLOT.bottom}
               />
-              <line
-                class="crosshair horizontal"
-                x1={PLOT.left}
-                x2={chartModel.plotRight}
-                y1={hoverY}
-                y2={hoverY}
-              />
+              {#if snapLeft}
+                <line
+                  class="crosshair horizontal"
+                  x1={PLOT.left}
+                  x2={xhX}
+                  y1={snapLeft.y}
+                  y2={snapLeft.y}
+                />
+                <circle class="crosshair-dot" cx={xhX} cy={snapLeft.y} r="3.2" />
+              {/if}
+              {#each snapRightArms as arm (arm.key)}
+                <line
+                  class="crosshair horizontal"
+                  style:stroke={arm.color}
+                  x1={xhX}
+                  x2={chartModel.plotRight}
+                  y1={arm.y}
+                  y2={arm.y}
+                />
+                <circle class="crosshair-dot" style:stroke={arm.color} cx={xhX} cy={arm.y} r="3.2" />
+              {/each}
               {#if !chartModel.dateTicks.some((t) => t.date === hoverDate)}
                 <text
                   class="date-label active"
@@ -955,29 +975,28 @@
               {/if}
             {/if}
 
-            <!-- Dose tooltip: small chip rendered inside the data-svg so it
+            <!-- Dose tooltip: one row per drug whose marker is under the cursor
+                 (overlapping markers stack). Rendered inside the data-svg so it
                  scrolls with content. -->
             {#if hoverDose}
-              {@const tw = Math.max(40, hoverDose.label.length * 6.2 + 14)}
-              {@const th = 18}
+              {@const rowH = 17}
+              {@const padY = 4}
+              {@const labelX = 20}
+              {@const labelW = Math.max(...hoverDose.entries.map((e) => e.label.length * 6.2))}
+              {@const tw = Math.max(50, labelW + labelX + 8)}
+              {@const th = hoverDose.entries.length * rowH + padY * 2}
               {@const tx = Math.min(
                 Math.max(hoverDose.x - tw / 2, PLOT.left + 2),
                 chartModel.plotRight - tw - 2,
               )}
               {@const ty = Math.max(hoverDose.y - th - 12, PLOT.top + 2)}
               <g class="dose-tooltip" pointer-events="none">
-                <rect
-                  x={tx}
-                  y={ty}
-                  width={tw}
-                  height={th}
-                  rx="4"
-                  ry="4"
-                  style:--system-color={hoverDose.color}
-                />
-                <text x={tx + tw / 2} y={ty + th / 2} dy="0.35em" text-anchor="middle">
-                  {hoverDose.label}
-                </text>
+                <rect x={tx} y={ty} width={tw} height={th} rx="4" ry="4" />
+                {#each hoverDose.entries as entry, i (i)}
+                  {@const cy = ty + padY + i * rowH + rowH / 2}
+                  <circle class="dose-tooltip-swatch" cx={tx + 10} cy={cy} r="3.4" style:fill={entry.color} />
+                  <text x={tx + labelX} y={cy} dy="0.35em" text-anchor="start">{entry.label}</text>
+                {/each}
               </g>
             {/if}
 
@@ -1014,27 +1033,48 @@
               </text>
             </g>
 
-            {#if crosshairActive && hoverY !== null && hoverValueRight !== null}
-              <line
-                class="crosshair horizontal"
-                x1={0}
-                x2={CHART.margin.right}
-                y1={hoverY}
-                y2={hoverY}
-              />
-              <g class="crosshair-chip right">
-                <rect
-                  x={2}
-                  y={hoverY - 9}
-                  width={rightChipW}
-                  height={18}
-                  rx="3"
-                  ry="3"
+            {#if crosshairActive}
+              <!-- Pass 1: arms (at each drug's true y) + connectors to nudged
+                   chips. Drawn first so the opaque chips below cover any line
+                   that would otherwise cross another drug's chip (same/near
+                   amounts). -->
+              {#each rightChips as chip (chip.key)}
+                <line
+                  class="crosshair horizontal"
+                  style:stroke={chip.color}
+                  x1={0}
+                  x2={CHART.margin.right}
+                  y1={chip.y}
+                  y2={chip.y}
                 />
-                <text bind:this={rightChipTextEl} x={7} y={hoverY} dy="0.35em" text-anchor="start">
-                  {rightChipLabel}
-                </text>
-              </g>
+                {#if chip.chipY !== chip.y}
+                  <line
+                    class="crosshair-chip-connector"
+                    style:stroke={chip.color}
+                    x1={2}
+                    x2={2}
+                    y1={chip.y}
+                    y2={chip.chipY}
+                  />
+                {/if}
+              {/each}
+              <!-- Pass 2: the value chips, on top of every arm. -->
+              {#each rightChips as chip (chip.key)}
+                <g class="crosshair-chip right">
+                  <rect
+                    style:stroke={chip.color}
+                    x={2}
+                    y={chip.chipY - 9}
+                    width={chip.w}
+                    height={18}
+                    rx="3"
+                    ry="3"
+                  />
+                  <text x={7} y={chip.chipY} dy="0.35em" text-anchor="start">
+                    {chip.label}
+                  </text>
+                </g>
+              {/each}
             {/if}
           </svg>
         {/if}
@@ -1042,53 +1082,6 @@
     </article>
 
     <div class="right-col">
-      <article class="card">
-        <h2 class="section-chip">Efficacy</h2>
-        <div class="efficacy-scroll">
-          <table class="mini-table">
-            <thead>
-              <tr>
-                <th>Week</th>
-                <th>Dose Amount</th>
-                <th>Weekly Loss</th>
-                <th class="status-th">
-                  <HelpBadge tooltip={efficacyHelpTooltip} />
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each efficacyRows as row (row.week)}
-                <tr>
-                  <td>{row.week}</td>
-                  <td>{row.doseDisplay}</td>
-                  <td>
-                    {#if row.lossLbs !== null}
-                      {lbsToDisplayNum(String(row.lossLbs), $weightUnit).toFixed(1)}
-                      {$weightUnit}
-                    {:else}
-                      —
-                    {/if}
-                  </td>
-                  <td>
-                    {#if row.status === 'good'}
-                      <span class="status success">✓</span>
-                    {:else if row.status === 'warn'}
-                      <WarnBadge tooltip={efficacyWarnTooltip} />
-                    {:else}
-                      <span>—</span>
-                    {/if}
-                  </td>
-                </tr>
-              {:else}
-                <tr>
-                  <td colspan="4" class="empty-efficacy">No data yet</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </article>
-
       <article class="card" bind:this={progressCardRegion}>
         <div class="chip-row">
           <h2 class="section-chip">Progress</h2>
@@ -1202,12 +1195,54 @@
           </tbody>
         </table>
       </article>
+
+      <article class="card">
+        <h2 class="section-chip">Efficacy</h2>
+        <div class="efficacy-scroll">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Week</th>
+                <th>Dose Amount</th>
+                <th>Weekly Loss</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each efficacyRows as row (row.week)}
+                <tr>
+                  <td>W{row.week}</td>
+                  <td>{row.doseDisplay}</td>
+                  <td>
+                    {#if row.lossLbs !== null}
+                      {lbsToDisplayNum(String(row.lossLbs), $weightUnit).toFixed(1)}
+                      {$weightUnit}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                </tr>
+              {:else}
+                <tr>
+                  <td colspan="3" class="empty-efficacy">No data yet</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </article>
     </div>
   </section>
 
   <article class="card inputs-card">
     <div class="chip-row">
-      <h2 class="section-chip">Inputs</h2>
+      <!-- Clicking the title only *closes* the settings panel (never opens it),
+           so the gear isn't the only way out. A no-op when settings are closed. -->
+      <button
+        type="button"
+        class="section-chip section-chip-toggle"
+        title={inputSettingsOpen ? 'Hide input table settings' : undefined}
+        onclick={closeInputSettings}
+      >Inputs</button>
       <button
         type="button"
         class="icon-action add-row-button"
@@ -1387,6 +1422,15 @@
     line-height: 1;
     padding: 0.45rem 0.85rem 0.5rem;
     margin: 0;
+  }
+
+  /* The Inputs chip is a <button> that can dismiss the settings panel; reset the
+     button chrome the .section-chip look doesn't already cover. */
+  .section-chip-toggle {
+    font-family: inherit;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
   }
 
   .chip {
@@ -1651,10 +1695,21 @@
     pointer-events: none;
   }
 
-  /* Axis value chips that appear at each end of the horizontal crosshair. */
+  /* Focus dot where a crosshair arm meets the vertical line — i.e. the data
+     point that arm snapped to. */
+  .crosshair-dot {
+    fill: var(--surface);
+    stroke: color-mix(in oklab, var(--text) 80%, transparent 20%);
+    stroke-width: 1.5;
+    pointer-events: none;
+  }
+
+  /* Axis value chips that appear at each end of the horizontal crosshair. A
+     per-drug arm sets an inline stroke colour for the border (neutral fill keeps
+     the value readable regardless of the drug colour). */
   .crosshair-chip rect {
     fill: var(--headerBg);
-    opacity: 0.95;
+    stroke-width: 1.5;
   }
   .crosshair-chip text {
     fill: var(--headerText);
@@ -1662,16 +1717,27 @@
     font-weight: 700;
   }
 
-  /* Dose-marker tooltip rendered inside the data-svg. */
+  /* Bridges a nudged (de-overlapped) chip back to its true-y arm. */
+  .crosshair-chip-connector {
+    stroke-width: 1.5;
+    pointer-events: none;
+  }
+
+  /* Dose-marker tooltip rendered inside the data-svg. Neutral border now that a
+     stack can hold multiple drugs; each row carries its own colour swatch. */
   .dose-tooltip rect {
     fill: var(--surface);
-    stroke: var(--system-color, var(--accent));
-    stroke-width: 1.5;
+    stroke: color-mix(in oklab, var(--text) 28%, transparent);
+    stroke-width: 1;
   }
   .dose-tooltip text {
     fill: var(--text);
     font-size: 0.74rem;
     font-weight: 700;
+  }
+  .dose-tooltip-swatch {
+    stroke: var(--surface);
+    stroke-width: 0.5;
   }
 
   /* Dose dots: cursor + grow-on-hover so the affordance is clear. */
@@ -1724,37 +1790,15 @@
     text-align: center;
   }
 
-  .mini-table .status-th {
-    cursor: help;
-    line-height: 0;
-  }
-
   .mini-table tbody tr:nth-child(even),
   .kv-table tbody tr:nth-child(even) {
     background: var(--rowAlt);
-  }
-
-  .status {
-    width: 1.1rem;
-    height: 1.1rem;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-    font-weight: 700;
-    line-height: 1;
-    color: var(--headerText);
   }
 
   .empty-efficacy {
     text-align: center;
     color: var(--text-secondary);
     padding: 0.75rem;
-  }
-
-  .status.success {
-    background: var(--success);
   }
 
   .kv-table th {

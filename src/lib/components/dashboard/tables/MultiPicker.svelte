@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { floatingMenu } from '$lib/grid/floatingMenu';
 
   let {
     values = [],
@@ -25,6 +26,7 @@
 
   let isOpen = $state(false);
   let containerEl: HTMLDivElement | undefined = $state();
+  let triggerEl: HTMLDivElement | undefined = $state();
   let chevronEl: HTMLButtonElement | undefined = $state();
   let focusedOptionIndex = $state(0);
   let liveMessage = $state('');
@@ -298,7 +300,7 @@
 <div class="multi-picker" bind:this={containerEl}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="multi-picker-trigger" onclick={handleTriggerClick}>
+  <div class="multi-picker-trigger" bind:this={triggerEl} onclick={handleTriggerClick}>
     <div class="multi-picker-values">
       {#if values.length}
         {#each values as value (value)}
@@ -332,6 +334,7 @@
       aria-describedby={listboxHintId}
       tabindex="-1"
       onkeydown={handleMenuKeydown}
+      use:floatingMenu={{ anchor: triggerEl }}
     >
       {#each options as option, i (option)}
         {@const selected = values.includes(option)}
@@ -430,13 +433,11 @@
     line-height: 1;
   }
 
+  /* Positioned (fixed, anchored to the trigger) by the floatingMenu action so it
+     escapes `.table-scroll`'s overflow clip; left/top/min-width are set inline. */
   .multi-picker-menu {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 0.22rem);
-    min-width: 100%;
     width: max-content;
-    z-index: 10;
+    z-index: 50;
     display: flex;
     flex-direction: column;
     align-items: stretch;

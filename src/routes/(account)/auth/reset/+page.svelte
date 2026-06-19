@@ -83,7 +83,10 @@
 </svelte:head>
 
 <div class="auth-shell container">
-  <a class="brand" href={resolve('/')}>✽ EVOLVETRACK</a>
+  <a class="brand" href={resolve('/')}>
+    <span class="brand-mark" aria-hidden="true"></span>
+    EvolvTrack
+  </a>
 
   <section class="auth-card" aria-labelledby="reset-heading">
     <header class="intro">
@@ -133,9 +136,32 @@
   }
   .brand {
     align-self: flex-start;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
     font-size: 1.1rem;
+    color: var(--text);
+    text-decoration: none;
+  }
+  /* Real app mark (masked /logo.svg), matching the in-app header lockup. */
+  .brand-mark {
+    width: 1.7rem;
+    height: 1.7rem;
+    flex: 0 0 auto;
+    position: relative;
+    border-radius: 7px;
+    border: 1px solid var(--brand);
+    background-color: var(--brand);
+  }
+  .brand-mark::before {
+    content: '';
+    position: absolute;
+    inset: 5% 5% 0 0;
+    background-color: #ffffff;
+    -webkit-mask: url('/logo.svg') no-repeat center / 120% 120%;
+    mask: url('/logo.svg') no-repeat center / 120% 120%;
   }
   .auth-card {
     width: min(100%, 26rem);

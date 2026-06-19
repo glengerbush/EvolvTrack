@@ -126,6 +126,21 @@
       </div>
     </details>
 
+    <details class="faq-item" id="faq-offline">
+      <summary><span class="faq-chevron" aria-hidden="true">▸</span>What does it mean to use this app offline?</summary>
+      <div class="faq-answer">
+        <p>
+          When you &ldquo;continue offline,&rdquo; you are using the app without
+          an account and without syncing. That means that your data is only
+          stored in your browser. If your browser clears its storage, you may
+          lose your data. Some browsers do this periodically or when quit, so
+          backup your data to prevent this from happening. Installing the app as
+          a PWA should enable persistent storage for your data
+          (<a href="#faq-install">how to install?</a>).
+        </p>
+      </div>
+    </details>
+
     <details class="faq-item" id="faq-install">
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>How do I install EvolvTrack?</summary>
       <div class="faq-answer">

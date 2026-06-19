@@ -128,6 +128,18 @@ export type ChartModel = {
   valueLeftForY: (y: number) => number | null;
   /** Invert yRight: pixel y → mg/wellness value (returns null if outside plot area). */
   valueRightForY: (y: number) => number | null;
+  /**
+   * For a hovered date, the data each crosshair arm snaps to: weight on the left
+   * axis, total mg-in-system (or wellness when mg is hidden) on the right. Each
+   * side is null when its series is hidden or the day has no value there, so the
+   * caller can fall back. `y` is in viewBox/CSS-pixel space, ready to draw.
+   */
+  crosshairSnap: (date: IsoDate) => {
+    left: { value: number; y: number } | null;
+    /** One entry per visible drug curve (or wellness): the day's value, its y,
+     *  and the series colour — drawn as a separate crosshair arm + chip each. */
+    right: { value: number; y: number; color: string; key: string }[];
+  };
 };
 
 export const CHART = {
@@ -358,6 +370,41 @@ export function buildChartModel(
   const daySpacing = usablePlotWidth / daySpan;
   const barWidth = Math.max(5, Math.min(20, daySpacing * 0.72));
 
+  // Crosshair snapping: the left arm tracks that day's weight, the right arm that
+  // day's total mg-in-system (summed across visible drug curves) — or wellness
+  // when mg is hidden — so the crosshair lands on the data, not the cursor.
+  const weightVisible = !hiddenSeries.has('weight');
+  const weightValueByDate = new Map(weights.map((point) => [point.date, point.value]));
+  // Each visible drug curve keeps its own per-date lookup so the crosshair draws
+  // a separate arm per drug (not one combined total).
+  const snapSeries = visibleSystemSeries.map((series) => ({
+    key: series.key as string,
+    color: series.color,
+    byDate: new Map(series.values.map((point) => [point.date, point.value] as const)),
+  }));
+  // Below ~0.05 mg a drug reads as "0.0 mg" at the chip's one-decimal precision —
+  // i.e. it's effectively out of the system — so it gets no arm or chip.
+  const MIN_VISIBLE_MG = 0.05;
+  const crosshairSnap = (date: IsoDate) => {
+    const weight = weightValueByDate.get(date);
+    const left = weightVisible && weight !== undefined ? { value: weight, y: yLeft(weight) } : null;
+    const right: { value: number; y: number; color: string; key: string }[] = [];
+    if (showSysMg) {
+      for (const series of snapSeries) {
+        const value = series.byDate.get(date);
+        if (value !== undefined && value >= MIN_VISIBLE_MG) {
+          right.push({ value, y: yRight(value), color: series.color, key: series.key });
+        }
+      }
+    } else if (showWellness) {
+      const wellness = wellnessByDate.get(date)?.value;
+      if (wellness !== undefined) {
+        right.push({ value: wellness, y: yRight(wellness), color: 'var(--wellnessBar)', key: 'wellness' });
+      }
+    }
+    return { left, right };
+  };
+
   return {
     hasAnyData: datedRows.length > 0,
     widthPx,
@@ -433,6 +480,7 @@ export function buildChartModel(
       if (y < PLOT.top || y > PLOT.bottom) return null;
       return rightMin + ((PLOT.bottom - y) * (rightMax - rightMin)) / PLOT.height;
     },
+    crosshairSnap,
   };
 }
 

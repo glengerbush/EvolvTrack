@@ -967,6 +967,17 @@
     }
   }
 
+  // Clicking a view tab also dismisses the settings panel — it's an intuitive
+  // "I'm done with settings" gesture, and avoids the gear being the only way out.
+  function selectMedTab(tab: 'dosage' | 'vial') {
+    activeMedTab = tab;
+    if (settingsOpen) {
+      settingsOpen = false;
+      resetDosageColumnInteractionState();
+      resetVialColumnInteractionState();
+    }
+  }
+
   // Revert any in-flight (not-yet-autosaved) edits to the last saved baseline.
   function discardMedicationEdits() {
     medicationInputRows = savedMedicationInputRows.map(cloneMedicationRow);
@@ -1290,7 +1301,7 @@
             class="med-tab"
             class:active={activeMedTab === 'dosage'}
             aria-selected={activeMedTab === 'dosage'}
-            onclick={() => (activeMedTab = 'dosage')}
+            onclick={() => selectMedTab('dosage')}
           >Dosage</button>
           <button
             type="button"
@@ -1299,7 +1310,7 @@
             class="med-tab"
             class:active={activeMedTab === 'vial'}
             aria-selected={activeMedTab === 'vial'}
-            onclick={() => (activeMedTab = 'vial')}
+            onclick={() => selectMedTab('vial')}
           >Vial Info</button>
         </div>
         <button

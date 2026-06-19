@@ -514,7 +514,10 @@ describe('applyRemoteChange — weight per-field LWW', () => {
     const remote = stampedWeight(
       'w3',
       { weightLbs: 175, wellness: 7 },
-      { weightLbs: NEW, wellness: NEW },
+      // `date` is stamped too — a real write always stamps every field it carries
+      // (see saveInputRow / bumpFieldStamps), so a genuinely-superseding remote
+      // is newer on `date` as well, not just the value fields.
+      { date: NEW, weightLbs: NEW, wellness: NEW },
       NEW,
     );
     await applyRemoteChange({
@@ -526,6 +529,50 @@ describe('applyRemoteChange — weight per-field LWW', () => {
     });
 
     expect(await db.outbox.get('entry:w3')).toBeUndefined();
+  });
+
+  it('adopts a remote first-time field set even when the local row updatedAt is newer', async () => {
+    // The cross-device "set a vial on A, it never lands on B" bug. Local (B)
+    // never had a prescriptionId, but its row was bulk-stamped recently (a big
+    // import, or a faster clock) so updatedAt = NEW. Remote (A) sets the field
+    // for the first time at MID — older than B's row time, but B never set the
+    // field, so its clock is the row's birth (OLD) and A's write must win.
+    await db.entries.put(
+      stampAllFields(
+        {
+          id: 'd1',
+          date: iso('2026-05-10'),
+          weightLbs: 180,
+          amountMg: 5,
+          medication: SEMA,
+          createdAt: OLD,
+          updatedAt: NEW,
+        },
+        NEW, // every present field stamped NEW; prescriptionId is absent
+      ),
+    );
+
+    const remote: HealthEntry = {
+      id: 'd1',
+      date: iso('2026-05-10'),
+      weightLbs: 180,
+      amountMg: 5,
+      medication: SEMA,
+      prescriptionId: 'vial-8',
+      createdAt: OLD,
+      updatedAt: MID,
+      fieldUpdatedAt: { date: OLD, weightLbs: OLD, amountMg: OLD, medication: OLD, prescriptionId: MID },
+    };
+    await applyRemoteChange({
+      aggregate: 'entry',
+      entityId: 'd1',
+      op: 'upsert',
+      record: remote,
+      remoteUpdatedAt: MID,
+    });
+
+    const after = (await db.entries.get('d1'))!;
+    expect(after.prescriptionId).toBe('vial-8');
   });
 
   it('merges sensibly against a legacy remote record with no fieldUpdatedAt', async () => {

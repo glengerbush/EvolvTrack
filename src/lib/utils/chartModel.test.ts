@@ -139,6 +139,70 @@ describe('buildChartModel — projection start (same-day-zero rule)', () => {
   });
 });
 
+describe('buildChartModel — crosshairSnap (data-snapped crosshair)', () => {
+  const rows = [
+    row({ date: iso('2026-05-01'), weight: '180', dose: '5', medication: SEMA }),
+    row({ date: iso('2026-05-08'), weight: '178', dose: '5', medication: SEMA }),
+  ];
+
+  it('snaps the left arm to that day weight and the right arm to mg in system', () => {
+    const model = build(rows);
+    const snap = model.crosshairSnap(iso('2026-05-08'));
+    const wp = model.weightPoints.find((p) => p.date === '2026-05-08')!;
+    expect(snap.left).not.toBeNull();
+    expect(snap.left!.value).toBeCloseTo(178, 5);
+    // The left arm lands exactly on the weight data point.
+    expect(snap.left!.y).toBeCloseTo(wp.y, 5);
+    // One right arm (single drug), positive mg-in-system (residual from 05-01).
+    expect(snap.right).toHaveLength(1);
+    expect(snap.right[0].value).toBeGreaterThan(0);
+  });
+
+  it('returns one right arm per drug when more than one is in system', () => {
+    const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
+    const model = build([
+      row({ date: iso('2026-05-01'), weight: '180', dose: '5', medication: SEMA }),
+      row({ date: iso('2026-05-01'), dose: '10', medication: TIRZ }),
+      row({ date: iso('2026-05-08'), weight: '178', dose: '5', medication: SEMA }),
+      row({ date: iso('2026-05-08'), dose: '10', medication: TIRZ }),
+    ]);
+    const snap = model.crosshairSnap(iso('2026-05-08'));
+    expect(snap.right).toHaveLength(2);
+    // Each arm carries its own value and colour (not a combined total).
+    const colors = new Set(snap.right.map((r) => r.color));
+    expect(colors.size).toBe(2);
+  });
+
+  it('omits a drug that has zero in system on the hovered day', () => {
+    const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
+    const model = build([
+      row({ date: iso('2026-05-01'), weight: '180', dose: '5', medication: SEMA }),
+      row({ date: iso('2026-05-08'), weight: '178', dose: '5', medication: SEMA }),
+      // Tirzepatide's first dose is later, so on 05-08 it isn't in system yet.
+      row({ date: iso('2026-05-09'), dose: '10', medication: TIRZ }),
+    ]);
+    const snap = model.crosshairSnap(iso('2026-05-08'));
+    // Only Semaglutide — no zero-valued Tirzepatide arm.
+    expect(snap.right).toHaveLength(1);
+    expect(snap.right.every((r) => r.value > 0)).toBe(true);
+  });
+
+  it('returns a null left arm on a day with no weight (dose only)', () => {
+    const model = build([
+      row({ date: iso('2026-05-01'), weight: '180', dose: '5', medication: SEMA }),
+      row({ date: iso('2026-05-08'), dose: '5', medication: SEMA }),
+    ]);
+    const snap = model.crosshairSnap(iso('2026-05-08'));
+    expect(snap.left).toBeNull();
+    expect(snap.right.length).toBeGreaterThan(0);
+  });
+
+  it('returns a null left arm when the weight series is hidden', () => {
+    const model = buildChartModel(rows, 'lbs', {}, 180, TODAY, new SvelteSet<GraphSeriesKey>(['weight']));
+    expect(model.crosshairSnap(iso('2026-05-08')).left).toBeNull();
+  });
+});
+
 describe('buildChartModel — skipped-only date does not extend the chart', () => {
   it('a date whose only row is a skipped dose is not part of the chart range', () => {
     const rows = [

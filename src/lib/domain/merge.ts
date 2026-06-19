@@ -53,7 +53,17 @@ function fieldKeys(record: object, reserved?: ReadonlySet<string>): string[] {
 }
 
 function fieldTime(record: Mergeable, field: string): IsoDateTime {
-  return record.fieldUpdatedAt?.[field] ?? record.updatedAt;
+  const stamped = record.fieldUpdatedAt?.[field];
+  if (stamped !== undefined) return stamped;
+  // No per-field stamp for this field. If the record carries a sidecar at all,
+  // the field was simply never set on it — so its clock is the record's birth
+  // (`createdAt`), NOT the row's latest edit. Falling back to `updatedAt` here
+  // is the bug behind "set a field on device A, it never lands on B": B's row
+  // had no stamp for the new field, so the absent field inherited B's freshest
+  // whole-row time and beat A's genuine first-time write (made worse by any
+  // cross-device clock skew on that row time). Records with NO sidecar are
+  // legacy whole-row-LWW writers: every field still falls back to `updatedAt`.
+  return record.fieldUpdatedAt ? record.createdAt : record.updatedAt;
 }
 
 function maxIso(times: IsoDateTime[], fallback: IsoDateTime): IsoDateTime {

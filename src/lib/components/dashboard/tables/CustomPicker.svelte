@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { floatingMenu } from '$lib/grid/floatingMenu';
 
   let {
     value = '',
@@ -157,7 +158,12 @@
     <span class="custom-picker-chevron" aria-hidden="true">▾</span>
   </button>
   {#if isOpen}
-    <div class="custom-picker-menu" role="listbox" aria-label={ariaLabel}>
+    <div
+      class="custom-picker-menu"
+      role="listbox"
+      aria-label={ariaLabel}
+      use:floatingMenu={{ anchor: triggerEl }}
+    >
       {#each options as option, i (option)}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
@@ -216,14 +222,12 @@
     line-height: 1;
   }
 
+  /* Positioned (fixed, anchored to the trigger) by the floatingMenu action so it
+     escapes `.table-scroll`'s overflow clip; left/top/min-width are set inline. */
   .custom-picker-menu {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 0.22rem);
-    min-width: 100%;
     width: max-content;
     max-width: min(20rem, 90vw);
-    z-index: 10;
+    z-index: 50;
     max-height: 12rem;
     overflow: auto;
     border: 1px solid color-mix(in oklab, var(--cardBorder) 44%, transparent);

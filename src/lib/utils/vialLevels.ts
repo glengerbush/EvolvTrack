@@ -199,6 +199,22 @@ export function attributeVials(
   doses: DoseEvent[],
 ): Map<string, VialAttribution> {
   const result = new Map<string, VialAttribution>();
+
+  // A dose with an explicit stored attribution is NEVER `auto`, even when its
+  // vial isn't present on this device — it may simply not have synced yet (the
+  // entry and its prescription are independent sync aggregates with no ordering
+  // guarantee), or the vial was archived. Pin every stored attribution as
+  // non-auto up front so the inputs table's "freeze" effect can't mistake it for
+  // an unfrozen dose and overwrite the user's pick with a local FIFO choice —
+  // which is exactly how a numbered vial chosen on one device reverts to the old
+  // vial on another. (It just won't render a vial number until that prescription
+  // arrives; the per-med pass below upgrades resolvable ones in place.)
+  for (const d of doses) {
+    if (d.id && d.prescriptionId && d.amountMg > 0) {
+      result.set(d.id, { vialId: d.prescriptionId, auto: false });
+    }
+  }
+
   const validByMed = new Map<string, VialSpec[]>();
   for (const v of vials) {
     if (capacityOf(v) == null) continue;
@@ -238,7 +254,9 @@ export function attributeVials(
       (capById.get(id) ?? 0) - (frozenTotal.get(id) ?? 0) - (autoAssigned.get(id) ?? 0);
 
     for (const dose of medDoses) {
-      if (dose.prescriptionId && vialIds.has(dose.prescriptionId)) continue; // already attributed
+      // Any dose with a stored attribution is already pinned (resolvable ones
+      // above, unresolvable ones in the pre-pass) — never FIFO-reassign it.
+      if (dose.prescriptionId) continue;
       // The temporally-appropriate vial = the one the next attributed dose uses
       // (so a dose inserted into the past lands in the vial active *then*). With
       // no later attributed dose this is the current/latest dose, whose vial is
