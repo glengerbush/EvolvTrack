@@ -4,7 +4,7 @@ import type { IsoDate } from '$lib/domain/types';
 /** One row of the Efficacy table — a single treatment week. */
 export interface EfficacyRow {
   week: number;
-  /** "<n> mg" for the week's last active dose, or '' when none (renders as —). */
+  /** "<n> mg" — the week's total non-skipped dose, or '' when none (renders as —). */
   doseDisplay: string;
   /** Week-over-week loss in lbs vs the previous weighed week, or null (—). */
   lossLbs: number | null;
@@ -48,23 +48,30 @@ export function buildEfficacyRows(sortedRows: readonly EfficacyInputRow[]): Effi
     const week = weekNumberFor(r.date, anchor);
     if (week !== null) lastWeightByWeek.set(week, parseFloat(r.weight));
   }
-  const lastDoseByWeek = new Map<number, string>();
+  // Sum every non-skipped dose in the week — a week can hold several doses
+  // (titration, daily meds, split shots), so the column reports the weekly
+  // total mg rather than a single dose, which would drop the others.
+  const doseMgByWeek = new Map<number, number>();
   for (const r of sortedRows) {
-    if (r.dose === '' || r.doseSkipped) continue;
+    if (r.doseSkipped) continue;
+    const mg = parseFloat(r.dose);
+    if (!Number.isFinite(mg) || mg <= 0) continue;
     const week = weekNumberFor(r.date, anchor);
-    if (week !== null) lastDoseByWeek.set(week, r.dose);
+    if (week !== null) doseMgByWeek.set(week, (doseMgByWeek.get(week) ?? 0) + mg);
   }
 
   // End at the last week that actually has weight or dose data; trailing weeks
   // with only other entries (symptoms/notes) don't warrant an efficacy row.
-  const maxWeek = Math.max(0, ...lastWeightByWeek.keys(), ...lastDoseByWeek.keys());
+  const maxWeek = Math.max(0, ...lastWeightByWeek.keys(), ...doseMgByWeek.keys());
 
   const rows: EfficacyRow[] = [];
   let prevWeightLbs: number | null = null;
   for (let week = 1; week <= maxWeek; week++) {
     const lastWeightLbs = lastWeightByWeek.get(week) ?? null;
-    const doseStr = lastDoseByWeek.get(week);
-    const doseDisplay = doseStr ? `${parseFloat(doseStr)} mg` : '';
+    const doseMg = doseMgByWeek.get(week);
+    // Round the summed total so float artefacts (e.g. 2.5 + 5 = 7.5000001) and
+    // trailing zeros don't leak into the label.
+    const doseDisplay = doseMg !== undefined ? `${Number(doseMg.toFixed(2))} mg` : '';
 
     const lossLbs =
       lastWeightLbs !== null && prevWeightLbs !== null ? prevWeightLbs - lastWeightLbs : null;

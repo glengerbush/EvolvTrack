@@ -48,16 +48,25 @@ describe('buildEfficacyRows', () => {
     expect(rows[3]).toMatchObject({ week: 4, lossLbs: 4 });
   });
 
-  it('shows the week\'s last active dose and ignores skipped doses', () => {
+  it('sums all the week\'s non-skipped doses and ignores skipped ones', () => {
     const rows = buildEfficacyRows([
       row('2026-06-02', '200', '2.5'),
       row('2026-06-05', '', '5'),
       row('2026-06-09', '198', '7.5', true), // skipped — not counted
     ]).reverse();
-    // Week 1: last active dose is the 5 mg on Jun 5 (the 2.5 is earlier).
-    expect(rows[0]).toMatchObject({ week: 1, doseDisplay: '5 mg' });
+    // Week 1: 2.5 + 5 = 7.5 mg (summed, not just the last).
+    expect(rows[0]).toMatchObject({ week: 1, doseDisplay: '7.5 mg' });
     // Week 2: only a skipped dose → dash (empty).
     expect(rows[1]).toMatchObject({ week: 2, doseDisplay: '' });
+  });
+
+  it('reports the weekly dose total without float artefacts', () => {
+    const rows = buildEfficacyRows([
+      row('2026-06-02', '200', '5'),
+      row('2026-06-04', '', '5'),
+      row('2026-06-06', '198', '5'),
+    ]).reverse();
+    expect(rows[0]).toMatchObject({ week: 1, doseDisplay: '15 mg' });
   });
 
   it('ends at the last week with weight or dose data', () => {
