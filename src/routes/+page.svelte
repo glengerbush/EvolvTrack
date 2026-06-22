@@ -2,11 +2,6 @@
   import { goto } from '$app/navigation';
   import { isDemoMode } from '$lib/stores/demoStore';
 
-  async function startDemo() {
-    await isDemoMode.enable();
-    await goto('/app');
-  }
-
   async function continueOffline() {
     // Make sure demo data isn't lingering from a previous visit before
     // dropping the user into the real, empty app.
@@ -32,9 +27,9 @@
         <div class="chart-overlay">
           <h1>Your progress should belong to you.</h1>
           <p class="lede">Track dose, shot location, medication levels, and weight trends — offline first, end-to-end encrypted when you sync.</p>
-          <button type="button" class="btn btn-demo-hero" onclick={startDemo}>
+          <a class="btn btn-demo-hero" href="/demo">
             Try the live demo →
-          </button>
+          </a>
         </div>
       </div>
     </section>
@@ -127,9 +122,9 @@
         empty app and start tracking your own.
       </p>
       <div class="bottom-buttons">
-        <button type="button" class="btn btn-primary" onclick={startDemo}>
+        <a class="btn btn-primary" href="/demo">
           Try the demo
-        </button>
+        </a>
         <button type="button" class="btn btn-ghost" onclick={continueOffline}>
           Continue offline
         </button>
@@ -217,12 +212,6 @@
     background: transparent !important;
   }
 
-  .chart-frame .grid {
-    stroke: var(--surface-grid);
-  }
-  .chart-frame .trend {
-    stroke: var(--brand-2);
-  }
   .chart-overlay {
     position: relative;
     display: flex;
