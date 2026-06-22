@@ -139,6 +139,7 @@
     <footer class="footer">
       <p>
         <a href="https://github.com/glengerbush/EvolvTrack" target="_blank" rel="noopener">Source on GitHub</a>
+        · Drop us a line: <a href="mailto:hello@evolvtrack.com">hello@evolvtrack.com</a>
         · Built for the people who use it, not the data they generate.
       </p>
     </footer>
