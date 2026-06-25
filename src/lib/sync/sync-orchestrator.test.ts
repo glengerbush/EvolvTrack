@@ -64,6 +64,7 @@ vi.mock('$lib/sync/sync-engine', () => ({
 vi.mock('$lib/sync/account-state', () => ({
   getAuthenticatedUserId: () => h.getUserIdImpl(),
   fetchRemoteSyncAccount: () => h.fetchRemoteSyncAccountImpl(),
+  hydrateDeviceId: () => Promise.resolve('test-device-id'),
 }));
 
 vi.mock('$lib/sync/e2ee-migration', () => ({
@@ -90,10 +91,11 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
 
 vi.mock('$lib/sync/pull-cursor', () => ({
   clearPullCursor: () => h.clearPullCursorImpl(),
+  hydratePullCursor: () => Promise.resolve(),
 }));
 
 vi.mock('$lib/sync/session-key', () => ({
-  rehydrateSession: () => undefined,
+  rehydrateSession: () => Promise.resolve(false),
   clearSession: () => h.clearSessionImpl(),
 }));
 

@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid';
 import { supabase } from '$lib/auth/supabase';
+import { durableGet, durableSet } from '$lib/db/durableKv';
 import type { E2EEMigrationState, SyncMode } from '$lib/domain/types';
 
 const SYNC_MODES: ReadonlySet<SyncMode> = new Set<SyncMode>([
@@ -16,15 +17,66 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/**
+ * The device's stable identity, used as the migration-ownership token in
+ * `sync_accounts` (`migration_owner_device_id`) and the take-over CAS. It MUST
+ * survive an app quit: a regenerated id is a *different* device, so an iOS PWA
+ * swiped away mid-migration would no longer recognize itself as the owner and
+ * couldn't heartbeat or finalize its own migration. So it lives in durable
+ * IndexedDB (via `durableKv`), not localStorage (wiped on iOS swipe-away).
+ *
+ * An in-memory mirror keeps `getDeviceId` synchronous for the migration code;
+ * `hydrateDeviceId` loads it at boot, before any migration action can run.
+ */
+let deviceId: string | null = null;
+
+function mintDeviceId(): string {
+  return typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : nanoid();
+}
+
+/**
+ * Load the stable device id into memory at boot: durable store first, then a
+ * one-time migration of a legacy localStorage value, then mint-and-persist as a
+ * last resort. A persisted id always wins over one `getDeviceId` may have minted
+ * before this ran, so device identity stays continuous. Idempotent.
+ */
+export async function hydrateDeviceId(): Promise<string> {
+  let stored = await durableGet(DEVICE_ID_KEY);
+  if (stored === null && typeof localStorage !== 'undefined') {
+    try {
+      const legacy = localStorage.getItem(DEVICE_ID_KEY);
+      if (legacy !== null) {
+        stored = legacy;
+        localStorage.removeItem(DEVICE_ID_KEY);
+      }
+    } catch {
+      // localStorage inaccessible — nothing to migrate.
+    }
+  }
+  if (stored === null) stored = deviceId ?? mintDeviceId();
+  deviceId = stored;
+  void durableSet(DEVICE_ID_KEY, stored);
+  return stored;
+}
+
 export function getDeviceId(): string {
-  if (typeof localStorage === 'undefined') return 'server';
+  if (deviceId) return deviceId;
+  // SSR / no browser storage: a synthetic id, never persisted.
+  if (typeof localStorage === 'undefined' && typeof indexedDB === 'undefined') return 'server';
+  // Hydrate hasn't completed and an id is needed now (rare — migration actions
+  // run well after boot, by which point hydrateDeviceId has populated the cache).
+  // Mint into memory only — deliberately NOT persisted, so this temporary value
+  // can't clobber an id already sitting in the durable store before
+  // hydrateDeviceId reads it. hydrate persists whatever it settles on.
+  deviceId = mintDeviceId();
+  return deviceId;
+}
 
-  const existing = localStorage.getItem(DEVICE_ID_KEY);
-  if (existing) return existing;
-
-  const id = typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : nanoid();
-  localStorage.setItem(DEVICE_ID_KEY, id);
-  return id;
+/** Test seam: drop the in-memory device id so each test starts clean. */
+export function __resetDeviceIdForTests(): void {
+  deviceId = null;
 }
 
 export async function requireAuthenticatedUser() {

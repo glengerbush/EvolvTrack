@@ -14,11 +14,11 @@
 import { get } from 'svelte/store';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
 import { autoResumeMigration } from '$lib/sync/e2ee-migration';
-import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
+import { fetchRemoteSyncAccount, getAuthenticatedUserId, hydrateDeviceId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
 import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
 import { clearLocalWrappedKeys, fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
-import { clearPullCursor } from '$lib/sync/pull-cursor';
+import { clearPullCursor, hydratePullCursor } from '$lib/sync/pull-cursor';
 import { fetchServerTimeMs, supabase, supabaseUrl } from '$lib/auth/supabase';
 import { recordServerTime } from '$lib/sync/clock';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
@@ -448,14 +448,25 @@ let appOrchestrator: SyncOrchestrator | null = null;
  */
 export function startSyncOrchestrator(): () => void {
   appOrchestrator?.dispose();
-  // Restore a persisted E2EE session key (if the user opted in via the unlock
-  // modal) before any sync attempt — otherwise the first cycle would skip with
-  // `locked` and the unlock banner would flash on every refresh.
-  rehydrateSession();
   const orchestrator = createSyncOrchestrator();
   appOrchestrator = orchestrator;
 
   const trigger = () => orchestrator.scheduleSync();
+
+  // Hydrate the IndexedDB-backed boot state (pull cursor + device id) before the
+  // first pull, so a reopen reuses the cursor (no full re-pull) and the device
+  // keeps its migration-ownership identity. All sync-triggering paths below wait
+  // on this so the first cycle never reads an un-hydrated cursor.
+  const booted = Promise.all([hydratePullCursor(), hydrateDeviceId()]);
+
+  // Restore a persisted E2EE session key (if the user opted in via the unlock
+  // modal). This is async because the key lives in IndexedDB (localStorage is
+  // wiped on iOS PWA swipe-away). Once it resolves and unlocks, kick a sync so
+  // the first real cycle isn't skipped with `locked` — keeping the unlock banner
+  // from flashing on every refresh.
+  void Promise.all([rehydrateSession(), booted]).then(([unlocked]) => {
+    if (unlocked) trigger();
+  });
 
   // Honest connectivity: an `online` event means the browser thinks the
   // network came back, but we haven't *confirmed* it reaches Supabase yet —
@@ -505,8 +516,10 @@ export function startSyncOrchestrator(): () => void {
         trigger,
       )
       .subscribe();
-    // Catch up on anything missed while this device was away.
-    orchestrator.scheduleSync();
+    // Catch up on anything missed while this device was away — but only after
+    // boot hydration, so this first pull reuses the persisted cursor instead of
+    // racing it and re-pulling the whole history.
+    void booted.then(() => orchestrator.scheduleSync());
   });
 
   return () => {

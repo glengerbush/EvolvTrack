@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
+import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { durableGet, durableSet } from '$lib/db/durableKv';
 
 const h = vi.hoisted(() => ({
   signInWithPasswordMock: vi.fn(),
@@ -185,6 +187,20 @@ describe('logoutAndClearLocalData', () => {
     // On a successful inline wipe the boot-guard sentinel is cleared again —
     // there's nothing left for the next boot to do.
     expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
+  });
+
+  it('wipes the durable IndexedDB auth store (Supabase session + DEK)', async () => {
+    // The auth session and E2EE key now live in the separate `evolvtrack-auth`
+    // IndexedDB database, which the health-data `db.delete()` does not touch.
+    // Logout must clear it explicitly, or a logged-out device would reopen
+    // still holding a usable session.
+    await durableSet('sb-auth-token', 'SESSION');
+    await durableSet('et.session.dek', 'DEK');
+
+    await logoutAndClearLocalData();
+
+    expect(await durableGet('sb-auth-token')).toBeNull();
+    expect(await durableGet('et.session.dek')).toBeNull();
   });
 
   it('leaves the boot-guard sentinel set when the inline delete is blocked', async () => {

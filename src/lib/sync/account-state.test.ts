@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -14,13 +15,20 @@ vi.mock('$lib/auth/supabase', () => ({
 }));
 
 import {
+  __resetDeviceIdForTests,
   getDeviceId,
+  hydrateDeviceId,
   requireAuthenticatedUser,
   upsertRemoteSyncAccount,
 } from './account-state';
+import { durableClear, durableGet, durableSet } from '$lib/db/durableKv';
 
-beforeEach(() => {
+const DEVICE_ID_KEY = 'evolvtrack-device-id';
+
+beforeEach(async () => {
   localStorage.clear();
+  __resetDeviceIdForTests();
+  await durableClear();
   h.upsertMock.mockReset();
   h.fromMock.mockReset();
   h.getUserMock.mockReset();
@@ -29,16 +37,22 @@ beforeEach(() => {
   h.getUserMock.mockResolvedValue({ data: { user: { id: 'user-1' } }, error: null });
 });
 
-afterEach(() => {
+afterEach(async () => {
   localStorage.clear();
+  __resetDeviceIdForTests();
+  await durableClear();
 });
 
 describe('getDeviceId', () => {
-  it('generates and persists a new device id on first call', () => {
-    expect(localStorage.getItem('evolvtrack-device-id')).toBeNull();
+  // The device id is the migration-ownership token. It is hydrated/persisted by
+  // hydrateDeviceId (durable IndexedDB, not localStorage, so it survives an iOS
+  // PWA quit). getDeviceId itself is a synchronous accessor over that cache.
+
+  it('returns a non-empty id without leaking it to localStorage', () => {
     const id = getDeviceId();
     expect(id).toBeTruthy();
-    expect(localStorage.getItem('evolvtrack-device-id')).toBe(id);
+    // Never written to localStorage, where iOS would wipe it on swipe-away.
+    expect(localStorage.getItem(DEVICE_ID_KEY)).toBeNull();
   });
 
   it('returns the same id on subsequent calls (stable per device)', () => {
@@ -47,9 +61,51 @@ describe('getDeviceId', () => {
     expect(second).toBe(first);
   });
 
-  it('honors a pre-existing id in localStorage', () => {
-    localStorage.setItem('evolvtrack-device-id', 'preset-device-id');
+  it('does not persist a pre-hydrate minted id (hydrate owns persistence)', async () => {
+    // A bare getDeviceId() before hydrate must not write to the durable store,
+    // or it could clobber an id already stored there.
+    getDeviceId();
+    await Promise.resolve(); // flush any microtask a stray write would schedule
+    expect(await durableGet(DEVICE_ID_KEY)).toBeNull();
+  });
+});
+
+describe('hydrateDeviceId', () => {
+  it('adopts a pre-existing id from the durable store', async () => {
+    await durableSet(DEVICE_ID_KEY, 'preset-device-id');
+    __resetDeviceIdForTests();
+    expect(await hydrateDeviceId()).toBe('preset-device-id');
     expect(getDeviceId()).toBe('preset-device-id');
+  });
+
+  it('migrates a legacy localStorage id into the durable store', async () => {
+    localStorage.setItem(DEVICE_ID_KEY, 'legacy-device-id');
+    __resetDeviceIdForTests();
+    expect(await hydrateDeviceId()).toBe('legacy-device-id');
+    expect(getDeviceId()).toBe('legacy-device-id');
+    expect(localStorage.getItem(DEVICE_ID_KEY)).toBeNull();
+    await vi.waitFor(async () => {
+      expect(await durableGet(DEVICE_ID_KEY)).toBe('legacy-device-id');
+    });
+  });
+
+  it('mints and persists a fresh id when nothing is stored', async () => {
+    const id = await hydrateDeviceId();
+    expect(id).toBeTruthy();
+    expect(getDeviceId()).toBe(id);
+    await vi.waitFor(async () => {
+      expect(await durableGet(DEVICE_ID_KEY)).toBe(id);
+    });
+  });
+
+  it('lets a stored id win over one minted before hydrate ran', async () => {
+    // getDeviceId() can mint a temporary id if it's called before hydrate; a
+    // real persisted id must still take precedence so identity stays continuous.
+    await durableSet(DEVICE_ID_KEY, 'stored-id');
+    const minted = getDeviceId();
+    expect(minted).not.toBe('stored-id');
+    expect(await hydrateDeviceId()).toBe('stored-id');
+    expect(getDeviceId()).toBe('stored-id');
   });
 });
 

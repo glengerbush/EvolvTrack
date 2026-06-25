@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { db } from '$lib/db/schema';
+import { durableClear, durableGet, durableRemove, durableSet } from '$lib/db/durableKv';
 import { clearSession } from '$lib/sync/session-key';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string;
@@ -39,11 +40,48 @@ function toAuthEmail(identifier: string) {
   return `${normalizeUsername(normalizedIdentifier)}@${USERNAME_AUTH_DOMAIN}`;
 }
 
+/**
+ * Where Supabase persists the auth session. Backed by IndexedDB (see
+ * `durableKv`) instead of the default localStorage because iOS Home Screen
+ * PWAs wipe localStorage when the app is swiped away, which logged users out
+ * on every reopen. The first read of a key transparently migrates an existing
+ * localStorage value, so users who were already signed in under the old
+ * localStorage scheme aren't kicked out by the switch.
+ *
+ * auth-js fully supports an async storage adapter (it awaits these methods).
+ */
+const indexedDbAuthStorage = {
+  async getItem(key: string): Promise<string | null> {
+    const fromIdb = await durableGet(key);
+    if (fromIdb !== null) return fromIdb;
+    // One-time migration from the old localStorage slot. On iOS PWAs this is
+    // already gone after a swipe-away; on desktop / first run after upgrade it
+    // carries the existing session across so nobody has to re-log-in.
+    try {
+      const legacy = localStorage.getItem(key);
+      if (legacy !== null) {
+        await durableSet(key, legacy);
+        return legacy;
+      }
+    } catch {
+      // localStorage unavailable — nothing to migrate.
+    }
+    return null;
+  },
+  async setItem(key: string, value: string): Promise<void> {
+    await durableSet(key, value);
+  },
+  async removeItem(key: string): Promise<void> {
+    await durableRemove(key);
+  }
+};
+
 export const supabase = createClient(url || 'https://example.supabase.co', publishableKey || 'demo-key', {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    detectSessionInUrl: true
+    detectSessionInUrl: true,
+    storage: indexedDbAuthStorage
   }
 });
 
@@ -142,6 +180,12 @@ export async function logoutAndClearLocalData() {
   }
 
   clearSession();
+
+  // Wipe the IndexedDB-backed auth store (Supabase session token + E2EE DEK).
+  // It lives in its own database, so the health-data `db.delete()` below does
+  // not touch it — clear it explicitly or a logged-out device would reopen
+  // still holding a usable session.
+  await durableClear();
 
   try {
     localStorage.clear();
