@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { supabase } from '$lib/auth/supabase';
   import {
     adminChangeTier,
     adminGenerateLicenses,
@@ -19,6 +20,13 @@
   let checking = $state(true);
   let isAdmin = $state(false);
   let initError = $state('');
+  // The Supabase session can lapse while this tab sits open — the refresh token
+  // gets revoked/rotated, or auto-refresh quietly fails — without ever emitting a
+  // `signed-out-expired` event for the layout to catch. When that happens the
+  // admin RPCs start returning `not_authenticated` and the list would otherwise
+  // just stop updating with no explanation. We detect the dead session and swap
+  // the whole panel for a "sign in again" message instead of showing stale rows.
+  let sessionExpired = $state(false);
 
   let licenses = $state<AdminLicenseRow[]>([]);
   let admins = $state<AdminInfo[]>([]);
@@ -43,7 +51,24 @@
   // admin management
   let newAdminIdentifier = $state('');
 
-  onMount(() => { void boot(); });
+  onMount(() => {
+    void boot();
+
+    // A long-open admin tab is the whole problem here: data is loaded once and
+    // then never reconciled with the server. Re-fetch whenever the admin comes
+    // back to the tab so the list stays current and — crucially — so a session
+    // that died while they were away surfaces immediately instead of silently.
+    const onReturn = () => {
+      if (document.visibilityState !== 'visible' || checking || !isAdmin) return;
+      void reloadData();
+    };
+    window.addEventListener('focus', onReturn);
+    document.addEventListener('visibilitychange', onReturn);
+    return () => {
+      window.removeEventListener('focus', onReturn);
+      document.removeEventListener('visibilitychange', onReturn);
+    };
+  });
 
   async function boot() {
     checking = true;
@@ -53,9 +78,41 @@
         await Promise.all([refreshLicenses(), refreshAdmins()]);
       }
     } catch (error) {
-      initError = (error as Error).message;
+      if (await sessionIsGone()) {
+        sessionExpired = true;
+      } else {
+        initError = (error as Error).message;
+      }
     } finally {
       checking = false;
+    }
+  }
+
+  /**
+   * True when Supabase no longer holds a session — i.e. the failure we just hit
+   * is "you're logged out", not a transient server/network error. Used to tell
+   * an expired session apart from an ordinary RPC failure so we can show the
+   * right thing.
+   */
+  async function sessionIsGone(): Promise<boolean> {
+    const { data } = await supabase.auth.getSession();
+    return !data.session;
+  }
+
+  /**
+   * Re-fetch the license + admin lists, surfacing failures the user can see.
+   * On an auth failure it flips the panel into the expired state; on any other
+   * failure it leaves the existing data in place and reports the error.
+   */
+  async function reloadData() {
+    try {
+      await Promise.all([refreshLicenses(), refreshAdmins()]);
+    } catch (error) {
+      if (await sessionIsGone()) {
+        sessionExpired = true;
+      } else {
+        setStatus('error', (error as Error).message);
+      }
     }
   }
 
@@ -205,6 +262,10 @@
 
   {#if checking}
     <p>Checking access…</p>
+  {:else if sessionExpired}
+    <p class="error">
+      Your session has expired. <a href="/auth">Sign in again</a> to manage licenses.
+    </p>
   {:else if initError}
     <p class="error">{initError}</p>
   {:else if !isAdmin}

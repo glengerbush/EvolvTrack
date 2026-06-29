@@ -24,6 +24,12 @@
   let status = $state('');
   let forgotPanelOpen = $state(false);
   let resetEmail = $state('');
+  // Gates every network-backed auth action. Supabase rate-limits its auth
+  // endpoints aggressively, and an un-disabled button lets an impatient user
+  // fire signInWithPassword / signInWithOtp several times before the first
+  // response lands — which is exactly what trips "Rate limit exceeded". One
+  // in-flight request at a time keeps us under that ceiling.
+  let busy = $state(false);
 
   function isLikelyEmailAddress(value: string) {
     if (!value || value.length > 254 || /\s/.test(value)) return false;
@@ -53,19 +59,25 @@
   const showMagicLinkButton = $derived(isLikelyEmailAddress(trimmedIdentifier));
 
   async function submitLogin() {
+    if (busy) return;
     if (!identifier.trim() || !password) {
       status = 'Email/username and password are required.';
       return;
     }
 
-    const { error } = await signInWithPassword(identifier, password);
-    if (error) {
-      status = error.message;
-      return;
-    }
+    busy = true;
+    try {
+      const { error } = await signInWithPassword(identifier, password);
+      if (error) {
+        status = error.message;
+        return;
+      }
 
-    status = 'Signed in with password.';
-    await goto(resolve('/app'));
+      status = 'Signed in with password.';
+      await goto(resolve('/app'));
+    } finally {
+      busy = false;
+    }
   }
 
   function toggleForgotPanel() {
@@ -79,26 +91,39 @@
   }
 
   async function sendPasswordReset() {
-    const { error } = await requestPasswordReset(resetEmail);
-    if (error) {
-      status = error.message;
-      return;
+    if (busy) return;
+    busy = true;
+    try {
+      const { error } = await requestPasswordReset(resetEmail);
+      if (error) {
+        status = error.message;
+        return;
+      }
+      status = 'Check your email for a password reset link.';
+      forgotPanelOpen = false;
+    } finally {
+      busy = false;
     }
-    status = 'Check your email for a password reset link.';
-    forgotPanelOpen = false;
   }
 
   async function magicLink() {
+    if (busy) return;
     if (!showMagicLinkButton) {
       status = 'Enter a valid email address (including a proper domain) to use a magic link.';
       return;
     }
 
-    const { error } = await signInWithMagicLink(trimmedIdentifier);
-    status = error ? error.message : 'Check your email for sign-in link.';
+    busy = true;
+    try {
+      const { error } = await signInWithMagicLink(trimmedIdentifier);
+      status = error ? error.message : 'Check your email for sign-in link.';
+    } finally {
+      busy = false;
+    }
   }
 
   async function signUp() {
+    if (busy) return;
     if (!identifier.trim()) {
       status = 'Email or username is required.';
       return;
@@ -109,33 +134,38 @@
       return;
     }
 
-    const { data, error } = await signUpWithPassword(identifier, password);
-    const providedEmail = identifier.trim().includes('@');
+    busy = true;
+    try {
+      const { data, error } = await signUpWithPassword(identifier, password);
+      const providedEmail = identifier.trim().includes('@');
 
-    if (error) {
-      status = error.message;
-      return;
+      if (error) {
+        status = error.message;
+        return;
+      }
+
+      // Demo data is sample content, not the user's own — drop it before the
+      // account starts syncing so we never push demo rows up.
+      if (get(isDemoMode)) {
+        await isDemoMode.disable();
+      }
+
+      // Supabase returns a session here when email confirmation isn't required
+      // (the common path for username-only signups). Treat that as logged-in
+      // and route to the dashboard; the setup wizard takes it from there.
+      if (data?.session) {
+        setupWizardPending.mark();
+        status = 'Account created.';
+        await goto(resolve('/app'));
+        return;
+      }
+
+      status = providedEmail
+        ? 'Account created. Check your email to confirm and sign in.'
+        : 'Account created. You can sign in with your username and password.';
+    } finally {
+      busy = false;
     }
-
-    // Demo data is sample content, not the user's own — drop it before the
-    // account starts syncing so we never push demo rows up.
-    if (get(isDemoMode)) {
-      await isDemoMode.disable();
-    }
-
-    // Supabase returns a session here when email confirmation isn't required
-    // (the common path for username-only signups). Treat that as logged-in
-    // and route to the dashboard; the setup wizard takes it from there.
-    if (data?.session) {
-      setupWizardPending.mark();
-      status = 'Account created.';
-      await goto(resolve('/app'));
-      return;
-    }
-
-    status = providedEmail
-      ? 'Account created. Check your email to confirm and sign in.'
-      : 'Account created. You can sign in with your username and password.';
   }
 
   function handleLoginSubmit(event: SubmitEvent) {
@@ -216,9 +246,9 @@
             autocomplete="current-password"
           />
         </label>
-        <button class="btn btn-primary" type="submit">Log in with password</button>
+        <button class="btn btn-primary" type="submit" disabled={busy}>Log in with password</button>
         {#if showMagicLinkButton}
-          <button class="btn btn-ghost" type="button" onclick={magicLink}>Email magic link</button>
+          <button class="btn btn-ghost" type="button" disabled={busy} onclick={magicLink}>Email magic link</button>
           <button
             class="link-button"
             type="button"
@@ -241,7 +271,7 @@
                   placeholder="you@example.com"
                 />
               </label>
-              <button class="btn btn-primary" type="button" onclick={sendPasswordReset}>
+              <button class="btn btn-primary" type="button" disabled={busy} onclick={sendPasswordReset}>
                 Send reset link
               </button>
             </div>
@@ -286,7 +316,7 @@
             autocomplete="new-password"
           />
         </label>
-        <button class="btn btn-primary" type="submit">Create account</button>
+        <button class="btn btn-primary" type="submit" disabled={busy}>Create account</button>
       </form>
     {/if}
 

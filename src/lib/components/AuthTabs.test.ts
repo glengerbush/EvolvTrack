@@ -157,3 +157,77 @@ describe('AuthTabs — forgot-password panel', () => {
     expect(h.requestPasswordResetMock).toHaveBeenCalledWith('bob@example.com');
   });
 });
+
+describe('AuthTabs — in-flight request guard (rate-limit protection)', () => {
+  let host: HTMLElement;
+  let component: ReturnType<typeof mount>;
+
+  beforeEach(() => {
+    h.signInWithPasswordMock.mockReset();
+    document.body.innerHTML = '<div id="host"></div>';
+    host = document.getElementById('host') as HTMLElement;
+    component = mount(AuthTabs, { target: host, props: { initialTab: 'login' } });
+    flushSync();
+  });
+
+  afterEach(() => {
+    unmount(component);
+  });
+
+  function identifierInput() {
+    return host.querySelector('input[autocomplete="username"]') as HTMLInputElement;
+  }
+
+  function passwordInput() {
+    return host.querySelector('input[autocomplete="current-password"]') as HTMLInputElement;
+  }
+
+  it('fires only one sign-in request even if the button is clicked repeatedly while one is pending', async () => {
+    // Hold the auth call open so the first request stays in flight across the
+    // extra clicks — this is the spam-click sequence that trips Supabase's rate
+    // limiter when the button isn't gated.
+    let resolveSignIn: (v: { error: null }) => void = () => {};
+    h.signInWithPasswordMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSignIn = resolve;
+      }),
+    );
+
+    typeInto(identifierInput(), 'alice@example.com');
+    typeInto(passwordInput(), 'hunter2');
+
+    const loginButton = findButton(host, 'Log in with password')!;
+    loginButton.click();
+    flushSync();
+
+    expect(loginButton.disabled).toBe(true);
+
+    // Impatient extra clicks while the first request is still pending.
+    loginButton.click();
+    loginButton.click();
+    flushSync();
+
+    expect(h.signInWithPasswordMock).toHaveBeenCalledTimes(1);
+
+    resolveSignIn({ error: null });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+  });
+
+  it('re-enables the button after a failed sign-in so the user can retry', async () => {
+    h.signInWithPasswordMock.mockResolvedValue({ error: { message: 'Invalid login credentials' } });
+
+    typeInto(identifierInput(), 'alice@example.com');
+    typeInto(passwordInput(), 'wrong');
+
+    const loginButton = findButton(host, 'Log in with password')!;
+    loginButton.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+
+    expect(loginButton.disabled).toBe(false);
+    expect(host.textContent).toContain('Invalid login credentials');
+  });
+});
