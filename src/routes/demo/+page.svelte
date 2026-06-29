@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
   import { isDemoMode } from '$lib/stores/demoStore';
-  import { authState, type AuthState } from '$lib/stores/authStore';
+  import { awaitSettledAuth } from '$lib/stores/authStore';
   import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
 
   // Dedicated, shareable demo entry point. Enabling demo mode reseeds the local
@@ -11,27 +11,11 @@
   // be hit by someone who already has real data — we confirm before wiping it.
   let cancelled = $state(false);
 
-  // Resolve the first settled (non-'loading') auth state. The static SPA reads
-  // the session asynchronously, so we wait rather than mis-read it as signed-out.
-  function settledAuth(): Promise<AuthState> {
-    return new Promise((resolve) => {
-      let done = false;
-      let unsub = () => {};
-      unsub = authState.subscribe((s) => {
-        if (done || s.kind === 'loading') return;
-        done = true;
-        resolve(s);
-        unsub();
-      });
-      if (done) unsub();
-    });
-  }
-
   async function hasDataToLose(): Promise<boolean> {
     // Demo data is disposable — reseeding over an existing demo is fine.
     if (get(isDemoMode)) return false;
     // A real synced account always has data worth protecting.
-    if ((await settledAuth()).kind === 'signed-in') return true;
+    if ((await awaitSettledAuth()).kind === 'signed-in') return true;
     // Signed-out: only local-only data is at risk.
     const [entries, prescriptions] = await Promise.all([getAllEntries(), getAllPrescriptions()]);
     return entries.length > 0 || prescriptions.length > 0;

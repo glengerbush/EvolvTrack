@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { isDemoMode } from '$lib/stores/demoStore';
+  import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
 
   async function continueOffline() {
     // Make sure demo data isn't lingering from a previous visit before
@@ -8,6 +10,22 @@
     await isDemoMode.disable();
     await goto('/app');
   }
+
+  // A returning user can still land here directly (bookmark, shared link, or
+  // typing the bare domain) even though the installed PWA opens at `/auth`.
+  // Route signed-in / demo / has-local-data visitors straight into the app
+  // rather than stranding them on the marketing page. The marketing markup is
+  // left always-rendered (no `{#if}`) so it stays prerendered for SEO and for
+  // genuinely new visitors.
+  onMount(() => {
+    let active = true;
+    void resolveAppEntry().then((enter) => {
+      if (active && enter) void goto('/app', { replaceState: true });
+    });
+    return () => {
+      active = false;
+    };
+  });
 </script>
 
 <div class="page">

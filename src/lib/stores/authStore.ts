@@ -1,4 +1,4 @@
-import { readable } from 'svelte/store';
+import { get, readable } from 'svelte/store';
 import type { User } from '@supabase/supabase-js';
 import { browser } from '$app/environment';
 import { supabase } from '$lib/auth/supabase';
@@ -45,3 +45,26 @@ export const authState = browser
       return () => sub.subscription.unsubscribe();
     })
   : readable<AuthState>({ kind: 'loading' });
+
+/**
+ * Resolve the first settled (non-`loading`) auth state. The static SPA reads the
+ * Supabase session asynchronously from IndexedDB on boot, so any code that needs
+ * to make a one-shot routing decision must wait rather than mis-read the initial
+ * `loading` state as signed-out.
+ */
+export function awaitSettledAuth(): Promise<AuthState> {
+  const current = get(authState);
+  if (current.kind !== 'loading') return Promise.resolve(current);
+
+  return new Promise((resolve) => {
+    let done = false;
+    let unsub = () => {};
+    unsub = authState.subscribe((s) => {
+      if (done || s.kind === 'loading') return;
+      done = true;
+      resolve(s);
+      unsub();
+    });
+    if (done) unsub();
+  });
+}

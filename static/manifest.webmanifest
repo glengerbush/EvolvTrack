@@ -2,7 +2,7 @@
   "_comment": "background_color + theme_color must match --surface-soft in src/lib/styles/tokens.css. Update both files together.",
   "name": "EvolvTrack",
   "short_name": "EvolvTrack",
-  "start_url": "/",
+  "start_url": "/auth",
   "display": "standalone",
   "background_color": "#d8e2cb",
   "theme_color": "#d8e2cb",
