@@ -12,8 +12,14 @@ import { shouldEnterApp } from './appEntry';
  * asynchronously from IndexedDB on boot, so reading it eagerly would mis-classify
  * a returning user as signed-out. Only probes the local DB when it actually
  * matters (a no-account, non-demo visitor), keeping the fast paths cheap.
+ *
+ * `honorDemo` (default true) controls whether an active demo alone triggers
+ * entry — see `shouldEnterApp` for why `/` passes `false`. Regardless of
+ * `honorDemo`, an active demo still skips the local-data probe: demo mode
+ * reseeds the same IndexedDB tables, so without this a demo visitor's seeded
+ * rows would be misread as "real returning-user data" and redirect anyway.
  */
-export async function resolveAppEntry(): Promise<boolean> {
+export async function resolveAppEntry(honorDemo: boolean = true): Promise<boolean> {
   const isDemo = get(isDemoMode);
   const auth = await awaitSettledAuth();
   const hasLocalData =
@@ -22,5 +28,5 @@ export async function resolveAppEntry(): Promise<boolean> {
           (rows) => rows.length > 0,
         )
       : false;
-  return shouldEnterApp(auth.kind, isDemo, hasLocalData);
+  return shouldEnterApp(auth.kind, isDemo, hasLocalData, honorDemo);
 }

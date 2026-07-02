@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { onDestroy } from 'svelte';
+  import { afterNavigate, goto } from '$app/navigation';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
 
@@ -13,18 +13,29 @@
 
   // A returning user can still land here directly (bookmark, shared link, or
   // typing the bare domain) even though the installed PWA opens at `/auth`.
-  // Route signed-in / demo / has-local-data visitors straight into the app
-  // rather than stranding them on the marketing page. The marketing markup is
-  // left always-rendered (no `{#if}`) so it stays prerendered for SEO and for
+  // Route signed-in / has-local-data visitors straight into the app rather
+  // than stranding them on the marketing page. The marketing markup is left
+  // always-rendered (no `{#if}`) so it stays prerendered for SEO and for
   // genuinely new visitors.
-  onMount(() => {
-    let active = true;
-    void resolveAppEntry().then((enter) => {
+  //
+  // Does NOT honor demo mode (`resolveAppEntry(false)`): unlike `/auth` — the
+  // PWA `start_url`, only reachable by relaunching an installed icon — this
+  // page is reachable by plain browsing, where a leftover demo flag from an
+  // earlier visit shouldn't hijack the marketing page.
+  //
+  // Only do this on a genuine cold start (`navigation.type === 'enter'`, i.e.
+  // the app just hydrated) — not on back/forward navigation within an
+  // already-running session. Otherwise swiping back from `/app` to leave the
+  // demo would immediately bounce the visitor right back into it.
+  let active = true;
+  onDestroy(() => {
+    active = false;
+  });
+  afterNavigate((navigation) => {
+    if (navigation.type !== 'enter') return;
+    void resolveAppEntry(false).then((enter) => {
       if (active && enter) void goto('/app', { replaceState: true });
     });
-    return () => {
-      active = false;
-    };
   });
 </script>
 

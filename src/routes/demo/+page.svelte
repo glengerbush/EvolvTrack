@@ -34,7 +34,10 @@
         }
       }
       await isDemoMode.enable();
-      if (active) await goto('/app');
+      // Replace, not push: keeps this redirector out of the history stack so
+      // a back-navigation from /app lands on whatever preceded /demo (usually
+      // the homepage) instead of bouncing straight back through here.
+      if (active) await goto('/app', { replaceState: true });
     })();
     return () => {
       active = false;

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { onDestroy } from 'svelte';
+  import { afterNavigate, goto } from '$app/navigation';
   import AuthTabs from '$lib/components/AuthTabs.svelte';
   import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
 
@@ -10,14 +10,19 @@
   // device) is sent straight into the app instead of being shown a login form.
   // The session restores asynchronously from IndexedDB, so resolveAppEntry waits
   // for a settled auth state rather than mis-reading the initial loading state.
-  onMount(() => {
-    let active = true;
+  //
+  // Only do this on a genuine cold start (`navigation.type === 'enter'`) — not
+  // on back/forward navigation within an already-running session, or landing
+  // here via history navigation would immediately bounce back into the app.
+  let active = true;
+  onDestroy(() => {
+    active = false;
+  });
+  afterNavigate((navigation) => {
+    if (navigation.type !== 'enter') return;
     void resolveAppEntry().then((enter) => {
       if (active && enter) void goto('/app', { replaceState: true });
     });
-    return () => {
-      active = false;
-    };
   });
 </script>
 

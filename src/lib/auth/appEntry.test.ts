@@ -11,6 +11,17 @@ describe('shouldEnterApp', () => {
     expect(shouldEnterApp('signed-out', true, false)).toBe(true);
   });
 
+  it('does not treat demo mode as a reason to enter when honorDemo is false', () => {
+    // `/` passes honorDemo=false: a leftover demo flag from an earlier visit
+    // shouldn't hijack the marketing page the way it should for `/auth`.
+    expect(shouldEnterApp('signed-out', true, false, false)).toBe(false);
+  });
+
+  it('still enters for signed-in or has-local-data even when honorDemo is false', () => {
+    expect(shouldEnterApp('signed-in', true, false, false)).toBe(true);
+    expect(shouldEnterApp('signed-out', false, true, false)).toBe(true);
+  });
+
   it('sends signed-out users with local data into the app (returning offline user)', () => {
     expect(shouldEnterApp('signed-out', false, true)).toBe(true);
   });
