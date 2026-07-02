@@ -55,6 +55,7 @@
     settings: 0,
   });
   let suppressNextHashChange = false;
+  let initialHashFilled = false;
 
   $effect(() => {
     const nextHash = `#${activeTab}`;
@@ -62,6 +63,17 @@
     // Preserve an in-page FAQ deep-link fragment (#faq-…) on the Info tab so it
     // isn't clobbered before the Info tab scrolls to the question on load.
     if (activeTab === "info" && window.location.hash.slice(1).startsWith("faq-")) return;
+    if (!initialHashFilled) {
+      initialHashFilled = true;
+      // A bare `/app` load has no hash yet; fill in the default tab via
+      // replaceState so it doesn't push a history entry (setting
+      // `location.hash` directly, like a real tab switch below, always
+      // pushes) — otherwise landing on `/app` leaves an extra `/app` ->
+      // `/app#health` step to click through on the way back. replaceState
+      // doesn't fire `hashchange`, so there's nothing to suppress here.
+      history.replaceState(history.state, "", nextHash);
+      return;
+    }
     suppressNextHashChange = true;
     window.location.hash = activeTab;
   });
