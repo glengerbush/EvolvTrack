@@ -211,16 +211,6 @@ export function buildChartModel(
     endDate = addDays(endDate, 7);
   }
 
-  // For fixed-window modes, make sure the date span is at least one window
-  // wide so the viewport is always "full". Extend backward so today stays at
-  // the right edge.
-  if (xRange !== 'all') {
-    const span = daysBetween(startDate, endDate) + 1;
-    if (span < xRange.visibleDays) {
-      startDate = addDays(startDate, -(xRange.visibleDays - span));
-    }
-  }
-
   const dateKeys = enumerateDateKeys(startDate, endDate);
   const totalDays = dateKeys.length;
   const daySpan = Math.max(daysBetween(startDate, endDate), 1);

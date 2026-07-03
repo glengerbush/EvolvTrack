@@ -45,9 +45,6 @@
 
   const hiddenGraphSeries = new SvelteSet<GraphSeriesKey>();
 
-  // Desktop offers a range selector; mobile is locked to one week (the selector
-  // is hidden and the range forced regardless of the saved choice) so the narrow
-  // viewport never tries to cram a quarter of a year onto the screen.
   type XRangePreset = '1w' | '4w' | '12w' | 'all';
   const X_RANGE_PRESETS: { key: XRangePreset; label: string; range: ChartXRange }[] = [
     { key: '1w', label: '1W', range: { visibleDays: 7 } },
@@ -55,25 +52,9 @@
     { key: '12w', label: '12W', range: { visibleDays: 84 } },
     { key: 'all', label: 'All', range: 'all' },
   ];
-  const ONE_WEEK_RANGE: ChartXRange = { visibleDays: 7 };
   let xRangeChoice = $state<XRangePreset>('1w');
 
-  // Mirror the ≤640px card breakpoint used elsewhere; drives both hiding the
-  // selector and forcing the one-week range on mobile.
-  let isNarrowView = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 640px)');
-    isNarrowView = mq.matches;
-    const onChange = () => (isNarrowView = mq.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  });
-
-  const xRange = $derived(
-    isNarrowView
-      ? ONE_WEEK_RANGE
-      : X_RANGE_PRESETS.find((p) => p.key === xRangeChoice)?.range ?? 'all',
-  );
+  const xRange = $derived(X_RANGE_PRESETS.find((p) => p.key === xRangeChoice)?.range ?? 'all');
 
   async function selectXRange(next: XRangePreset) {
     if (next === xRangeChoice) return;
@@ -616,21 +597,19 @@
           active={isEditingLegend}
           onclick={() => (isEditingLegend = !isEditingLegend)}
         />
-        {#if !isNarrowView}
-          <div class="x-range-selector" role="group" aria-label="Graph time range">
-            {#each X_RANGE_PRESETS as preset (preset.key)}
-              <button
-                type="button"
-                class="x-range-btn"
-                class:active={xRangeChoice === preset.key}
-                aria-pressed={xRangeChoice === preset.key}
-                onclick={() => selectXRange(preset.key)}
-              >
-                {preset.label}
-              </button>
-            {/each}
-          </div>
-        {/if}
+        <div class="x-range-selector" role="group" aria-label="Graph time range">
+          {#each X_RANGE_PRESETS as preset (preset.key)}
+            <button
+              type="button"
+              class="x-range-btn"
+              class:active={xRangeChoice === preset.key}
+              aria-pressed={xRangeChoice === preset.key}
+              onclick={() => selectXRange(preset.key)}
+            >
+              {preset.label}
+            </button>
+          {/each}
+        </div>
       </div>
       <div class="graph-legend" aria-label="Graph legend" bind:this={legendRegion}>
         {#each legendItems as item (item.key)}
@@ -1275,12 +1254,10 @@
     margin-bottom: 0.35rem;
   }
 
-  /* The Overview range selector can be wider than the room left on one line at
-   * smaller desktop widths; let it wrap below rather than push the card sideways
-   * (margin-left:auto keeps it right-aligned on its own line). */
+  /* Keep the Overview range selector on the same line as the chip/pencil even
+   * at narrow desktop widths, rather than wrapping it below. */
   .chart-card .chip-row {
-    flex-wrap: wrap;
-    row-gap: 0.4rem;
+    flex-wrap: nowrap;
   }
 
   .x-range-selector {

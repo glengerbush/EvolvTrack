@@ -223,6 +223,29 @@ describe('buildChartModel — skipped-only date does not extend the chart', () =
   });
 });
 
+describe('buildChartModel — fixed xRange wider than the dataset', () => {
+  it('does not pad the date range backward to fill a window bigger than the data', () => {
+    const rows = [
+      row({ date: iso('2026-05-01'), weight: '180' }),
+      row({ date: iso('2026-05-10'), weight: '178' }),
+    ];
+    // 10 days of data, but a 12-week (84-day) window selected.
+    const model = buildChartModel(
+      rows,
+      'lbs',
+      {},
+      180,
+      iso('2026-05-10'),
+      new SvelteSet<GraphSeriesKey>(),
+      { visibleDays: 84 },
+    );
+    // The first rendered date tick is always the chart's start date; it should
+    // be the earliest data date, not extended 74 days further back to fill
+    // the selected window.
+    expect(model.dateTicks[0]?.date).toBe(iso('2026-05-01'));
+  });
+});
+
 describe('buildChartModel — empty input', () => {
   it('returns hasAnyData: false, no markers, no weight points', () => {
     const model = build([]);
