@@ -628,7 +628,7 @@ This number is best used as a trend line: a way to compare your levels day to da
         <ul>
           <li>
             <strong>With E2EE on:</strong> Your data is encrypted on your device
-            before it is sent to our servres, so the server only stores encrypted data.
+            before it is sent to our servers, so the server only stores encrypted data.
             Nobody — not even us — can read your records. The EvolvTrack source
             code is <a href="https://github.com/glengerbush/EvolvTrack" target="_blank" rel="noopener">public</a> so this can be independently audited.
           </li>
@@ -647,14 +647,14 @@ This number is best used as a trend line: a way to compare your levels day to da
       <div class="faq-answer">
         <p>
           You only have a passphrase if you enabled E2EE. It is separate from your login password. 
-          With E2EE on,your passphrase and your recovery code are the only two ways to unlock your
+          With E2EE on, your passphrase and your recovery code are the only two ways to unlock your
           encrypted data, neither is ever sent to the server. You can use the
           recovery code from the unlock screen to set a new passphrase if you
           forget the old one.
         </p>
         <p>
           <strong>If you lose both your passphrase and your recovery code, your
-          encrypted data is unrecoverable.</strong> No one(including us!) can decrypt
+          encrypted data is unrecoverable.</strong> No one (including us!) can decrypt
           it.
         </p>
       </div>
@@ -680,9 +680,8 @@ This number is best used as a trend line: a way to compare your levels day to da
           doesn't carry into your future data.</li>
         </ul>
         <p>
-          You can also rotate the recovery code or the encryption key at any
-          time from Settings, useful if you think a code or device may have
-          been seen.
+          Changing your encryption passphrase from Settings rotates both the
+          encryption key and recovery code.
         </p>
       </div>
     </details>

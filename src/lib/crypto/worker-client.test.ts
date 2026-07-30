@@ -9,6 +9,7 @@ class FakeWorker {
   static instances: FakeWorker[] = [];
   posted: Posted[] = [];
   onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
   terminated = false;
 
   constructor(public url: unknown, public options?: WorkerOptions) {
@@ -26,6 +27,10 @@ class FakeWorker {
   // Helper for tests — not part of the real Worker API.
   respond(message: { id: string; ok: true; data: unknown } | { id: string; ok: false; error: string }) {
     this.onmessage?.({ data: message } as MessageEvent);
+  }
+
+  fail(message = 'worker crashed') {
+    this.onerror?.({ message } as ErrorEvent);
   }
 }
 
@@ -122,6 +127,22 @@ describe('cryptoWorker.call', () => {
 
     await expect(p1).resolves.toEqual({ keyB64: 'A' });
     await expect(p2).resolves.toEqual({ keyB64: 'B' });
+  });
+
+  it('rejects every pending call when the worker crashes', async () => {
+    const { cryptoWorker } = await import('./worker-client');
+
+    const p1 = cryptoWorker.call('derive-key', {
+      passphrase: 'a',
+      saltB64: 'SALT',
+      iterations: 600_000,
+    });
+    const p2 = cryptoWorker.call('encrypt', { keyB64: 'K', plaintext: 'secret' });
+
+    FakeWorker.instances[0].fail('worker initialization failed');
+
+    await expect(p1).rejects.toThrow('worker initialization failed');
+    await expect(p2).rejects.toThrow('worker initialization failed');
   });
 });
 

@@ -2,10 +2,6 @@
 
 Local-first GLP-1 tracking app with offline-first UX and E2EE capable cloud sync. Installable as a PWA.
 
-# Upcoming features:
-Mobile friendly interface 
-
-
 ## Setup
 Prerequisite: Docker must be installed and runnable without `sudo`.
 
@@ -84,8 +80,6 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
   `migrating_to_*`).
   - `e2ee-key-rotation.test.ts` (+ runtime in `e2ee-migration.ts`) — rotates the
   per-account encryption key without losing history.
-  - `recovery-code-rotation.ts` — rotates the recovery code used to recover an
-  account when the passphrase is lost.
   - `wrapped-keys.ts` — wraps the E2EE data key under both the passphrase-derived
   key and the recovery-code-derived key, persisted server-side in the
   `wrapped_keys` table.
@@ -172,4 +166,3 @@ For a local production deploy, run the same commands from the repository root af
   | keyVersion                 | per row in Dexie table `encrypted` |
   | protocol_version<br> schema_version<br> protocolVersion<br> schemaVersion| rows inPostgres tables:<br> `sync_changes_encrypted`<br> `sync_changes_plain`<br> and Dexie: `migrationBackfill`|
   | encryption_version<br> encryptionVersion| rows inPostgres tables:<br> `sync_changes_encrypted`<br> and Dexie: `migrationBackfill`|
-

@@ -9,6 +9,7 @@
   } from '$lib/auth/supabase';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { setupWizardPending } from '$lib/stores/setupWizardStore';
+  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
 
   let { initialTab = 'login' }: { initialTab?: 'login' | 'signup' } = $props();
@@ -30,6 +31,11 @@
   // response lands — which is exactly what trips "Rate limit exceeded". One
   // in-flight request at a time keeps us under that ceiling.
   let busy = $state(false);
+  let hydrated = $state(false);
+
+  onMount(() => {
+    hydrated = true;
+  });
 
   function isLikelyEmailAddress(value: string) {
     if (!value || value.length > 254 || /\s/.test(value)) return false;
@@ -219,7 +225,7 @@
     </div>
 
     {#if activeTab === 'login'}
-      <form class="auth-form" onsubmit={handleLoginSubmit}>
+      <form class="auth-form" method="post" onsubmit={handleLoginSubmit}>
         <label>
           <span class="label-row">
             Email or username
@@ -246,7 +252,9 @@
             autocomplete="current-password"
           />
         </label>
-        <button class="btn btn-primary" type="submit" disabled={busy}>Log in with password</button>
+        <button class="btn btn-primary" type="submit" disabled={!hydrated || busy}>
+          Log in with password
+        </button>
         {#if showMagicLinkButton}
           <button class="btn btn-ghost" type="button" disabled={busy} onclick={magicLink}>Email magic link</button>
           <button
@@ -279,7 +287,7 @@
         {/if}
       </form>
     {:else}
-      <form class="auth-form" onsubmit={handleSignUpSubmit}>
+      <form class="auth-form" method="post" onsubmit={handleSignUpSubmit}>
         <label>
           <span class="label-row">
             Email or username
@@ -316,7 +324,7 @@
             autocomplete="new-password"
           />
         </label>
-        <button class="btn btn-primary" type="submit" disabled={busy}>Create account</button>
+        <button class="btn btn-primary" type="submit" disabled={!hydrated || busy}>Create account</button>
       </form>
     {/if}
 

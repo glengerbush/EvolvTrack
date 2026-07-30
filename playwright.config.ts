@@ -1,6 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const SYSTEM_CHROMIUM = process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/usr/bin/chromium';
+const E2E_PORT = process.env.PLAYWRIGHT_PORT ?? '4173';
+const E2E_BASE_URL = `http://127.0.0.1:${E2E_PORT}`;
 
 export default defineConfig({
   testDir: 'tests',
@@ -9,7 +11,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: E2E_BASE_URL,
     trace: 'on-first-retry'
   },
   projects: [
@@ -19,8 +21,8 @@ export default defineConfig({
     }
   ],
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173',
+    command: `npm run dev -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
+    url: E2E_BASE_URL,
     reuseExistingServer: !process.env.CI,
     stdout: 'pipe',
     stderr: 'pipe'

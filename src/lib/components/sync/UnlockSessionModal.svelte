@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import { derivePassphraseKek, unwrapDek } from '$lib/crypto/e2ee';
   import { setSessionKey } from '$lib/sync/session-key';
   import {
@@ -41,7 +42,7 @@
     try {
       await logoutAndClearLocalData();
     } finally {
-      window.location.href = '/auth';
+      window.location.href = resolve('/auth');
     }
   }
 

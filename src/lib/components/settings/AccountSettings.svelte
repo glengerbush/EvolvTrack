@@ -21,7 +21,6 @@
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
   import ChangePasswordModal from '$lib/components/settings/ChangePasswordModal.svelte';
-  import ChangeIdentityModal from '$lib/components/settings/ChangeIdentityModal.svelte';
   import ChangePassphraseModal from '$lib/components/settings/ChangePassphraseModal.svelte';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
   import { activeColorMode, activeTabThemes, activeTheme, colorModePreference } from '$lib/stores/themeStore';
@@ -30,7 +29,11 @@
   import { isDemoMode } from '$lib/stores/demoStore';
   import { authState } from '$lib/stores/authStore';
   import { clearAllData } from '$lib/domain/repo';
-  import { deleteAccountAndClearLocalData, displayUserIdentifier } from '$lib/auth/supabase';
+  import {
+    changeLoginPassword,
+    deleteAccountAndClearLocalData,
+    displayUserIdentifier,
+  } from '$lib/auth/supabase';
   import { downloadBackup } from '$lib/importExport/backup';
   import { downloadOdsSpreadsheet } from '$lib/importExport/spreadsheet';
   import {
@@ -54,7 +57,7 @@
   /** Optional whitelist of cards to render. When null (the default), every
    *  card is shown. Used by the admin settings surface, which only wants
    *  Appearance and Change password. */
-  type Section = 'appearance' | 'units' | 'import' | 'e2ee' | 'password' | 'identity' | 'license' | 'danger';
+  type Section = 'appearance' | 'units' | 'import' | 'e2ee' | 'password' | 'license' | 'danger';
   let { only = null }: { only?: Section[] | null } = $props();
   const showSection = (name: Section) => !only || only.includes(name);
 
@@ -84,9 +87,8 @@
   let disableModalOpen = $state(false);
   let disableError = $state<string | null>(null);
   let passwordModalOpen = $state(false);
+  let passwordBusy = $state(false);
   let passwordError = $state<string | null>(null);
-  let identityModalOpen = $state(false);
-  let identityError = $state<string | null>(null);
   let passphraseModalOpen = $state(false);
   let passphraseError = $state<string | null>(null);
   let status = $state('');
@@ -267,27 +269,24 @@
     passwordError = null;
   }
 
-  function updatePassword(_currentPassword: string, _newPassword: string) {
-    // TODO: wire to the auth backend. Until then, surface a clear status and
-    // keep the modal open so the entered values aren't silently lost.
-    passwordError = 'Password update workflow is not wired yet.';
-    status = 'Password update workflow is not wired yet.';
-  }
-
-  function openIdentityModal() {
-    identityError = null;
-    identityModalOpen = true;
-  }
-
-  function cancelIdentityModal() {
-    identityModalOpen = false;
-    identityError = null;
-  }
-
-  function updateIdentity(_username: string, _email: string) {
-    // TODO: wire to the auth backend (see updatePassword).
-    identityError = 'Username/email update workflow is not wired yet.';
-    status = 'Username/email update workflow is not wired yet.';
+  async function updatePassword(currentPassword: string, newPassword: string) {
+    passwordBusy = true;
+    passwordError = null;
+    try {
+      const { error } = await changeLoginPassword(currentPassword, newPassword);
+      if (error) {
+        passwordError = error.message;
+        status = error.message;
+        return;
+      }
+      passwordModalOpen = false;
+      status = 'Login password updated.';
+    } catch (error) {
+      passwordError = errorMessage(error);
+      status = passwordError;
+    } finally {
+      passwordBusy = false;
+    }
   }
 
   function openPassphraseModal() {
@@ -465,7 +464,7 @@
     try {
       await deleteAccountAndClearLocalData();
       // The cleanup wipes local state; navigate to the landing page.
-      window.location.href = '/';
+      window.location.href = resolve('/');
     } catch (error) {
       status = `Could not delete account: ${errorMessage(error)}`;
     } finally {
@@ -747,9 +746,9 @@
   </div>
   {/if}
 
-  {#if (showSection('password') || showSection('identity')) && !$isDemoMode}
+  {#if showSection('password') && !$isDemoMode && isSignedIn}
     <div class="card-wrap">
-      <h2>Change login details</h2>
+      <h2>Change login password</h2>
       <div class="panel">
         {#if currentIdentifier}
           <p class="toggle-hint">
@@ -757,9 +756,6 @@
           </p>
         {/if}
         <div class="login-detail-actions">
-          <button class="btn btn-primary" type="button" onclick={openIdentityModal}>
-            Change username / email
-          </button>
           <button class="btn btn-primary" type="button" onclick={openPasswordModal}>
             Change login password
           </button>
@@ -768,7 +764,7 @@
     </div>
   {/if}
 
-  {#if showSection('license') && !$isDemoMode}
+  {#if showSection('license') && !$isDemoMode && isSignedIn}
     <LicenseSettings />
   {/if}
 
@@ -829,18 +825,10 @@
 
 {#if passwordModalOpen}
   <ChangePasswordModal
+    busy={passwordBusy}
     error={passwordError}
     onConfirm={updatePassword}
     onCancel={cancelPasswordModal}
-  />
-{/if}
-
-{#if identityModalOpen}
-  <ChangeIdentityModal
-    {currentIdentifier}
-    error={identityError}
-    onConfirm={updateIdentity}
-    onCancel={cancelIdentityModal}
   />
 {/if}
 

@@ -31,6 +31,13 @@ class CryptoWorkerClient {
 
       pending.reject(new Error(event.data.error));
     };
+    this.worker.onerror = (event: ErrorEvent) => {
+      const error = new Error(event.message || 'Crypto worker failed.');
+      for (const pending of this.pending.values()) {
+        pending.reject(error);
+      }
+      this.pending.clear();
+    };
   }
 
   call<T extends WorkerAction>(type: T, payload: WorkerPayloadMap[T]): Promise<WorkerResultMap[T]> {

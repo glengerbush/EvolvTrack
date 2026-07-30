@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { goto } from "$app/navigation";
+  import { goto, replaceState as replaceNavigationState } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { activeColorMode, activeTabThemes, activeTheme } from "$lib/stores/themeStore";
   import { drugPalettes } from "$lib/theme/dashboardTheme";
@@ -71,7 +71,7 @@
       // pushes) — otherwise landing on `/app` leaves an extra `/app` ->
       // `/app#health` step to click through on the way back. replaceState
       // doesn't fire `hashchange`, so there's nothing to suppress here.
-      history.replaceState(history.state, "", nextHash);
+      replaceNavigationState(resolve('/app') + nextHash, history.state);
       return;
     }
     suppressNextHashChange = true;
@@ -174,7 +174,7 @@
     try {
       await logoutAndClearLocalData();
     } finally {
-      window.location.href = "/auth";
+      window.location.href = resolve('/auth');
     }
   }
 

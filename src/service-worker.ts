@@ -3,13 +3,20 @@
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
 
-import { version } from '$service-worker';
+import { base, version } from '$service-worker';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 
 const CACHE = `evolvtrack-${version}`;
-const APP_SHELL = '/';
-const PRECACHE = [APP_SHELL, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/logo.svg', '/favicon.svg'];
+const APP_SHELL = `${base}/`;
+const PRECACHE = [
+  APP_SHELL,
+  `${base}/manifest.webmanifest`,
+  `${base}/icon-192.png`,
+  `${base}/icon-512.png`,
+  `${base}/logo.svg`,
+  `${base}/favicon.svg`,
+];
 
 sw.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)));
@@ -44,7 +51,7 @@ sw.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (url.pathname.startsWith('/_app/immutable/')) {
+  if (url.pathname.startsWith(`${base}/_app/immutable/`)) {
     event.respondWith(cacheFirst(request));
     return;
   }

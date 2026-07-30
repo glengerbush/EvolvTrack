@@ -1,6 +1,10 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
-  goto('/app#medication', { replaceState: true });
+  import { resolve } from '$app/paths';
+  import { onMount } from 'svelte';
+
+  onMount(() => {
+    window.location.replace(resolve('/app') + '#medication');
+  });
 </script>
 
 <svelte:head>

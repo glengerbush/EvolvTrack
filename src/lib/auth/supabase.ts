@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { resolve } from '$app/paths';
 import { db } from '$lib/db/schema';
 import { durableClear, durableGet, durableRemove, durableSet } from '$lib/db/durableKv';
 import { clearSession } from '$lib/sync/session-key';
@@ -111,7 +112,10 @@ export async function signInWithPassword(identifier: string, password: string) {
 }
 
 export async function signInWithMagicLink(email: string) {
-  return supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin + '/auth/callback' } });
+  return supabase.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: new URL(resolve('/auth/callback'), window.location.origin).href },
+  });
 }
 
 /**
@@ -128,7 +132,7 @@ export async function requestPasswordReset(
     return { error: { message: 'Password reset requires a real email address.' } };
   }
   const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
-    redirectTo: window.location.origin + '/auth/reset',
+    redirectTo: new URL(resolve('/auth/reset'), window.location.origin).href,
   });
   return { error };
 }
@@ -143,7 +147,7 @@ export async function signUpWithPassword(identifier: string, password: string) {
     email: authEmail,
     password,
     options: {
-      emailRedirectTo: window.location.origin + '/auth/callback',
+      emailRedirectTo: new URL(resolve('/auth/callback'), window.location.origin).href,
       data: {
         username: username.trim(),
         signupIdentifier: normalizedIdentifier,
@@ -151,6 +155,33 @@ export async function signUpWithPassword(identifier: string, password: string) {
       }
     }
   });
+}
+
+/**
+ * Reauthenticates with the existing password before updating it. Requiring the
+ * current credential protects an unlocked or unattended device from silently
+ * taking over the account.
+ */
+export async function changeLoginPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ error: { message: string } | null }> {
+  const { data, error: userError } = await supabase.auth.getUser();
+  const email = data.user?.email;
+  if (userError || !email) {
+    return { error: { message: 'You must be signed in.' } };
+  }
+
+  const { error: passwordError } = await supabase.auth.signInWithPassword({
+    email,
+    password: currentPassword,
+  });
+  if (passwordError) {
+    return { error: { message: 'Current password did not match.' } };
+  }
+
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  return { error };
 }
 
 /**
@@ -162,7 +193,11 @@ export async function signUpWithPassword(identifier: string, password: string) {
 export async function deleteAccountAndClearLocalData() {
   const { error } = await supabase.rpc('delete_self');
   if (error) throw new Error(error.message);
-  await logoutAndClearLocalData();
+  // `delete_self` removes the auth user and invalidates this access token.
+  // Calling signOut afterward only sends the now-invalid token to `/logout`,
+  // producing a noisy 403. The server-side account is already gone; finish
+  // with the same local credential/data wipe used by logout.
+  await clearLocalAuthAndData();
 }
 
 export async function logoutAndClearLocalData() {
@@ -179,6 +214,10 @@ export async function logoutAndClearLocalData() {
     // Best-effort server signout.
   }
 
+  await clearLocalAuthAndData();
+}
+
+async function clearLocalAuthAndData() {
   clearSession();
 
   // Wipe the IndexedDB-backed auth store (Supabase session token + E2EE DEK).
@@ -234,8 +273,8 @@ export async function logoutAndClearLocalData() {
     }
   }
 
-  // Callers (AppShell/Dashboard handleLogout) follow this with
-  // `window.location.href = '/auth'`, which is the full reload that lets the
+  // Logout callers follow this with a full reload to the auth route, which
+  // lets the
   // boot guard wipe IndexedDB before any liveQuery subscribes again.
 }
 

@@ -35,7 +35,7 @@
     try {
       await logoutAndClearLocalData();
     } finally {
-      window.location.href = '/auth';
+      window.location.href = resolve('/auth');
     }
   }
 </script>

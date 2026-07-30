@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
+  import { resolve } from '$app/paths';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { awaitSettledAuth } from '$lib/stores/authStore';
   import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
@@ -37,7 +38,7 @@
       // Replace, not push: keeps this redirector out of the history stack so
       // a back-navigation from /app lands on whatever preceded /demo (usually
       // the homepage) instead of bouncing straight back through here.
-      if (active) await goto('/app', { replaceState: true });
+      if (active) await goto(resolve('/app'), { replaceState: true });
     })();
     return () => {
       active = false;
@@ -53,8 +54,8 @@
   {#if cancelled}
     <p class="demo-msg">Demo cancelled — your data is untouched.</p>
     <nav class="demo-actions">
-      <a class="btn btn-primary" href="/app">Go to the app</a>
-      <a class="btn btn-ghost" href="/">Back home</a>
+      <a class="btn btn-primary" href={resolve('/app')}>Go to the app</a>
+      <a class="btn btn-ghost" href={resolve('/')}>Back home</a>
     </nav>
   {:else}
     <p class="demo-msg" role="status">Loading the demo…</p>

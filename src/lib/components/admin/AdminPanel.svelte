@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { resolve } from '$app/paths';
   import { supabase } from '$lib/auth/supabase';
   import {
     adminChangeTier,
@@ -264,7 +265,7 @@
     <p>Checking access…</p>
   {:else if sessionExpired}
     <p class="error">
-      Your session has expired. <a href="/auth">Sign in again</a> to manage licenses.
+      Your session has expired. <a href={resolve('/auth')}>Sign in again</a> to manage licenses.
     </p>
   {:else if initError}
     <p class="error">{initError}</p>

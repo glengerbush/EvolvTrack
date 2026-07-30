@@ -182,8 +182,6 @@ declare
   v_bytes bytea;
   v_segment text;
   v_segments text[] := array[]::text[];
-  v_seg_idx int;
-  v_i int;
 begin
   for v_seg_idx in 1..3 loop
     v_bytes := extensions.gen_random_bytes(5);
@@ -543,7 +541,6 @@ declare
   v_code text;
   v_hmac text;
   v_id uuid;
-  v_i int;
   v_attempts int;
 begin
   if not private.is_admin(v_uid) then

@@ -1,14 +1,21 @@
 import { browser, dev } from '$app/environment';
+import { base } from '$app/paths';
 
 export function registerServiceWorker() {
   if (!browser || !('serviceWorker' in navigator)) return;
 
   if (dev) {
-    void removeDevelopmentServiceWorkers();
+    void removeDevelopmentServiceWorkers().catch((cause) => {
+      console.warn('Failed to remove development service-worker state:', cause);
+    });
     return;
   }
 
-  void navigator.serviceWorker.register('/service-worker.js', { type: 'module' });
+  void navigator.serviceWorker
+    .register(`${base}/service-worker.js`, { type: 'module' })
+    .catch((cause) => {
+      console.warn('Service-worker registration failed:', cause);
+    });
 }
 
 async function removeDevelopmentServiceWorkers() {

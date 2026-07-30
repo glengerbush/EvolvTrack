@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
   import { page } from '$app/state';
+  import { resolve } from '$app/paths';
   import { registerServiceWorker } from '$lib/utils/pwa';
   import { initInstallPrompt } from '$lib/stores/pwaInstallStore';
   import { startSyncOrchestrator } from '$lib/sync/sync-orchestrator';
@@ -17,7 +18,7 @@
 
   // The sync gate (lock / migration modals) is for app users — hide it on
   // admin routes.
-  const showSyncGate = $derived(!page.url.pathname.startsWith('/admin'));
+  const showSyncGate = $derived(!page.url.pathname.startsWith(resolve('/admin')));
 
   // Mirror the resolved color mode onto <html> so global CSS / browser-native
   // UI (scrollbars, form controls) follows the active theme.
@@ -36,9 +37,9 @@
     if ($authState.kind !== 'signed-out-expired') return;
     if (typeof window === 'undefined') return;
     const path = page.url.pathname;
-    if (path.startsWith('/auth')) return;
-    if (path === '/') return;
-    window.location.assign('/auth');
+    if (path.startsWith(resolve('/auth'))) return;
+    if (path === resolve('/')) return;
+    window.location.assign(resolve('/auth'));
   });
 
   onMount(() => {

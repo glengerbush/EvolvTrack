@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { afterNavigate, goto } from '$app/navigation';
+  import { resolve } from '$app/paths';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
 
@@ -8,7 +9,7 @@
     // Make sure demo data isn't lingering from a previous visit before
     // dropping the user into the real, empty app.
     await isDemoMode.disable();
-    await goto('/app');
+    await goto(resolve('/app'));
   }
 
   // A returning user can still land here directly (bookmark, shared link, or
@@ -34,7 +35,7 @@
   afterNavigate((navigation) => {
     if (navigation.type !== 'enter') return;
     void resolveAppEntry(false).then((enter) => {
-      if (active && enter) void goto('/app', { replaceState: true });
+      if (active && enter) void goto(resolve('/app'), { replaceState: true });
     });
   });
 </script>
@@ -42,12 +43,12 @@
 <div class="page">
   <div class="container">
     <header class="topbar">
-      <a href="/" class="brand">
+      <a href={resolve('/')} class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
         EvolvTrack
       </a>
       <nav class="top-actions">
-        <a class="btn btn-primary" href="/auth">Log In / Sign Up</a>
+        <a class="btn btn-primary" href={resolve('/auth')}>Log In / Sign Up</a>
       </nav>
     </header>
 
@@ -56,7 +57,7 @@
         <div class="chart-overlay">
           <h1>Your progress should belong to you.</h1>
           <p class="lede">Track dose, shot location, medication levels, and weight trends — offline first, end-to-end encrypted when you sync.</p>
-          <a class="btn btn-demo-hero" href="/demo">
+          <a class="btn btn-demo-hero" href={resolve('/demo')}>
             Try the live demo →
           </a>
         </div>
@@ -100,7 +101,7 @@
         <article class="promise">
           <h3>A human reads every support email</h3>
           <p>
-            No no canned replies. We are a small team and we will personally respond, just drop us a line at support@evolvtrack.com.
+            No canned replies. We are a small team and we will personally respond, just drop us a line at support@evolvtrack.com.
           </p>
         </article>
 
@@ -135,11 +136,11 @@
           <div class="way-tag">Beta users: free for life</div>
           <h3>Synced across devices, optionally E2EE</h3>
           <p>
-            Sign up for to sync between phone, laptop,
+            Sign up to sync between phone, laptop,
             and tablet. Turn on end-to-end encryption and the server only
             ever sees ciphertext — even we can't read your records.
           </p>
-          <a class="btn btn-primary way-cta" href="/auth">Log In / Sign Up</a>
+          <a class="btn btn-primary way-cta" href={resolve('/auth')}>Log In / Sign Up</a>
         </article>
       </div>
     </section>
@@ -151,7 +152,7 @@
         empty app and start tracking your own.
       </p>
       <div class="bottom-buttons">
-        <a class="btn btn-primary" href="/demo">
+        <a class="btn btn-primary" href={resolve('/demo')}>
           Try the demo
         </a>
         <button type="button" class="btn btn-ghost" onclick={continueOffline}>
@@ -291,7 +292,6 @@
   }
   .section-lede {
     color: var(--muted);
-    max-width: 60ch;
     margin: 0 0 2rem;
     font-size: 1.05rem;
   }

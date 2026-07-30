@@ -22,14 +22,23 @@ export const authState = browser
   ? readable<AuthState>({ kind: 'loading' }, (set) => {
       let wasSignedIn = false;
 
-      void supabase.auth.getSession().then(({ data }) => {
-        if (data.session?.user) {
-          wasSignedIn = true;
-          set({ kind: 'signed-in', user: data.session.user });
-        } else {
+      void supabase.auth
+        .getSession()
+        .then(({ data }) => {
+          if (data.session?.user) {
+            wasSignedIn = true;
+            set({ kind: 'signed-in', user: data.session.user });
+          } else {
+            set({ kind: 'signed-out' });
+          }
+        })
+        .catch((cause) => {
+          // Supabase persists the browser session in IndexedDB. If that read is
+          // unavailable or corrupt, do not leave every route waiting forever
+          // in `loading`; fail closed and present the signed-out experience.
+          console.error('Failed to restore the authentication session:', cause);
           set({ kind: 'signed-out' });
-        }
-      });
+        });
 
       const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
         if (session?.user) {

@@ -9,6 +9,9 @@ const h = vi.hoisted(() => ({
   signUpMock: vi.fn(),
   signOutMock: vi.fn(),
   resetPasswordForEmailMock: vi.fn(),
+  getUserMock: vi.fn(),
+  updateUserMock: vi.fn(),
+  rpcMock: vi.fn(),
   dbDeleteMock: vi.fn(),
   dbCloseMock: vi.fn(),
   createClientMock: vi.fn(),
@@ -22,7 +25,10 @@ vi.mock('@supabase/supabase-js', () => {
       signUp: h.signUpMock,
       signOut: h.signOutMock,
       resetPasswordForEmail: h.resetPasswordForEmailMock,
+      getUser: h.getUserMock,
+      updateUser: h.updateUserMock,
     },
+    rpc: h.rpcMock,
   }));
   return { createClient: h.createClientMock };
 });
@@ -36,6 +42,8 @@ vi.mock('$lib/db/schema', () => ({
 
 import {
   WIPE_DB_ON_BOOT_KEY,
+  changeLoginPassword,
+  deleteAccountAndClearLocalData,
   logoutAndClearLocalData,
   requestPasswordReset,
   signInWithMagicLink,
@@ -55,6 +63,15 @@ beforeEach(() => {
   h.signOutMock.mockResolvedValue({ error: null });
   h.resetPasswordForEmailMock.mockReset();
   h.resetPasswordForEmailMock.mockResolvedValue({ data: {}, error: null });
+  h.getUserMock.mockReset();
+  h.getUserMock.mockResolvedValue({
+    data: { user: { email: 'alice@example.com' } },
+    error: null,
+  });
+  h.updateUserMock.mockReset();
+  h.updateUserMock.mockResolvedValue({ data: {}, error: null });
+  h.rpcMock.mockReset();
+  h.rpcMock.mockResolvedValue({ data: null, error: null });
   h.dbDeleteMock.mockReset();
   h.dbDeleteMock.mockResolvedValue(undefined);
   h.dbCloseMock.mockReset();
@@ -166,6 +183,55 @@ describe('requestPasswordReset', () => {
   });
 });
 
+describe('changeLoginPassword', () => {
+  it('reauthenticates with the current password before changing it', async () => {
+    const { error } = await changeLoginPassword('old-password', 'new-password');
+
+    expect(error).toBeNull();
+    expect(h.signInWithPasswordMock).toHaveBeenCalledWith({
+      email: 'alice@example.com',
+      password: 'old-password',
+    });
+    expect(h.updateUserMock).toHaveBeenCalledWith({ password: 'new-password' });
+    expect(h.signInWithPasswordMock.mock.invocationCallOrder[0]).toBeLessThan(
+      h.updateUserMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not update when the current password is wrong', async () => {
+    h.signInWithPasswordMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'Invalid login credentials' },
+    });
+
+    const { error } = await changeLoginPassword('wrong', 'new-password');
+
+    expect(error?.message).toBe('Current password did not match.');
+    expect(h.updateUserMock).not.toHaveBeenCalled();
+  });
+
+  it('requires an authenticated user', async () => {
+    h.getUserMock.mockResolvedValueOnce({ data: { user: null }, error: null });
+
+    const { error } = await changeLoginPassword('old', 'new');
+
+    expect(error?.message).toBe('You must be signed in.');
+    expect(h.signInWithPasswordMock).not.toHaveBeenCalled();
+    expect(h.updateUserMock).not.toHaveBeenCalled();
+  });
+
+  it('returns password-policy errors from Supabase', async () => {
+    h.updateUserMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'Password should be at least 8 characters.' },
+    });
+
+    const { error } = await changeLoginPassword('old-password', 'short');
+
+    expect(error?.message).toMatch(/at least 8 characters/i);
+  });
+});
+
 describe('logoutAndClearLocalData', () => {
   it('signs out locally, wipes IndexedDB inline, and clears local/session storage', async () => {
     localStorage.setItem('k', 'v');
@@ -228,5 +294,33 @@ describe('logoutAndClearLocalData', () => {
     expect(localStorage.getItem('et.salt')).toBeNull();
     expect(h.dbDeleteMock).toHaveBeenCalled();
     expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
+  });
+});
+
+describe('deleteAccountAndClearLocalData', () => {
+  it('deletes the server account and wipes local data without signing out an invalid token', async () => {
+    localStorage.setItem('private-data', 'present');
+
+    await deleteAccountAndClearLocalData();
+
+    expect(h.rpcMock).toHaveBeenCalledWith('delete_self');
+    expect(h.signOutMock).not.toHaveBeenCalled();
+    expect(h.dbCloseMock).toHaveBeenCalled();
+    expect(h.dbDeleteMock).toHaveBeenCalled();
+    expect(localStorage.getItem('private-data')).toBeNull();
+  });
+
+  it('preserves local state when server-side account deletion fails', async () => {
+    h.rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'Deletion denied' },
+    });
+    localStorage.setItem('private-data', 'present');
+
+    await expect(deleteAccountAndClearLocalData()).rejects.toThrow('Deletion denied');
+
+    expect(h.signOutMock).not.toHaveBeenCalled();
+    expect(h.dbDeleteMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem('private-data')).toBe('present');
   });
 });

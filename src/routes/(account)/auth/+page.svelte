@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { afterNavigate, goto } from '$app/navigation';
+  import { resolve } from '$app/paths';
   import AuthTabs from '$lib/components/AuthTabs.svelte';
   import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
 
@@ -21,7 +22,7 @@
   afterNavigate((navigation) => {
     if (navigation.type !== 'enter') return;
     void resolveAppEntry().then((enter) => {
-      if (active && enter) void goto('/app', { replaceState: true });
+      if (active && enter) void goto(resolve('/app'), { replaceState: true });
     });
   });
 </script>
