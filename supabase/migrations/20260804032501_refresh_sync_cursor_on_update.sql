@@ -6,6 +6,9 @@
 --
 -- Keep the existing column name for backwards compatibility, but make its
 -- actual contract explicit: it is a server-owned "last changed at" cursor.
+-- The same trigger also enforces the row-level LWW clock. Pull-before-push
+-- greatly reduces stale writes, but two devices can still race; an older
+-- `created_at` arriving last must not roll the canonical cloud row backward.
 
 create or replace function private.refresh_sync_change_cursor()
 returns trigger
@@ -13,6 +16,10 @@ language plpgsql
 set search_path = ''
 as $$
 begin
+  if tg_op = 'UPDATE' and new.created_at < old.created_at then
+    return old;
+  end if;
+
   new.inserted_at := clock_timestamp();
   return new;
 end;

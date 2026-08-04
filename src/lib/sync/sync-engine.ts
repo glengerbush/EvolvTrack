@@ -9,6 +9,55 @@ import { ENCRYPTION_FORMAT_VERSION, decryptRecord, encryptRecord } from '$lib/cr
 import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import type { OutboxEntry, SyncAggregate, SyncMode } from '$lib/domain/types';
 
+/** Stay below Supabase's default 1,000-row Data API cap and page explicitly.
+ * Migration/recovery reads must be exhaustive: truncating one before deleting
+ * or rewriting its source table can permanently lose remote-only records. */
+const REMOTE_PAGE_SIZE = 500;
+
+type PageResult<T> = { data: T[] | null; error: unknown };
+
+type PlainRemoteRow = {
+  id: string;
+  aggregate: SyncAggregate;
+  op: 'upsert' | 'delete';
+  payload: unknown;
+  created_at: string;
+  inserted_at: string;
+};
+
+type EncryptedPullRow = {
+  id: string;
+  ciphertext: string;
+  iv: string;
+  created_at: string;
+  inserted_at: string;
+};
+
+type EncryptedStoredRow = {
+  id: string;
+  ciphertext: string;
+  iv: string;
+  protocol_version: number;
+  encryption_version: number;
+  schema_version: number;
+  created_at: string;
+};
+
+type ReEncryptionSourceRow = Omit<EncryptedStoredRow, 'encryption_version'>;
+
+async function fetchAllPages<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<PageResult<T>>,
+): Promise<T[]> {
+  const all: T[] = [];
+  for (let from = 0; ; from += REMOTE_PAGE_SIZE) {
+    const { data, error } = await fetchPage(from, from + REMOTE_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data ?? [];
+    all.push(...page);
+    if (page.length < REMOTE_PAGE_SIZE) return all;
+  }
+}
+
 /**
  * The DEK version currently in force, taken from the local key bundle (defaults
  * to 1 pre-versioning). Encrypted rows are tagged with this so a key rotation
@@ -305,17 +354,18 @@ export async function pullAndApply(): Promise<PullResult> {
 }
 
 async function pullPlain(userId: string, cursor: string | null): Promise<PulledEvent[]> {
-  let query = supabase
-    .from('sync_changes_plain')
-    .select('id,aggregate,op,payload,created_at,inserted_at')
-    .eq('user_id', userId)
-    .order('inserted_at', { ascending: true });
-  if (cursor) query = query.gt('inserted_at', cursor);
+  const rows = await fetchAllPages<PlainRemoteRow>((from, to) => {
+    let query = supabase
+      .from('sync_changes_plain')
+      .select('id,aggregate,op,payload,created_at,inserted_at')
+      .eq('user_id', userId)
+      .order('inserted_at', { ascending: true })
+      .order('id', { ascending: true });
+    if (cursor) query = query.gt('inserted_at', cursor);
+    return query.range(from, to);
+  });
 
-  const { data, error } = await query;
-  if (error) throw error;
-
-  return (data ?? []).map((row) => {
+  return rows.map((row) => {
     const envelope = (row.payload ?? {}) as SyncEnvelopeShape;
     return {
       aggregate: (envelope.aggregate ?? row.aggregate) as SyncAggregate,
@@ -337,19 +387,20 @@ async function pullEncrypted(
   // version (an orphan from an interrupted rotation, say) is undecryptable
   // anyway, so excluding it here keeps one bad row from crashing the whole pull.
   const dekVersion = await activeDekVersion();
-  let query = supabase
-    .from('sync_changes_encrypted')
-    .select('id,ciphertext,iv,created_at,inserted_at')
-    .eq('user_id', userId)
-    .eq('dek_version', dekVersion)
-    .order('inserted_at', { ascending: true });
-  if (cursor) query = query.gt('inserted_at', cursor);
-
-  const { data, error } = await query;
-  if (error) throw error;
+  const rows = await fetchAllPages<EncryptedPullRow>((from, to) => {
+    let query = supabase
+      .from('sync_changes_encrypted')
+      .select('id,ciphertext,iv,created_at,inserted_at')
+      .eq('user_id', userId)
+      .eq('dek_version', dekVersion)
+      .order('inserted_at', { ascending: true })
+      .order('id', { ascending: true });
+    if (cursor) query = query.gt('inserted_at', cursor);
+    return query.range(from, to);
+  });
 
   const events: PulledEvent[] = [];
-  for (const row of data ?? []) {
+  for (const row of rows) {
     let envelope: SyncEnvelopeShape;
     try {
       envelope = await decryptRecord<SyncEnvelopeShape>(sessionKey, row.ciphertext, row.iv);
@@ -565,16 +616,19 @@ export async function fetchRemotePlainChanges(): Promise<PlainSyncChange[]> {
 
 export async function fetchRemoteEncryptedChanges(dekVersion?: number): Promise<EncryptedSyncChange[]> {
   const user = await requireAuthenticatedUser();
-  let query = supabase
-    .from('sync_changes_encrypted')
-    .select('id,ciphertext,iv,protocol_version,encryption_version,schema_version,created_at')
-    .eq('user_id', user.id);
-  if (dekVersion !== undefined) query = query.eq('dek_version', dekVersion);
-  const { data, error } = await query.order('created_at', { ascending: true });
+  const rows = await fetchAllPages<EncryptedStoredRow>((from, to) => {
+    let query = supabase
+      .from('sync_changes_encrypted')
+      .select('id,ciphertext,iv,protocol_version,encryption_version,schema_version,created_at')
+      .eq('user_id', user.id);
+    if (dekVersion !== undefined) query = query.eq('dek_version', dekVersion);
+    return query
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, to);
+  });
 
-  if (error) throw error;
-
-  return (data ?? []).map((row) => ({
+  return rows.map((row) => ({
     id: row.id,
     ciphertext: row.ciphertext,
     iv: row.iv,
@@ -608,14 +662,16 @@ export async function reEncryptServerRows(params: {
   const { oldDek, oldVersion, newDek, newVersion, onProgress } = params;
   const user = await requireAuthenticatedUser();
 
-  const { data, error } = await supabase
-    .from('sync_changes_encrypted')
-    .select('id,ciphertext,iv,protocol_version,schema_version,created_at')
-    .eq('user_id', user.id)
-    .eq('dek_version', oldVersion);
-  if (error) throw error;
-
-  const rows = data ?? [];
+  const rows = await fetchAllPages<ReEncryptionSourceRow>((from, to) =>
+    supabase
+      .from('sync_changes_encrypted')
+      .select('id,ciphertext,iv,protocol_version,schema_version,created_at')
+      .eq('user_id', user.id)
+      .eq('dek_version', oldVersion)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, to),
+  );
   const total = rows.length;
   if (onProgress) await onProgress(0, total);
   if (total === 0) return 0;

@@ -378,7 +378,17 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // E2EE before any plaintext leaves the device. Pull stays on so the
       // wizard can react to whatever already exists on the account.
       if (!isSetupWizardPending()) {
-        await pushOutbox();
+        const push = await pushOutbox();
+        if (push.skipped === 'mode-rejected') {
+          // The server changed sync mode after this cycle reconciled it. The
+          // outbox is intentionally intact; rerun immediately so the next
+          // reconcile adopts the canonical mode instead of waiting for an
+          // unrelated focus/online/edit trigger.
+          connectivity.set('online');
+          syncStatus.set('idle');
+          rerunQueued = true;
+          return;
+        }
         lastPushAt.set(new Date());
       }
       connectivity.set('online');

@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(6);
+select plan(8);
 
 insert into auth.users (id, email)
 values ('40000000-0000-0000-0000-000000000004', 'sync-cursor@example.com');
@@ -103,6 +103,35 @@ select is(
   'an update to an existing plaintext row is visible after the old cursor'
 );
 
+insert into public.sync_changes_plain (
+  id, user_id, aggregate, op, payload, protocol_version, schema_version, created_at
+)
+values (
+  'entry:cursor-plain',
+  '40000000-0000-0000-0000-000000000004',
+  'entry',
+  'upsert',
+  '{"aggregate":"entry","op":"upsert","record":{"id":"cursor-plain","weightLbs":999}}',
+  1,
+  1,
+  '2026-08-03T11:59:00Z'
+)
+on conflict (user_id, id) do update
+set
+  payload = excluded.payload,
+  created_at = excluded.created_at;
+
+select is(
+  (
+    select payload #>> '{record,weightLbs}'
+    from public.sync_changes_plain
+    where user_id = '40000000-0000-0000-0000-000000000004'
+      and id = 'entry:cursor-plain'
+  ),
+  '175',
+  'a stale plaintext push cannot overwrite the newer cloud row'
+);
+
 insert into public.sync_changes_encrypted (
   id,
   user_id,
@@ -171,6 +200,38 @@ select is(
   ),
   1::bigint,
   'an update to an existing encrypted row is visible after the old cursor'
+);
+
+insert into public.sync_changes_encrypted (
+  id, user_id, ciphertext, iv, protocol_version, encryption_version,
+  dek_version, schema_version, created_at
+)
+values (
+  'entry:cursor-encrypted',
+  '40000000-0000-0000-0000-000000000004',
+  'stale-ciphertext',
+  'stale-iv',
+  1,
+  1,
+  1,
+  1,
+  '2026-08-03T11:59:00Z'
+)
+on conflict (user_id, id) do update
+set
+  ciphertext = excluded.ciphertext,
+  iv = excluded.iv,
+  created_at = excluded.created_at;
+
+select is(
+  (
+    select ciphertext
+    from public.sync_changes_encrypted
+    where user_id = '40000000-0000-0000-0000-000000000004'
+      and id = 'entry:cursor-encrypted'
+  ),
+  'ciphertext-v2',
+  'a stale encrypted push cannot overwrite the newer cloud row'
 );
 
 select * from finish();

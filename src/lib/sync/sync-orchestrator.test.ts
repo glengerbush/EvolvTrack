@@ -217,6 +217,25 @@ describe('createSyncOrchestrator — runCycle', () => {
     }
   });
 
+  it('immediately reconciles and retries a push rejected by a mode race', async () => {
+    h.pushImpl
+      .mockResolvedValueOnce({ pushed: 0, skipped: 'mode-rejected' })
+      .mockResolvedValueOnce({ pushed: 1 });
+    const spy = vi.spyOn(lastSynced, 'record');
+    try {
+      const orchestrator = createSyncOrchestrator();
+      await orchestrator.syncNow();
+      await flush();
+
+      expect(h.pullImpl).toHaveBeenCalledTimes(2);
+      expect(h.pushImpl).toHaveBeenCalledTimes(2);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(get(syncStatus)).toBe('idle');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reports `syncing` while a cycle is in flight', async () => {
     let resolvePull: (() => void) | undefined;
     h.pullImpl.mockReturnValueOnce(

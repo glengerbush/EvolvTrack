@@ -53,6 +53,10 @@ function makeQuery(table: string) {
         limit(_n: number) {
           return builder;
         },
+        range(from: number, to: number) {
+          filters.__range = [from, to];
+          return builder;
+        },
         then(onFulfilled: (v: Result) => unknown, onRejected?: (e: unknown) => unknown) {
           return h.selectImpl(table, filters).then(onFulfilled, onRejected);
         },
@@ -130,6 +134,7 @@ import {
   fetchRemoteEncryptedChanges,
   fetchRemotePlainChanges,
   pullAndApply,
+  pullSnapshotForMigration,
   pushEncryptedChanges,
   pushOutbox,
   pushPlainChanges,
@@ -450,6 +455,68 @@ describe('fetchRemoteEncryptedChanges', () => {
     h.selectImpl.mockResolvedValueOnce({ data: null, error: null });
     const rows = await fetchRemoteEncryptedChanges();
     expect(rows).toEqual([]);
+  });
+
+  it('paginates past the Data API row cap', async () => {
+    const firstPage = Array.from({ length: 500 }, (_, i) => ({
+      id: `entry:${i}`,
+      ciphertext: `ct-${i}`,
+      iv: `iv-${i}`,
+      protocol_version: 1,
+      encryption_version: 1,
+      schema_version: 4,
+      created_at: `2026-05-09T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+    }));
+    h.selectImpl
+      .mockResolvedValueOnce({ data: firstPage, error: null })
+      .mockResolvedValueOnce({ data: [{ ...firstPage[0], id: 'entry:500' }], error: null });
+
+    const rows = await fetchRemoteEncryptedChanges();
+
+    expect(rows).toHaveLength(501);
+    expect(h.selectImpl).toHaveBeenCalledTimes(2);
+    expect(h.selectImpl.mock.calls[0][1]).toMatchObject({ __range: [0, 499] });
+    expect(h.selectImpl.mock.calls[1][1]).toMatchObject({ __range: [500, 999] });
+  });
+});
+
+describe('pullSnapshotForMigration', () => {
+  it('applies every page before a migration may delete the source table', async () => {
+    const row = (i: number) => ({
+      id: `entry:${i}`,
+      aggregate: 'entry',
+      op: 'upsert',
+      payload: { aggregate: 'entry', op: 'upsert', record: { id: String(i) } },
+      created_at: '2026-05-10T00:00:00.000Z',
+      inserted_at: `2026-05-10T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+    });
+    h.selectImpl
+      .mockResolvedValueOnce({ data: Array.from({ length: 500 }, (_, i) => row(i)), error: null })
+      .mockResolvedValueOnce({ data: [row(500)], error: null });
+
+    const result = await pullSnapshotForMigration(null);
+
+    expect(result).toEqual({ fetched: 501, applied: 501 });
+    expect(h.applyImpl).toHaveBeenCalledTimes(501);
+  });
+
+  it('does not apply a partial snapshot when a later page fails', async () => {
+    const row = (i: number) => ({
+      id: `entry:${i}`,
+      aggregate: 'entry',
+      op: 'upsert',
+      payload: { aggregate: 'entry', op: 'upsert', record: { id: String(i) } },
+      created_at: '2026-05-10T00:00:00.000Z',
+      inserted_at: '2026-05-10T00:00:01.000Z',
+    });
+    h.selectImpl
+      .mockResolvedValueOnce({ data: Array.from({ length: 500 }, (_, i) => row(i)), error: null })
+      .mockResolvedValueOnce({ data: null, error: { message: 'page-2-failed' } });
+
+    await expect(pullSnapshotForMigration(null)).rejects.toMatchObject({
+      message: 'page-2-failed',
+    });
+    expect(h.applyImpl).not.toHaveBeenCalled();
   });
 });
 

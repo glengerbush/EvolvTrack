@@ -957,3 +957,40 @@ describe('applyRemoteChange — malformed null-record upserts', () => {
     expect((await db.entries.get('good'))!.weightLbs).toBe(200);
   });
 });
+
+describe('applyRemoteChange — malformed wire identity', () => {
+  it('does not treat an unknown aggregate as a profile update', async () => {
+    const local: ProfileSettings = {
+      id: 'profile',
+      startWeight: 180,
+      passphraseEnabled: false,
+      createdAt: OLD,
+      updatedAt: OLD,
+    };
+    await db.profile.put(local);
+
+    const applied = await applyRemoteChange({
+      aggregate: 'corrupt' as SyncAggregate,
+      entityId: 'profile',
+      op: 'upsert',
+      record: { ...local, startWeight: 999, updatedAt: NEW },
+      remoteUpdatedAt: NEW,
+    });
+
+    expect(applied).toBe(false);
+    expect((await db.profile.get('profile'))?.startWeight).toBe(180);
+  });
+
+  it('skips an upsert whose payload id disagrees with its wire id', async () => {
+    const applied = await applyRemoteChange({
+      aggregate: 'entry',
+      entityId: 'expected',
+      op: 'upsert',
+      record: weight('different', NEW),
+      remoteUpdatedAt: NEW,
+    });
+
+    expect(applied).toBe(false);
+    expect(await db.entries.count()).toBe(0);
+  });
+});

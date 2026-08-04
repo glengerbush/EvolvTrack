@@ -548,6 +548,18 @@ export type RemoteChange = {
 export async function applyRemoteChange(change: RemoteChange): Promise<boolean> {
   const { aggregate, entityId, op, record, remoteUpdatedAt } = change;
 
+  // The wire is untrusted at runtime even though callers are typed. The old
+  // fall-through below treated every unknown aggregate as `profile`, so a
+  // corrupt encrypted envelope could overwrite settings. A payload id that
+  // disagrees with the canonical row id is equally unsafe: Dexie would store
+  // it under one id while reconciling the outbox under another. Skip malformed
+  // events without poisoning the rest of the pull.
+  if (aggregate !== 'entry' && aggregate !== 'prescription' && aggregate !== 'profile') {
+    return false;
+  }
+  if (op !== 'upsert' && op !== 'delete') return false;
+  if (aggregate === 'profile' && entityId !== 'profile') return false;
+
   // A malformed remote upsert whose record is null/undefined. The canonical
   // source is a plaintext row written by an older E2EE *disable* migration,
   // which stored the bare record without the `{aggregate, op, record}`
@@ -558,6 +570,10 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
   // nothing to write, so skip it as a no-op and let the cycle continue.
   if (op === 'upsert' && (record === null || record === undefined)) {
     return false;
+  }
+  if (op === 'upsert') {
+    if (typeof record !== 'object' || Array.isArray(record)) return false;
+    if ((record as { id?: unknown }).id !== entityId) return false;
   }
 
   if (aggregate === 'entry') {
@@ -592,7 +608,11 @@ export async function applyRemoteChange(change: RemoteChange): Promise<boolean> 
     return result !== null;
   }
 
-  return applyRemoteProfileChange(op, record, remoteUpdatedAt);
+  if (aggregate === 'profile') {
+    return applyRemoteProfileChange(op, record, remoteUpdatedAt);
+  }
+
+  return false;
 }
 
 function hasSortOrder(prescription: Prescription): prescription is Prescription & { sortOrder: number } {
