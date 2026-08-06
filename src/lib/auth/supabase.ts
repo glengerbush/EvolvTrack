@@ -1,8 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { resolve } from '$app/paths';
 import { db } from '$lib/db/schema';
-import { durableClear, durableGet, durableRemove, durableSet } from '$lib/db/durableKv';
-import { clearSession } from '$lib/sync/session-key';
+import { durableClearOrThrow, durableGet, durableRemove, durableSet } from '$lib/db/durableKv';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string;
 const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
@@ -218,13 +217,14 @@ export async function logoutAndClearLocalData() {
 }
 
 async function clearLocalAuthAndData() {
-  clearSession();
-
-  // Wipe the IndexedDB-backed auth store (Supabase session token + E2EE DEK).
-  // It lives in its own database, so the health-data `db.delete()` below does
-  // not touch it — clear it explicitly or a logged-out device would reopen
-  // still holding a usable session.
-  await durableClear();
+  // Dynamic import avoids the auth → device state → wrapped-key adapter → auth
+  // initialization cycle while keeping logout cleanup behind the coherent seam.
+  try {
+    const { deviceEncryptionState } = await import('$lib/sync/device-encryption-state');
+    await deviceEncryptionState.clearForLogout();
+  } catch {
+    // Continue through every independent cleanup layer.
+  }
 
   try {
     localStorage.clear();
@@ -245,6 +245,16 @@ async function clearLocalAuthAndData() {
     // defense; stale rows may linger if it's also interrupted.
   }
 
+  // Wipe the separate IndexedDB-backed auth store (session + DEK). Keep the
+  // boot sentinel when this fails so early startup retries both databases.
+  let durableAuthCleared = false;
+  try {
+    await durableClearOrThrow();
+    durableAuthCleared = true;
+  } catch {
+    // Retried by hooks.client.ts.
+  }
+
   // Force-close the connection first. Module-scoped `liveQuery` subscribers
   // (outboxCount, profileStore, rawPrescriptions, medicationRows) otherwise
   // hold the database open and Dexie's blocked-delete timeout silently wins,
@@ -253,11 +263,13 @@ async function clearLocalAuthAndData() {
   try {
     db.close();
     await db.delete();
-    // Wiped successfully — the boot guard no longer needs to run.
-    try {
-      localStorage.removeItem(WIPE_DB_ON_BOOT_KEY);
-    } catch {
-      // Non-fatal: a redundant boot wipe is harmless.
+    if (durableAuthCleared) {
+      // Both databases are gone; the boot guard no longer needs to run.
+      try {
+        localStorage.removeItem(WIPE_DB_ON_BOOT_KEY);
+      } catch {
+        // Non-fatal: a redundant boot wipe is harmless.
+      }
     }
   } catch {
     // Delete was blocked or threw (e.g. another tab holds the DB open). Leave

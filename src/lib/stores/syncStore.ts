@@ -32,37 +32,6 @@ export const connectivity = writable<Connectivity>('connecting');
 export const lastSyncError = writable<string | null>(null);
 
 /**
- * Set when an E2EE migration on this device was interrupted (crash, quit,
- * backgrounded PWA) and can't be auto-resumed because the session is locked —
- * the cached DEK is gone, so the orchestrator can't finish it unattended. The
- * value is the migration direction so the UI can word the passphrase prompt
- * ("Resume encryption upgrade" vs "…disable" vs "…key rotation"). `null` means
- * no resume is waiting on the user.
- */
-export const migrationResumePending = writable<
-  'enable' | 'disable' | 'rotate' | null
->(null);
-
-/**
- * Set when this device finds an in-progress migration owned by a *different*
- * device (e.g. you log in on a new phone while the old one crashed mid-
- * migration). The UI offers a "take over on this device" banner; accepting it
- * calls `takeOverMigration`, after which the resume proceeds here (prompting
- * for the passphrase via [[migrationResumePending]]). `null` when no take-over
- * is on offer.
- */
-export const migrationTakeoverAvailable = writable<{
-  direction: 'enable' | 'disable' | 'rotate';
-  ownerDeviceId: string;
-  /** Live progress + heartbeat, refreshed by the in-progress modal's polling
-   * so both the modal and the collapsed banner can show a bar / percentage and
-   * flag a stall. */
-  recordsConverted?: number;
-  recordsTotal?: number;
-  updatedAt?: string;
-} | null>(null);
-
-/**
  * Whether the current signed-in user has an active license.
  *  - `null`  — unknown (signed out, or not fetched yet)
  *  - `true`  — license is active; cloud sync is allowed

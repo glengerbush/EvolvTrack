@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(16);
+select plan(18);
 
 insert into auth.users (id, email)
 values
@@ -9,10 +9,10 @@ values
   ('20000000-0000-0000-0000-000000000002', 'rls-user-2@example.com'),
   ('30000000-0000-0000-0000-000000000003', 'rls-user-3@example.com');
 
-insert into public.sync_accounts (user_id, sync_mode)
+insert into public.sync_accounts (user_id, sync_mode, active_dek_version)
 values
-  ('10000000-0000-0000-0000-000000000001', 'plain'),
-  ('20000000-0000-0000-0000-000000000002', 'e2ee');
+  ('10000000-0000-0000-0000-000000000001', 'plain', null),
+  ('20000000-0000-0000-0000-000000000002', 'e2ee', 1);
 
 insert into public.wrapped_keys (
   user_id,
@@ -144,6 +144,37 @@ select throws_ok(
   'admin RPCs reject ordinary authenticated users'
 );
 
+reset role;
+set local role authenticated;
+select set_config(
+  'request.jwt.claims',
+  '{"sub":"20000000-0000-0000-0000-000000000002","role":"authenticated"}',
+  true
+);
+select lives_ok(
+  $$
+    insert into public.sync_changes_encrypted (
+      id, user_id, ciphertext, iv, protocol_version,
+      encryption_version, schema_version, dek_version, created_at
+    ) values (
+      'entry:active', auth.uid(), 'cipher-active', 'iv-active', 1, 1, 1, 1, now()
+    )
+  $$,
+  'stable E2EE accepts writes under the active DEK'
+);
+select throws_ok(
+  $$
+    insert into public.sync_changes_encrypted (
+      id, user_id, ciphertext, iv, protocol_version,
+      encryption_version, schema_version, dek_version, created_at
+    ) values (
+      'entry:obsolete', auth.uid(), 'cipher-obsolete', 'iv-obsolete', 1, 1, 1, 2, now()
+    )
+  $$,
+  '42501',
+  'new row violates row-level security policy "Encrypted inserts use an allowed DEK version" for table "sync_changes_encrypted"',
+  'stable E2EE rejects writes under an inactive DEK'
+);
 reset role;
 set local role anon;
 select set_config('request.jwt.claims', '{"role":"anon"}', true);

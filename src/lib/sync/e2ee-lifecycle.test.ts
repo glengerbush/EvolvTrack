@@ -225,4 +225,19 @@ describe('E2EE lifecycle', () => {
       connectivity: 'offline',
     });
   });
+
+  it('owns background transition reconciliation', async () => {
+    const interrupted = makeLifecycle({
+      syncMode: 'migrating_to_e2ee',
+      migration,
+      deviceId: 'device-1',
+      hasSessionKey: true,
+      hasReadableLocalData: true,
+      runInProgress: false,
+    });
+
+    await interrupted.lifecycle.reconcile();
+
+    expect(interrupted.commands).toContainEqual({ type: 'reconcile' });
+  });
 });

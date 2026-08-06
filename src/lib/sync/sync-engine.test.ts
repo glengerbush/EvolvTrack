@@ -131,6 +131,7 @@ vi.mock('$lib/sync/pull-cursor', () => ({
 import { db } from '$lib/db/schema';
 import {
   deleteRemoteEncryptedChanges,
+  deleteRemotePlainChanges,
   fetchRemoteEncryptedChanges,
   fetchRemotePlainChanges,
   pullAndApply,
@@ -143,6 +144,11 @@ import {
 import { SYNC_PROTOCOL_VERSION } from './protocol';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
 import type { OutboxEntry } from '$lib/domain/types';
+
+const clock = '2026-05-01T00:00:00.000Z';
+const entryRecord = (id: string, extra: Record<string, unknown> = {}) => ({
+  id, date: '2026-05-01', createdAt: clock, updatedAt: clock, ...extra,
+});
 
 beforeEach(() => {
   h.upsertImpl.mockReset();
@@ -172,16 +178,19 @@ beforeEach(() => {
 
 async function seedOutbox(id: string, overrides: Partial<OutboxEntry> = {}) {
   const [aggregate, entityId] = id.split(':');
+  const payload = overrides.op === 'delete'
+    ? null
+    : entryRecord(entityId ?? id, (overrides.payload ?? {}) as Record<string, unknown>);
   await db.outbox.put({
     id,
     aggregate: aggregate as OutboxEntry['aggregate'],
     entityId: entityId ?? id,
     op: 'upsert',
     updatedAt: '2026-05-01T00:00:00.000Z',
-    payload: { value: id },
     enqueuedAt: '2026-05-01T00:00:00.000Z',
     rev: `rev-${id}`,
     ...overrides,
+    payload,
   });
 }
 
@@ -320,7 +329,7 @@ describe('pushPlainChanges', () => {
       id: 'entry:w1',
       aggregate: 'entry' as const,
       op: 'upsert' as const,
-      payload: { id: 'w1', weightLbs },
+      payload: entryRecord('w1', { weightLbs }),
       protocolVersion: SYNC_PROTOCOL_VERSION,
       schemaVersion: DB_SCHEMA_VERSION,
       createdAt,
@@ -343,6 +352,12 @@ describe('pushPlainChanges', () => {
 });
 
 describe('deleteRemoteEncryptedChanges', () => {
+  it('treats an explicit empty id list as a no-op, never delete-all', async () => {
+    await expect(deleteRemoteEncryptedChanges([])).resolves.toEqual({ deleted: 0 });
+    await expect(deleteRemotePlainChanges([])).resolves.toEqual({ deleted: 0 });
+    expect(h.deleteImpl).not.toHaveBeenCalled();
+  });
+
   it('deletes all rows for the user when no ids are given', async () => {
     const result = await deleteRemoteEncryptedChanges();
     expect(result).toEqual({ deleted: 0 });
@@ -384,7 +399,7 @@ describe('fetchRemotePlainChanges', () => {
           id: 'entry:w1',
           aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
+          payload: { aggregate: 'entry', op: 'upsert', record: entryRecord('w1', { weightLbs: 180 }) },
           created_at: '2026-05-01T00:00:00.000Z',
           inserted_at: '2026-05-01T00:00:01.000Z',
         },
@@ -398,7 +413,7 @@ describe('fetchRemotePlainChanges', () => {
       id: 'entry:w1',
       aggregate: 'entry',
       op: 'upsert',
-      payload: { id: 'w1', weightLbs: 180 },
+      payload: entryRecord('w1', { weightLbs: 180 }),
       createdAt: '2026-05-01T00:00:00.000Z', // the row's own clock, not inserted_at
     });
   });
@@ -504,7 +519,7 @@ describe('pullSnapshotForMigration', () => {
       id: `entry:${i}`,
       aggregate: 'entry',
       op: 'upsert',
-      payload: { aggregate: 'entry', op: 'upsert', record: { id: String(i) } },
+      payload: { aggregate: 'entry', op: 'upsert', record: entryRecord(String(i)) },
       created_at: '2026-05-10T00:00:00.000Z',
       inserted_at: `2026-05-10T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
     });
@@ -523,7 +538,7 @@ describe('pullSnapshotForMigration', () => {
       id: `entry:${i}`,
       aggregate: 'entry',
       op: 'upsert',
-      payload: { aggregate: 'entry', op: 'upsert', record: { id: String(i) } },
+      payload: { aggregate: 'entry', op: 'upsert', record: entryRecord(String(i)) },
       created_at: '2026-05-10T00:00:00.000Z',
       inserted_at: '2026-05-10T00:00:01.000Z',
     });
@@ -563,7 +578,7 @@ describe('pushOutbox', () => {
     // (Postgres 42501) refused the write. That's benign — the outbox must
     // survive so the edits re-push once the change finishes.
     h.state.syncMode = 'e2ee';
-    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { id: 'w1', weightLbs: 180 } });
     h.upsertImpl.mockResolvedValueOnce({
       data: null,
       error: { code: '42501', message: 'new row violates row-level security policy' },
@@ -581,7 +596,7 @@ describe('pushOutbox', () => {
     // (license/permission), not a transition race. It must surface, and the
     // outbox must NOT be cleared.
     h.state.syncMode = 'e2ee';
-    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { id: 'w1', weightLbs: 180 } });
     h.upsertImpl.mockResolvedValueOnce({
       data: null,
       error: { code: '42501', message: 'new row violates row-level security policy' },
@@ -592,9 +607,22 @@ describe('pushOutbox', () => {
     expect(await db.outbox.count()).toBe(1);
   });
 
+  it('retries when a raced transition already completed in the opposite stable mode', async () => {
+    h.state.syncMode = 'plain';
+    await seedOutbox('entry:w1');
+    h.upsertImpl.mockResolvedValueOnce({
+      data: null,
+      error: { code: '42501', message: 'new row violates row-level security policy' },
+    });
+    h.fetchAccountImpl.mockResolvedValueOnce({ syncMode: 'e2ee' });
+
+    await expect(pushOutbox()).resolves.toEqual({ pushed: 0, skipped: 'mode-rejected' });
+    expect(await db.outbox.count()).toBe(1);
+  });
+
   it('plain mode upserts enveloped payloads to sync_changes_plain and clears the outbox', async () => {
     h.state.syncMode = 'plain';
-    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { id: 'w1', weightLbs: 180 } });
     await seedOutbox('entry:i1', { aggregate: 'entry', op: 'delete', payload: null });
 
     const result = await pushOutbox();
@@ -637,7 +665,7 @@ describe('pushOutbox', () => {
 
   it('e2ee mode encrypts each envelope and upserts ciphertext to sync_changes_encrypted', async () => {
     h.state.syncMode = 'e2ee';
-    await seedOutbox('entry:w1', { payload: { weightLbs: 180 } });
+    await seedOutbox('entry:w1', { payload: { id: 'w1', weightLbs: 180 } });
 
     const result = await pushOutbox();
 
@@ -645,7 +673,9 @@ describe('pushOutbox', () => {
     expect(h.encryptImpl).toHaveBeenCalledTimes(1);
     const [keyB64, envelope] = h.encryptImpl.mock.calls[0];
     expect(keyB64).toBe('pp');
-    expect(envelope).toEqual({ aggregate: 'entry', op: 'upsert', record: { weightLbs: 180 } });
+    expect(envelope).toMatchObject({
+      aggregate: 'entry', op: 'upsert', record: { id: 'w1', weightLbs: 180 },
+    });
 
     const [table, rows] = h.upsertImpl.mock.calls[0];
     expect(table).toBe('sync_changes_encrypted');
@@ -748,7 +778,7 @@ describe('pullAndApply', () => {
           id: 'entry:w1',
           aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1', weightLbs: 180 } },
+          payload: { aggregate: 'entry', op: 'upsert', record: entryRecord('w1', { weightLbs: 180 }) },
           created_at: '2026-05-10T00:00:00.000Z',
           inserted_at: '2026-05-10T00:00:01.000Z',
         },
@@ -813,7 +843,7 @@ describe('pullAndApply', () => {
           id: 'entry:w1',
           aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w1' } },
+          payload: { aggregate: 'entry', op: 'upsert', record: entryRecord('w1') },
           created_at: '2026-05-10T00:00:00.000Z',
           inserted_at: '2026-05-10T00:00:01.000Z',
         },
@@ -821,7 +851,7 @@ describe('pullAndApply', () => {
           id: 'entry:w2',
           aggregate: 'entry',
           op: 'upsert',
-          payload: { aggregate: 'entry', op: 'upsert', record: { id: 'w2' } },
+          payload: { aggregate: 'entry', op: 'upsert', record: entryRecord('w2') },
           created_at: '2026-05-10T00:00:02.000Z',
           inserted_at: '2026-05-10T00:00:03.000Z',
         },
@@ -855,7 +885,7 @@ describe('pullAndApply', () => {
     h.decryptImpl.mockResolvedValueOnce({
       aggregate: 'entry',
       op: 'upsert',
-      record: { id: 'w1', weightLbs: 200 },
+      record: entryRecord('w1', { weightLbs: 200 }),
     });
 
     const result = await pullAndApply();
@@ -894,7 +924,11 @@ describe('reEncryptServerRows — server-side key rotation', () => {
       error: null,
     });
     // decrypt(old) → envelope; encrypt(new) → fresh ciphertext.
-    h.decryptImpl.mockResolvedValue({ aggregate: 'entry', op: 'upsert', record: { id: 'x' } });
+    h.decryptImpl.mockImplementation(async (_key, ciphertext: string) => ({
+      aggregate: 'entry',
+      op: 'upsert',
+      record: entryRecord(ciphertext === 'old-ct-1' ? 'w1' : 'i1'),
+    }));
     h.encryptImpl.mockResolvedValue({ ciphertext: 'new-ct', iv: 'new-iv' });
 
     const converted = await reEncryptServerRows({ oldDek: 'OLD', oldVersion: 1, newDek: 'NEW', newVersion: 2 });

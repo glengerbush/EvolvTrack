@@ -62,13 +62,14 @@ vi.mock('$lib/sync/sync-engine', () => ({
 }));
 
 vi.mock('$lib/sync/account-state', () => ({
+  getDeviceId: () => 'test-device-id',
   getAuthenticatedUserId: () => h.getUserIdImpl(),
   fetchRemoteSyncAccount: () => h.fetchRemoteSyncAccountImpl(),
   hydrateDeviceId: () => Promise.resolve('test-device-id'),
 }));
 
-vi.mock('$lib/sync/e2ee-migration', () => ({
-  autoResumeMigration: () => h.autoResumeMigrationImpl(),
+vi.mock('$lib/sync/e2ee-lifecycle-runtime', () => ({
+  e2eeLifecycle: { reconcile: () => h.autoResumeMigrationImpl() },
 }));
 
 vi.mock('$lib/domain/repo', () => ({
@@ -90,11 +91,15 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
 }));
 
 vi.mock('$lib/sync/pull-cursor', () => ({
+  getPullCursor: () => null,
   clearPullCursor: () => h.clearPullCursorImpl(),
   hydratePullCursor: () => Promise.resolve(),
 }));
 
 vi.mock('$lib/sync/session-key', () => ({
+  getSessionKey: () => null,
+  hasSessionKey: () => false,
+  setSessionKey: vi.fn(),
   rehydrateSession: () => Promise.resolve(false),
   clearSession: () => h.clearSessionImpl(),
 }));
@@ -121,8 +126,6 @@ import {
   connectivity,
   lastSyncError,
   lastSynced,
-  migrationResumePending,
-  migrationTakeoverAvailable,
   syncStatus,
 } from '$lib/stores/syncStore';
 import {
@@ -169,8 +172,6 @@ beforeEach(() => {
   syncStatus.set('idle');
   connectivity.set('connecting');
   lastSyncError.set(null);
-  migrationResumePending.set(null);
-  migrationTakeoverAvailable.set(null);
 });
 
 afterEach(() => {
@@ -594,26 +595,13 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
 
-    expect(get(migrationTakeoverAvailable)).toEqual({
-      direction: 'enable',
-      ownerDeviceId: 'other-device',
-    });
-    // Don't drive someone else's migration, and don't prompt for a passphrase.
-    expect(get(migrationResumePending)).toBeNull();
+    // Don't drive someone else's migration. Lifecycle snapshot owns the UI.
     expect(h.pullImpl).not.toHaveBeenCalled();
     expect(h.pushImpl).not.toHaveBeenCalled();
     expect(get(syncStatus)).toBe('idle');
   });
 
-  it('clears a stale take-over offer once the migration is no longer foreign', async () => {
-    migrationTakeoverAvailable.set({ direction: 'enable', ownerDeviceId: 'other-device' });
-    h.autoResumeMigrationImpl.mockResolvedValue({ status: 'idle' });
-    const orchestrator = createSyncOrchestrator();
-    await orchestrator.syncNow();
-    expect(get(migrationTakeoverAvailable)).toBeNull();
-  });
-
-  it('halts the cycle and flags the passphrase prompt when locked mid-migration', async () => {
+  it('halts the cycle when lifecycle requires a passphrase', async () => {
     h.autoResumeMigrationImpl.mockResolvedValue({
       status: 'needs-passphrase',
       direction: 'enable',
@@ -621,23 +609,20 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
 
-    expect(get(migrationResumePending)).toBe('enable');
     // Steady-state sync stays paused while waiting on the user's passphrase.
     expect(h.pullImpl).not.toHaveBeenCalled();
     expect(h.pushImpl).not.toHaveBeenCalled();
     expect(get(syncStatus)).toBe('idle');
   });
 
-  it('clears the flag and runs a normal sync once a resume completes', async () => {
+  it('runs normal sync once lifecycle reconciliation completes', async () => {
     h.autoResumeMigrationImpl.mockResolvedValue({
       status: 'resumed',
       result: { completed: true },
     });
-    migrationResumePending.set('enable');
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
 
-    expect(get(migrationResumePending)).toBeNull();
     // Back in a steady-state mode, the cycle proceeds to pull + push.
     expect(h.pullImpl).toHaveBeenCalledTimes(1);
     expect(h.pushImpl).toHaveBeenCalledTimes(1);
@@ -658,17 +643,15 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
   });
 
   it('stands down without an error when the migration is taken over mid-run (superseded)', async () => {
-    // Simulate a leftover error + resume prompt from before the take-over.
+    // Simulate a leftover error from before the take-over.
     lastSyncError.set('stale error');
-    migrationResumePending.set('enable');
     h.autoResumeMigrationImpl.mockResolvedValue({ status: 'superseded' });
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
 
-    // A clean hand-off, not a failure: clear the error/prompt and go idle so the
+    // A clean hand-off, not a failure: clear the error and go idle so the
     // next cycle's reconcile can adopt the new owner. Never an 'error' status.
     expect(get(lastSyncError)).toBeNull();
-    expect(get(migrationResumePending)).toBeNull();
     expect(get(syncStatus)).toBe('idle');
     // Don't fall through to steady-state sync while still mid-migration.
     expect(h.pullImpl).not.toHaveBeenCalled();
@@ -680,13 +663,11 @@ describe('createSyncOrchestrator — migration auto-resume', () => {
     // 'rotating_e2ee_key'; an interleaved sync cycle must NOT set a resume
     // prompt from that (which briefly flashed the old/new passphrase modal as
     // the rotation finished). autoResumeMigration reports 'in-progress'.
-    migrationResumePending.set(null);
     h.autoResumeMigrationImpl.mockResolvedValue({ status: 'in-progress' });
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();
 
     // The in-tab run drives its own modal; the orchestrator leaves it alone.
-    expect(get(migrationResumePending)).toBeNull();
     expect(get(syncStatus)).toBe('idle');
     expect(h.pullImpl).not.toHaveBeenCalled();
     expect(h.pushImpl).not.toHaveBeenCalled();

@@ -36,7 +36,13 @@ vi.mock('$lib/domain/repo', () => ({
   getAllWeights: vi.fn(async () => []),
   getAllInjections: vi.fn(async () => []),
   getAllPrescriptions: vi.fn(async () => []),
-  getProfile: vi.fn(async () => state.mockProfile),
+  getProfile: vi.fn(async () => state.mockProfile && ({
+    ...state.mockProfile,
+    id: 'profile',
+    createdAt: state.mockProfile.createdAt ?? '2026-01-01T00:00:00.000Z',
+    updatedAt: state.mockProfile.updatedAt ?? '2026-05-09T00:00:00.000Z',
+    passphraseEnabled: state.mockProfile.passphraseEnabled ?? true,
+  } as ProfileSettings)),
   getProfileSyncMode: (p: ProfileSettings | undefined): SyncMode => p?.syncMode ?? 'plain',
   saveProfile: vi.fn(async (partial: Partial<ProfileSettings>) => {
     state.saveProfileCalls.push(partial);
@@ -124,6 +130,14 @@ vi.mock('$lib/sync/account-state', () => ({
       activeDekVersion: number | null;
     }) => {
       state.completeTransitionCalls.push(p);
+      if (p.to === 'e2ee') {
+        const removed = state.remoteBundles
+          .filter((bundle) => bundle.dekVersion !== p.activeDekVersion)
+          .map((bundle) => bundle.dekVersion);
+        state.deletedBundleVersions.push(...removed);
+        state.remoteBundles = state.remoteBundles
+          .filter((bundle) => bundle.dekVersion === p.activeDekVersion);
+      }
     },
   ),
   claimMigrationOwner: vi.fn(async () => undefined),
@@ -181,6 +195,17 @@ vi.mock('$lib/sync/sync-engine', () => ({
   deleteRemotePlainChanges: vi.fn(async () => ({ deleted: 0 })),
   fetchRemoteEncryptedChanges: vi.fn(async () => []),
   pullSnapshotForMigration: vi.fn(async () => ({ fetched: 0, applied: 0 })),
+}));
+
+vi.mock('$lib/sync/remote-sync-log-transfer', () => ({
+  remoteSyncLogTransfer: {
+    createProgressReporter: () => async () => undefined,
+    heartbeat: vi.fn(async (migration: E2EEMigrationState) => {
+      state.heartbeatCalls.push(migration);
+    }),
+    rotateCiphertext: (...args: unknown[]) => reEncryptServerRowsMock(...args),
+    readEncrypted: vi.fn(async () => []),
+  },
 }));
 
 import { resumeE2EEKeyRotation, startE2EEKeyRotation } from './e2ee-migration';

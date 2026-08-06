@@ -25,7 +25,8 @@ export type E2EELifecycleCommand =
   | { type: 'generate-recovery'; passphrase?: string }
   | { type: 'acknowledge-recovery' }
   | { type: 'continue-without-recovery' }
-  | { type: 'abandon-prepared' };
+  | { type: 'abandon-prepared' }
+  | { type: 'reconcile' };
 
 export type E2EELifecycleAction =
   | 'enable'
@@ -51,6 +52,8 @@ export type E2EELifecycleSnapshot = {
   direction?: E2EEMigrationState['direction'];
   recordsConverted?: number;
   recordsTotal?: number;
+  encryptedEventCount?: number;
+  plaintextEventCount?: number;
   transitionUpdatedAt?: string;
   recoveryStatus?: RecoveryCodeStatus | 'unavailable';
   recoveryAttention: boolean;
@@ -78,6 +81,7 @@ export type E2EELifecycleResults = {
   recoveryChoice: unknown;
   takeOver: unknown;
   abandon: unknown;
+  reconcile: unknown;
 };
 
 export type E2EELifecycle<R extends E2EELifecycleResults = E2EELifecycleResults> = {
@@ -101,6 +105,7 @@ export type E2EELifecycle<R extends E2EELifecycleResults = E2EELifecycleResults>
   acknowledgeRecoveryCode(): Promise<R['recoveryChoice']>;
   continueWithoutRecoveryCode(): Promise<R['recoveryChoice']>;
   abandonPrepared(): Promise<R['abandon']>;
+  reconcile(): Promise<R['reconcile']>;
   refresh(): Promise<E2EELifecycleSnapshot>;
   getSnapshot(): E2EELifecycleSnapshot;
   subscribe(run: (snapshot: E2EELifecycleSnapshot) => void): () => void;
@@ -172,6 +177,8 @@ function snapshotFor(facts: E2EELifecycleFacts, now: number): E2EELifecycleSnaps
       direction,
       recordsConverted: migration.recordsConverted,
       recordsTotal: migration.recordsTotal,
+      encryptedEventCount: migration.encryptedEventCount,
+      plaintextEventCount: migration.plaintextEventCount,
       transitionUpdatedAt: migration.updatedAt,
       recoveryAttention: false,
       hasReadableLocalData: facts.hasReadableLocalData,
@@ -191,6 +198,8 @@ function snapshotFor(facts: E2EELifecycleFacts, now: number): E2EELifecycleSnaps
       direction,
       recordsConverted: migration.recordsConverted,
       recordsTotal: migration.recordsTotal,
+      encryptedEventCount: migration.encryptedEventCount,
+      plaintextEventCount: migration.plaintextEventCount,
       transitionUpdatedAt: migration.updatedAt,
       recoveryAttention: false,
       hasReadableLocalData: facts.hasReadableLocalData,
@@ -210,6 +219,8 @@ function snapshotFor(facts: E2EELifecycleFacts, now: number): E2EELifecycleSnaps
       direction,
       recordsConverted: migration?.recordsConverted,
       recordsTotal: migration?.recordsTotal,
+      encryptedEventCount: migration?.encryptedEventCount,
+      plaintextEventCount: migration?.plaintextEventCount,
       transitionUpdatedAt: migration?.updatedAt,
       recoveryAttention: false,
       hasReadableLocalData: facts.hasReadableLocalData,
@@ -231,6 +242,8 @@ function snapshotFor(facts: E2EELifecycleFacts, now: number): E2EELifecycleSnaps
     direction,
     recordsConverted: migration?.recordsConverted,
     recordsTotal: migration?.recordsTotal,
+    encryptedEventCount: migration?.encryptedEventCount,
+    plaintextEventCount: migration?.plaintextEventCount,
     transitionUpdatedAt: migration?.updatedAt,
     recoveryAttention: false,
     hasReadableLocalData: facts.hasReadableLocalData,
@@ -398,6 +411,9 @@ export function createE2EELifecycle<R extends E2EELifecycleResults = E2EELifecyc
         throw new Error('This Encryption Transition has already changed cloud data.');
       }
       return execute({ type: 'abandon-prepared' });
+    },
+    reconcile() {
+      return execute({ type: 'reconcile' });
     },
     async refresh() {
       return refreshSnapshot();

@@ -1,6 +1,7 @@
 import { browser } from '$app/environment';
 import { db } from '$lib/db/schema';
 import { WIPE_DB_ON_BOOT_KEY } from '$lib/auth/supabase';
+import { durableClearOrThrow } from '$lib/db/durableKv';
 
 /**
  * Runs once during client init, before any route module loads and before any
@@ -21,6 +22,7 @@ export async function init(): Promise<void> {
   }
   if (!shouldWipe) return;
   try {
+    await durableClearOrThrow();
     await db.delete();
     // Dexie 4's `delete()` closes the connection with auto-open disabled — it
     // does NOT lazily reopen on the next operation the way Dexie 3 did. Reopen

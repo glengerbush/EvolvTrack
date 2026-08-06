@@ -1,10 +1,10 @@
 import { db } from '$lib/db/schema';
 import { get } from 'svelte/store';
-import { getProfile, getProfileSyncMode } from '$lib/domain/repo';
 import { fetchRemoteSyncAccount } from '$lib/sync/account-state';
 import { connectivity } from '$lib/stores/syncStore';
 import {
   abandonPreparedTransition,
+  autoResumeMigration,
   isMigrationRunInProgress,
   recoverWithCode,
   resetEncryptionToPlain,
@@ -18,7 +18,9 @@ import {
   takeOverMigration,
   type E2EEMigrationRunResult,
   type ResetToPlainResult,
+  type AutoResumeResult,
 } from '$lib/sync/e2ee-migration';
+export type E2EETransitionResult = E2EEMigrationRunResult;
 import { deviceEncryptionState } from '$lib/sync/device-encryption-state';
 import {
   createE2EELifecycle,
@@ -35,6 +37,7 @@ type RuntimeE2EELifecycleResults = E2EELifecycleResults & {
   recoveryChoice: void;
   takeOver: void;
   abandon: void;
+  reconcile: AutoResumeResult;
 };
 
 async function hasReadableLocalData(): Promise<boolean> {
@@ -79,19 +82,20 @@ async function execute(command: E2EELifecycleCommand): Promise<unknown> {
       return deviceEncryptionState.declineRecoveryCode();
     case 'abandon-prepared':
       return abandonPreparedTransition();
+    case 'reconcile':
+      return autoResumeMigration();
   }
 }
 
 const runtimePort: E2EELifecyclePort = {
   async read() {
-    const [profile, device, remote] = await Promise.all([
-      getProfile(),
+    const [device, remote] = await Promise.all([
       deviceEncryptionState.snapshot({ refreshRemote: true }),
       fetchRemoteSyncAccount().catch(() => null),
     ]);
     return {
-      syncMode: remote?.syncMode ?? getProfileSyncMode(profile),
-      migration: remote?.migration ?? profile?.e2eeMigration,
+      syncMode: remote?.syncMode ?? device.syncMode,
+      migration: remote?.migration ?? device.migration,
       deviceId: device.deviceId,
       hasSessionKey: device.hasSessionKey,
       hasReadableLocalData: await hasReadableLocalData(),

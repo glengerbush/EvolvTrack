@@ -12,16 +12,8 @@ import {
   type SyncStatus,
 } from './syncStore';
 import { authState, type AuthState } from './authStore';
-import { sessionLocked } from '$lib/sync/session-key';
-import { fromLiveQuery } from '$lib/db/liveQuery';
-import { db } from '$lib/db/schema';
-import { getProfileSyncMode } from '$lib/domain/repo';
-import type { ProfileSettings, SyncMode } from '$lib/domain/types';
-
-const profileStore: Readable<ProfileSettings | undefined> = fromLiveQuery(
-  () => db.profile.get('profile'),
-  undefined,
-);
+import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
+import type { SyncMode } from '$lib/domain/types';
 
 /**
  * The headline state shown on the sync pill. Ordered by user-facing priority:
@@ -184,8 +176,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
     lastSyncError,
     outboxCount,
     authState,
-    profileStore,
-    sessionLocked,
+    e2eeLifecycle,
     licenseActive,
   ],
   ([
@@ -197,12 +188,19 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
     $lastError,
     $outboxCount,
     $auth,
-    $profile,
-    $locked,
+    $lifecycle,
     $licenseActive,
   ]) => {
-    const syncMode = getProfileSyncMode($profile);
-    const migrationState = $profile?.e2eeMigration;
+    const syncMode = $lifecycle.syncMode;
+    const migrationState = {
+      direction: $lifecycle.direction,
+      recordsConverted: $lifecycle.recordsConverted,
+      recordsTotal: $lifecycle.recordsTotal,
+      encryptedEventCount: $lifecycle.encryptedEventCount,
+      plaintextEventCount: $lifecycle.plaintextEventCount,
+      updatedAt: $lifecycle.transitionUpdatedAt ?? '',
+      lastError: $lifecycle.error,
+    };
     const isMigrating =
       syncMode === 'migrating_to_e2ee' ||
       syncMode === 'migrating_to_plain' ||
@@ -215,7 +213,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
       conn: $connectivity,
       status: $syncStatus,
       syncMode,
-      locked: $locked,
+      locked: $lifecycle.requiredInput === 'passphrase',
       outbox: $outboxCount,
       migrationPaused,
       isMigrating,
@@ -238,7 +236,7 @@ export const syncIndicator: Readable<SyncIndicator> = derived(
       lastPullAt: $lastPullAt,
       lastPushAt: $lastPushAt,
       lastError: $lastError,
-      migration: isMigrating && migrationState
+      migration: isMigrating
         ? {
             direction: (migrationState.direction ??
               (syncMode === 'migrating_to_plain'

@@ -37,11 +37,17 @@ const state = vi.hoisted(() => ({
 
 vi.mock('$lib/domain/repo', () => ({
   getAllEntries: vi.fn(async () => [
-    { id: 'w1', date: '2026-05-01', weightLbs: 180, updatedAt: '2026-05-01T00:00:00.000Z' },
-    { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Sema', updatedAt: '2026-05-01T00:00:00.000Z' },
+    { id: 'w1', date: '2026-05-01', weightLbs: 180, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+    { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Sema', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
   ]),
   getAllPrescriptions: vi.fn(async () => []),
-  getProfile: vi.fn(async () => state.mockProfile),
+  getProfile: vi.fn(async () => state.mockProfile && ({
+    ...state.mockProfile,
+    id: 'profile',
+    createdAt: state.mockProfile.createdAt ?? '2026-01-01T00:00:00.000Z',
+    updatedAt: state.mockProfile.updatedAt ?? '2026-05-09T00:00:00.000Z',
+    passphraseEnabled: state.mockProfile.passphraseEnabled ?? false,
+  } as ProfileSettings)),
   getProfileSyncMode: (p: ProfileSettings | undefined): SyncMode => p?.syncMode ?? 'plain',
   saveProfile: vi.fn(async (partial: Partial<ProfileSettings>) => {
     state.saveProfileCalls.push(partial);
@@ -83,7 +89,14 @@ vi.mock('$lib/crypto/e2ee', () => ({
     iv: 'iv',
   })),
   decryptRecord: vi.fn(async (_key: string, ciphertext: string) => {
-    return JSON.parse(ciphertext.replace(/^ct:/, ''));
+    const envelope = JSON.parse(ciphertext.replace(/^ct:/, ''));
+    if (envelope.op === 'upsert' && envelope.record && envelope.aggregate === 'entry') {
+      envelope.record = {
+        date: '2026-05-01', createdAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z', ...envelope.record,
+      };
+    }
+    return envelope;
   }),
 }));
 
@@ -186,6 +199,63 @@ vi.mock('$lib/sync/sync-engine', () => ({
   fetchRemotePlainChanges: (...args: unknown[]) => fetchRemotePlainChangesMock(...args),
   pullSnapshotForMigration: (...args: unknown[]) => pullSnapshotForMigrationMock(...args),
   reEncryptServerRows: vi.fn(async () => 0),
+}));
+
+vi.mock('$lib/sync/remote-sync-log-transfer', () => ({
+  remoteSyncLogTransfer: {
+    createProgressReporter: (migration: E2EEMigrationState) => async (converted: number, total: number) => {
+      Object.assign(migration, { recordsConverted: converted, recordsTotal: total });
+      const account = await import('$lib/sync/account-state');
+      await account.heartbeatMigrationProgress(migration);
+    },
+    heartbeat: async (migration: E2EEMigrationState) => {
+      const account = await import('$lib/sync/account-state');
+      return account.heartbeatMigrationProgress(migration);
+    },
+    readEncrypted: (...args: unknown[]) => fetchRemoteEncryptedChangesMock(...args),
+    readPlain: (...args: unknown[]) => fetchRemotePlainChangesMock(...args),
+    removeEncrypted: (...args: unknown[]) => deleteRemoteEncryptedChangesMock(...args),
+    rotateCiphertext: vi.fn(async () => 0),
+    copyEncryptedThenRemovePlain: async (options: {
+      migration: E2EEMigrationState;
+    }) => {
+      const account = await import('$lib/sync/account-state');
+      await account.advanceSyncTransitionPhase({
+        migrationId: options.migration.id, ownerDeviceId: options.migration.ownerDeviceId, phase: 'transferring',
+      });
+      options.migration.phase = 'transferring';
+      const pushed = await pushEncryptedChangesMock({ allowMigrating: true });
+      await account.advanceSyncTransitionPhase({
+        migrationId: options.migration.id, ownerDeviceId: options.migration.ownerDeviceId, phase: 'verifying',
+      });
+      options.migration.phase = 'verifying';
+      const remote = await account.fetchRemoteSyncAccount();
+      if (remote?.migration?.ownerDeviceId !== 'device-1') throw new account.MigrationSupersededError();
+      await deleteRemotePlainChangesMock();
+      return pushed;
+    },
+    copyPlainThenRemoveEncrypted: async (options: {
+      changes: unknown[];
+      migration: E2EEMigrationState;
+    }) => {
+      const account = await import('$lib/sync/account-state');
+      await fetchRemoteEncryptedChangesMock();
+      await account.advanceSyncTransitionPhase({
+        migrationId: options.migration.id, ownerDeviceId: options.migration.ownerDeviceId, phase: 'transferring',
+      });
+      options.migration.phase = 'transferring';
+      const pushed = await pushPlainChangesMock(options.changes);
+      await account.advanceSyncTransitionPhase({
+        migrationId: options.migration.id, ownerDeviceId: options.migration.ownerDeviceId, phase: 'verifying',
+      });
+      options.migration.phase = 'verifying';
+      const remote = await account.fetchRemoteSyncAccount();
+      if (remote?.migration?.ownerDeviceId !== 'device-1') throw new account.MigrationSupersededError();
+      const deleted = await deleteRemoteEncryptedChangesMock();
+      await fetchRemoteEncryptedChangesMock();
+      return { pushed: pushed.pushed, deleted: deleted.deleted };
+    },
+  },
 }));
 
 // Imports MUST come after vi.mock so the mocks are applied.
@@ -417,6 +487,21 @@ describe('startE2EEMigration — happy path from plain', () => {
     expect(pullSnapshotForMigrationMock).toHaveBeenCalledWith('DEK_BYTES');
   });
 
+  it('encrypts remote tombstones so plaintext deletion can complete safely', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    fetchRemotePlainChangesMock.mockResolvedValueOnce([{
+      id: 'entry:deleted-remote', aggregate: 'entry', op: 'delete', payload: null,
+      protocolVersion: 1, schemaVersion: 3, createdAt: '2026-05-08T00:00:00.000Z',
+    }]);
+
+    const result = await startE2EEMigration('pw');
+    const tombstone = await db.migrationBackfill.get('entry:deleted-remote');
+
+    expect(result.completed).toBe(true);
+    expect(tombstone).toMatchObject({ op: 'delete', createdAt: '2026-05-08T00:00:00.000Z' });
+    expect(tombstone?.payloadCiphertext).toContain('"op":"delete"');
+  });
+
   it('deletes the remote plaintext rows once the encrypted copies are pushed', async () => {
     state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
     await startE2EEMigration('pw');
@@ -537,7 +622,7 @@ describe('resumeE2EEMigration — resume an in-progress enable', () => {
     const result = await resumeE2EEMigration('pw');
     // Failure surfaces as a paused migration with the error captured.
     expect(result.completed).toBe(false);
-    expect(result.error).toMatch(/wrapped-key bundle/i);
+    expect(result.error).toMatch(/wrapped (encryption key|key bundle)/i);
   });
 });
 
@@ -768,10 +853,11 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     expect(pushPlainChangesMock).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the wrapped-key bundle (local + remote) on success and switches profile to plain', async () => {
+  it('clears local keys after atomic remote finalization and switches profile to plain', async () => {
     await startE2EEDisableMigration('pw');
     expect(clearLocalWrappedKeys).toHaveBeenCalled();
-    expect(deleteRemoteWrappedKeys).toHaveBeenCalled();
+    expect(deleteRemoteWrappedKeys).not.toHaveBeenCalled();
+    expect(state.completeTransitionCalls.at(-1)?.to).toBe('plain');
     expect(clearSession).toHaveBeenCalled();
     const finalSave = state.saveProfileCalls[state.saveProfileCalls.length - 1];
     expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
@@ -1101,7 +1187,7 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
 
     expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalled();
     expect(clearLocalWrappedKeys).toHaveBeenCalled();
-    expect(deleteRemoteWrappedKeys).toHaveBeenCalled();
+    expect(deleteRemoteWrappedKeys).not.toHaveBeenCalled();
     expect(clearSession).toHaveBeenCalled();
     expect(getPullCursor()).toBeNull();
 

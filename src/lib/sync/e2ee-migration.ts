@@ -23,8 +23,6 @@ import {
   derivePassphraseKek,
   deriveRecoveryKek,
   encryptRecord,
-  generateDek,
-  generateRecoveryCode,
   generateSaltB64,
   unwrapDek,
   wrapDek,
@@ -40,32 +38,24 @@ import {
   completeSyncTransition,
   fetchRemoteSyncAccount,
   getDeviceId,
-  heartbeatMigrationProgress,
   MigrationSupersededError,
   startFreshSync,
 } from '$lib/sync/account-state';
-import { clearSession, getSessionKey, setSessionKey } from '$lib/sync/session-key';
-import { clearPullCursor } from '$lib/sync/pull-cursor';
-import type { EncryptedSyncChange } from '$lib/sync/sync-engine';
-import { remoteSyncLogTransfer } from '$lib/sync/remote-sync-log-transfer';
+import { pullSnapshotForMigration } from '$lib/sync/sync-engine';
+import {
+  remoteSyncLogTransfer,
+  type EncryptedSyncChange,
+} from '$lib/sync/remote-sync-log-transfer';
 import { deviceEncryptionState } from '$lib/sync/device-encryption-state';
 import {
   canonicalSyncChange,
   type PlainSyncChange,
 } from '$lib/sync/canonical-sync-change';
-import {
-  clearLocalWrappedKeys,
-  deleteRemoteWrappedKeys,
-  fetchAllRemoteWrappedKeys,
-  fetchRemoteWrappedKeys,
-  getLocalWrappedKeys,
-  saveLocalWrappedKeys,
-  upsertRemoteWrappedKeys,
-} from '$lib/sync/wrapped-keys';
 
 type BackfillItem = {
   aggregate: SyncAggregate;
   id: string;
+  op: 'upsert' | 'delete';
   updatedAt: string;
   payload: unknown;
 };
@@ -79,7 +69,7 @@ export const MIGRATION_HEARTBEAT_MS = 2000;
 export const MIGRATION_STALE_MS = 25000;
 
 /** Reports backfill progress as `(converted, total)`; may be throttled. */
-type ProgressReporter = (converted: number, total: number) => Promise<void>;
+type ProgressReporter = (converted: number, total: number) => Promise<void> | void;
 
 /**
  * How many migration runs (enable / disable / rotate, started here or resumed
@@ -88,11 +78,8 @@ type ProgressReporter = (converted: number, total: number) => Promise<void>;
  * delegates to `resumeE2EEKeyRotation`).
  *
  * The orchestrator's `autoResumeMigration` consults this: while a run owns the
- * transition locally, a concurrent sync cycle must not independently raise the
- * "needs your passphrase" prompt or try to drive the same migration. That race
- * is what briefly flashed the rotation passphrase modal as a rotation finished
- * — the run had flipped the profile to `rotating_e2ee_key`, an interleaved
- * cycle saw that and set `migrationResumePending`, and the run then cleared it.
+ * transition locally, a concurrent sync cycle must not independently drive the
+ * same migration or publish a stale credential-required snapshot.
  */
 let activeMigrationRuns = 0;
 
@@ -138,30 +125,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/**
- * Build a throttled progress reporter for a backfill. Each tick stamps the
- * latest `recordsConverted`/`recordsTotal` and a fresh `updatedAt` onto the
- * local profile (so this device's own UI shows live progress) and the server
- * (so other devices see progress + a liveness heartbeat). Throttled to one
- * write per `MIGRATION_HEARTBEAT_MS`, but the final (`converted === total`)
- * tick always flushes. The server write is best-effort and owner-scoped: it
- * never rewrites `sync_mode`/ownership, so a transient network failure can't
- * abort the local CPU-bound encrypt loop, and a heartbeat from a device that
- * was meanwhile taken over no-ops instead of clobbering the new owner.
- */
-function createProgressReporter(base: E2EEMigrationState): ProgressReporter {
-  let lastWriteAt = 0;
-  let latest = base;
-  return async (converted, total) => {
-    const done = total > 0 && converted >= total;
-    const now = Date.now();
-    if (!done && now - lastWriteAt < MIGRATION_HEARTBEAT_MS) return;
-    lastWriteAt = now;
-    latest = { ...latest, recordsConverted: converted, recordsTotal: total, updatedAt: nowIso() };
-    await saveProfile({ e2eeMigration: latest });
-    await heartbeatMigrationProgress(latest).catch(() => undefined);
-  };
-}
 
 /**
  * Re-check, against the server, that this device still owns the given migration
@@ -246,12 +209,14 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
     ...entries.map((record) => ({
       aggregate: 'entry' as const,
       id: record.id,
+      op: 'upsert' as const,
       updatedAt: record.updatedAt,
       payload: record,
     })),
     ...prescriptions.map((record) => ({
       aggregate: 'prescription' as const,
       id: record.id,
+      op: 'upsert' as const,
       updatedAt: record.updatedAt,
       payload: record,
     })),
@@ -261,7 +226,8 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
     items.push({
       aggregate: 'profile',
       id: 'profile',
-      updatedAt: profile.updatedAt,
+      op: 'upsert',
+      updatedAt: profile.updatedAt ?? nowIso(),
       payload: profilePayload(profile),
     });
   }
@@ -272,9 +238,24 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
 async function backfillEncryptedRecords(
   dek: string,
   migrationId: string,
+  remoteChanges: PlainSyncChange[],
   onProgress?: ProgressReporter,
 ): Promise<number> {
-  const items = await collectBackfillItems();
+  const localItems = await collectBackfillItems();
+  const items = [...new Map(
+    [
+      ...localItems,
+      ...remoteChanges.map((change) => ({
+        aggregate: change.aggregate,
+        id: canonicalSyncChange.entityId(change.id),
+        op: change.op,
+        updatedAt: change.createdAt ?? nowIso(),
+        payload: change.op === 'delete' ? null : change.payload,
+      })),
+    ]
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .map((item) => [`${item.aggregate}:${item.id}`, item] as const),
+  ).values()];
   const encryptedRecords: EncryptedRecord[] = [];
   const backfillEntries: MigrationBackfillEntry[] = [];
   const total = items.length;
@@ -285,19 +266,21 @@ async function backfillEncryptedRecords(
   if (onProgress) await onProgress(0, total);
 
   for (const item of items) {
-    const encrypted = await encryptRecord(dek, {
-      aggregate: item.aggregate,
-      op: 'upsert',
-      record: item.payload,
-      migrationId,
-    });
+    const change = canonicalPlainChange(
+      item.aggregate,
+      item.op,
+      item.payload,
+      `${item.aggregate}:${item.id}`,
+      item.updatedAt,
+    );
+    const encrypted = await canonicalSyncChange.seal(change, dek, { migrationId });
 
     encryptedRecords.push({
-      id: `${item.aggregate}:${item.id}`,
+      id: encrypted.id,
       entity: item.aggregate,
       ciphertext: encrypted.ciphertext,
       iv: encrypted.iv,
-      keyVersion: ENCRYPTION_FORMAT_VERSION,
+      keyVersion: encrypted.encryptionVersion,
       updatedAt: item.updatedAt,
     });
 
@@ -307,15 +290,15 @@ async function backfillEncryptedRecords(
       // the same entity upsert into ONE server row instead of two. Two rows per
       // entity would otherwise collapse to a duplicate id when disabling and
       // crash the plaintext upsert. (`migrationId` lives inside the ciphertext.)
-      id: `${item.aggregate}:${item.id}`,
+      id: encrypted.id,
       aggregate: item.aggregate,
-      op: 'upsert',
+      op: item.op,
       payloadCiphertext: encrypted.ciphertext,
       payloadIv: encrypted.iv,
-      protocolVersion: SYNC_PROTOCOL_VERSION,
-      encryptionVersion: ENCRYPTION_FORMAT_VERSION,
-      schemaVersion: DB_SCHEMA_VERSION,
-      createdAt: nowIso(),
+      protocolVersion: encrypted.protocolVersion,
+      encryptionVersion: encrypted.encryptionVersion,
+      schemaVersion: encrypted.schemaVersion,
+      createdAt: encrypted.createdAt,
     });
 
     converted += 1;
@@ -373,6 +356,19 @@ async function collectPlainChangesFromLocalRecords(): Promise<PlainSyncChange[]>
   );
 }
 
+async function collectEncryptedBackfillChanges(dekVersion: number): Promise<EncryptedSyncChange[]> {
+  return (await db.migrationBackfill.orderBy('createdAt').toArray()).map((row) => ({
+    id: row.id,
+    ciphertext: row.payloadCiphertext,
+    iv: row.payloadIv,
+    protocolVersion: row.protocolVersion,
+    encryptionVersion: row.encryptionVersion,
+    dekVersion,
+    schemaVersion: row.schemaVersion,
+    createdAt: row.createdAt,
+  }));
+}
+
 async function decryptLocalBackfill(dek: string) {
   const rows = await db.migrationBackfill.orderBy('createdAt').toArray();
   const plainChanges: PlainSyncChange[] = [];
@@ -409,7 +405,7 @@ async function decryptRemoteBackfill(dek: string) {
   // throw and wedge the whole disable — the same reason `pullEncrypted`
   // version-filters. Orphan-version rows are swept by the unconditional
   // `deleteRemoteEncryptedChanges()` at the end of the disable.
-  const dekVersion = (await getLocalWrappedKeys())?.dekVersion ?? 1;
+  const dekVersion = (await deviceEncryptionState.getActiveWrappedKeyBundle())?.dekVersion ?? 1;
   const rows = await remoteSyncLogTransfer.readEncrypted(dekVersion);
   const plainChanges: PlainSyncChange[] = [];
 
@@ -442,53 +438,11 @@ async function decryptRemoteBackfill(dek: string) {
 }
 
 /**
- * Create a fresh wrapped-key bundle: random DEK + recovery code, both KEKs
- * derived from the passphrase and code, both wrappings persisted locally
- * and to the server.
- */
-async function mintBundle(
-  passphrase: string,
-  options: { dekVersion: number; beforeRemotePersist?: () => Promise<void> },
-): Promise<{ dek: string; bundle: WrappedKeyBundle; recoveryCode: string }> {
-  const dek = await generateDek();
-  const passphraseSaltB64 = generateSaltB64();
-  const recoverySaltB64 = generateSaltB64();
-  const recoveryCode = generateRecoveryCode();
-
-  const passphraseKek = await derivePassphraseKek(passphrase, passphraseSaltB64, PBKDF2_ITERATIONS);
-  const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64, PBKDF2_ITERATIONS);
-
-  const passphraseWrapped = await wrapDek(passphraseKek, dek);
-  const recoveryWrapped = await wrapDek(recoveryKek, dek);
-
-  const bundle = await saveLocalWrappedKeys({
-    dekVersion: options.dekVersion,
-    passphraseSaltB64,
-    passphraseWrapped,
-    passphraseIterations: PBKDF2_ITERATIONS,
-    recoveryStatus: 'unconfirmed',
-    recoverySaltB64,
-    recoveryWrapped,
-    recoveryIterations: PBKDF2_ITERATIONS,
-    updatedAt: nowIso(),
-  });
-  await options.beforeRemotePersist?.();
-  await upsertRemoteWrappedKeys(bundle);
-
-  return { dek, bundle, recoveryCode };
-}
-
-/**
  * Unwrap the DEK from the locally-cached bundle using the supplied passphrase.
  * Used by resume/disable flows where the bundle was minted on a previous run.
  */
 async function unwrapDekWithPassphrase(passphrase: string): Promise<string> {
-  const bundle = await getLocalWrappedKeys();
-  if (!bundle) {
-    throw new Error('No wrapped-key bundle is present locally. Start the encryption migration again.');
-  }
-  const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64, bundle.passphraseIterations);
-  return unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);
+  return deviceEncryptionState.unwrapWithPassphrase(passphrase);
 }
 
 async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEMigrationState> {
@@ -506,7 +460,7 @@ async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEM
   // Record the now-active DEK version (the bundle everything was just encrypted
   // under) and clear any pending-rotation marker. Guarded: completes only if we
   // still own this migration, else throws MigrationSupersededError.
-  const activeBundle = await getLocalWrappedKeys();
+  const activeBundle = await deviceEncryptionState.getActiveWrappedKeyBundle();
   await completeSyncTransition({
     migrationId: migration.id,
     ownerDeviceId: migration.ownerDeviceId,
@@ -521,7 +475,7 @@ async function finishE2EEMigration(migration: E2EEMigrationState): Promise<E2EEM
   // Steady-state sync now pulls `sync_changes_encrypted` instead of `sync_changes_plain`.
   // The pull cursor tracked the old table's `inserted_at` sequence, so it is
   // meaningless against the new one — reset it and let the next pull refetch.
-  clearPullCursor();
+  deviceEncryptionState.resetPullCursorForTableSwitch();
   // The whole dataset is now on the server under the new mode — that's a
   // completed sync. Stamp it so "Last synced" reflects a real completion, not a
   // mid-flight push step (which is why the granular push/delete helpers no
@@ -554,10 +508,10 @@ async function continueE2EEMigrationImpl(
     // call; otherwise unwrap from the locally-cached bundle. Inside the try
     // so a wrong-passphrase / missing-bundle error surfaces as a paused
     // migration rather than a thrown exception the UI has to catch.
-    let dek = getSessionKey();
+    let dek = deviceEncryptionState.getSessionKey();
     if (!dek) {
       dek = await unwrapDekWithPassphrase(passphrase);
-      setSessionKey(dek);
+      deviceEncryptionState.activateSessionKey(dek);
     }
 
     // Absorb anything that lives only on the server before we re-encrypt and
@@ -566,10 +520,16 @@ async function continueE2EEMigrationImpl(
     // prior partial run of this migration already pushed encrypted rows, that
     // this device never pulled. Idempotent (LWW), so re-running on resume is
     // safe.
-    await remoteSyncLogTransfer.absorbSnapshot(dek);
+    await pullSnapshotForMigration(dek);
 
-    const report = createProgressReporter(migration);
-    const encryptedEventCount = await backfillEncryptedRecords(dek, migration.id, report);
+    const report = remoteSyncLogTransfer.createProgressReporter(migration, MIGRATION_HEARTBEAT_MS);
+    const remotePlainChanges = await remoteSyncLogTransfer.readPlain();
+    const encryptedEventCount = await backfillEncryptedRecords(
+      dek,
+      migration.id,
+      remotePlainChanges,
+      report,
+    );
     const updatedMigration: E2EEMigrationState = {
       ...migration,
       encryptedEventCount,
@@ -582,12 +542,11 @@ async function continueE2EEMigrationImpl(
     await saveProfile({ e2eeMigration: updatedMigration });
     // Heartbeat right before the (potentially slow) push + finalize so a
     // watching device's stale timer resets at the start of this phase.
-    await heartbeatMigrationProgress(updatedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(updatedMigration).catch(() => undefined);
 
     const pushed = await remoteSyncLogTransfer.copyEncryptedThenRemovePlain({
-      beforeWrite: () => advanceMigrationPhase(updatedMigration, 'transferring'),
-      beforeDelete: () => advanceMigrationPhase(updatedMigration, 'verifying'),
-      assertOwnership: () => assertStillMigrationOwner(migration.id),
+      changes: await collectEncryptedBackfillChanges((await deviceEncryptionState.getActiveWrappedKeyBundle())?.dekVersion ?? 1),
+      migration: updatedMigration,
     });
     const completedMigration = await finishE2EEMigration(updatedMigration);
 
@@ -625,7 +584,7 @@ async function continueE2EEMigrationImpl(
       syncMode: 'migrating_to_e2ee',
       e2eeMigration: failedMigration,
     });
-    await heartbeatMigrationProgress(failedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(failedMigration).catch(() => undefined);
 
     return {
       syncMode: 'migrating_to_e2ee',
@@ -693,7 +652,7 @@ export async function startE2EEMigration(
   await advanceMigrationPhase(migration, 'transferring');
   try {
     await remoteSyncLogTransfer.removeEncrypted();
-    await deleteRemoteWrappedKeys();
+    await deviceEncryptionState.removeCloudKeyMaterial();
   } catch (cause) {
     throw new Error(
       `Couldn't clear the previous encrypted data before enabling (${errorMessage(cause)}). ` +
@@ -701,9 +660,12 @@ export async function startE2EEMigration(
     );
   }
 
-  const { dek, recoveryCode } = await mintBundle(passphrase, { dekVersion });
+  const { dek, recoveryCode } = await deviceEncryptionState.createWrappedKeyBundle(
+    passphrase,
+    dekVersion,
+  );
   options.onRecoveryCode?.(recoveryCode);
-  setSessionKey(dek);
+  deviceEncryptionState.activateSessionKey(dek);
 
   await saveProfile({
     passphraseEnabled: true,
@@ -735,10 +697,8 @@ async function finishE2EEDisableMigration(
     lastError: undefined,
   };
 
-  // Guarded finalize first: if another device took this disable over, throws
-  // MigrationSupersededError and we leave the key bundle + encrypted copy
-  // intact for the new owner. The data is already safe on the plaintext table
-  // (pushed before this), so nothing is lost either way.
+  // Guarded finalize atomically deletes cloud key material while holding the
+  // account transition lock. A superseded owner changes nothing.
   await completeSyncTransition({
     migrationId: migration.id,
     ownerDeviceId: migration.ownerDeviceId,
@@ -749,12 +709,7 @@ async function finishE2EEDisableMigration(
     await db.encrypted.clear();
     await db.migrationBackfill.clear();
   });
-  await clearLocalWrappedKeys();
-  await deleteRemoteWrappedKeys().catch(() => undefined);
-  clearSession();
-  // Steady-state sync now pulls `sync_changes_plain` instead of `sync_changes_encrypted`;
-  // the old cursor doesn't apply to the new table's `inserted_at` sequence.
-  clearPullCursor();
+  await deviceEncryptionState.clearForPlainMode();
   await saveProfile({
     passphraseEnabled: false,
     syncMode: 'plain',
@@ -783,10 +738,10 @@ async function continueE2EEDisableMigrationImpl(passphrase: string): Promise<E2E
     // Unwrap from the local bundle using the supplied passphrase. Inside the
     // try so wrong-passphrase / missing-bundle errors land in the paused-
     // migration result instead of crashing the caller.
-    let dek = getSessionKey();
+    let dek = deviceEncryptionState.getSessionKey();
     if (!dek) {
       dek = await unwrapDekWithPassphrase(passphrase);
-      setSessionKey(dek);
+      deviceEncryptionState.activateSessionKey(dek);
     }
 
     const remoteDecrypted = await decryptRemoteBackfill(dek);
@@ -823,13 +778,11 @@ async function continueE2EEDisableMigrationImpl(passphrase: string): Promise<E2E
 
     await saveProfile({ e2eeMigration: updatedMigration });
     // Heartbeat (owner-scoped, no mode write) before the push + finalize.
-    await heartbeatMigrationProgress(updatedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(updatedMigration).catch(() => undefined);
 
     const transfer = await remoteSyncLogTransfer.copyPlainThenRemoveEncrypted({
       changes: plainChanges,
-      beforeWrite: () => advanceMigrationPhase(updatedMigration, 'transferring'),
-      beforeDelete: () => advanceMigrationPhase(updatedMigration, 'verifying'),
-      assertOwnership: () => assertStillMigrationOwner(migration.id),
+      migration: updatedMigration,
     });
     const completedMigration = await finishE2EEDisableMigration(
       updatedMigration,
@@ -872,7 +825,7 @@ async function continueE2EEDisableMigrationImpl(passphrase: string): Promise<E2E
       syncMode: 'migrating_to_plain',
       e2eeMigration: failedMigration,
     });
-    await heartbeatMigrationProgress(failedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(failedMigration).catch(() => undefined);
 
     return {
       syncMode: 'migrating_to_plain',
@@ -969,8 +922,8 @@ async function driveRotationImpl(
   recoveryCode?: string,
 ): Promise<E2EEMigrationRunResult> {
   try {
-    setSessionKey(newDek);
-    const report = createProgressReporter(migration);
+    deviceEncryptionState.activateSessionKey(newDek);
+    const report = remoteSyncLogTransfer.createProgressReporter(migration, MIGRATION_HEARTBEAT_MS);
     // Re-encrypt every old-version row to the new DEK, then converge: loop until
     // a pass converts nothing. A device that hasn't yet reconciled the rotating
     // mode can still push a row under the OLD dek (RLS permits encrypted writes
@@ -1007,17 +960,15 @@ async function driveRotationImpl(
       lastError: undefined,
     };
     await saveProfile({ e2eeMigration: updatedMigration });
-    await heartbeatMigrationProgress(updatedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(updatedMigration).catch(() => undefined);
 
     await advanceMigrationPhase(updatedMigration, 'verifying');
 
-    // Re-check ownership before dropping the old bundle (a destructive step): if
-    // a second device took the rotation over, bail rather than race it.
+    // Re-check ownership before finalization. The guarded completion RPC fences
+    // concurrent writes, verifies no obsolete-version rows remain, and removes
+    // the old wrapped key in the same transaction.
     await assertStillMigrationOwner(migration.id);
     await advanceMigrationPhase(updatedMigration, 'finalizing');
-    // Every row is under the new DEK now → drop the old key bundle. After this
-    // the old DEK can read nothing on the server: the forward-secrecy boundary.
-    await deleteRemoteWrappedKeys(oldVersion);
     await db.transaction('rw', db.encrypted, db.migrationBackfill, async () => {
       await db.encrypted.clear();
       await db.migrationBackfill.clear();
@@ -1050,7 +1001,7 @@ async function driveRotationImpl(
     const message = errorMessage(error);
     const failedMigration: E2EEMigrationState = { ...migration, updatedAt: nowIso(), lastError: message };
     await saveProfile({ passphraseEnabled: true, syncMode: 'rotating_e2ee_key', e2eeMigration: failedMigration });
-    await heartbeatMigrationProgress(failedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(failedMigration).catch(() => undefined);
     return {
       syncMode: 'rotating_e2ee_key',
       migration: failedMigration,
@@ -1085,10 +1036,11 @@ async function beginKeyRotation(
   });
   const oldVersion = activeDekVersion ?? 1;
   const newVersion = pendingDekVersion ?? oldVersion + 1;
-  const { dek: newDek, recoveryCode } = await mintBundle(newPassphrase, {
-    dekVersion: newVersion,
-    beforeRemotePersist: () => advanceMigrationPhase(migration, 'transferring'),
-  });
+  await advanceMigrationPhase(migration, 'transferring');
+  const { dek: newDek, recoveryCode } = await deviceEncryptionState.createWrappedKeyBundle(
+    newPassphrase,
+    newVersion,
+  );
   options.onRecoveryCode?.(recoveryCode);
   await saveProfile({ passphraseEnabled: true, syncMode: 'rotating_e2ee_key', e2eeMigration: migration });
   return driveRotation(oldDek, oldVersion, newDek, newVersion, migration, recoveryCode);
@@ -1121,7 +1073,7 @@ export async function startE2EEKeyRotation(
     throw new Error('Key rotation requires E2EE to be enabled.');
   }
 
-  const oldBundle = await getLocalWrappedKeys();
+  const oldBundle = await deviceEncryptionState.getActiveWrappedKeyBundle();
   if (!oldBundle) {
     throw new Error('No local key bundle is present. Unlock on this device before rotating.');
   }
@@ -1162,19 +1114,19 @@ async function resumeE2EEKeyRotationImpl(
   let newDek: string;
   let newVersion: number;
   try {
-    const bundles = await fetchAllRemoteWrappedKeys(); // ascending by version
+    const bundles = await deviceEncryptionState.getRotationKeyBundles(); // ascending by version
     if (bundles.length === 0) throw new Error('No key bundle is associated with this account.');
 
     const newBundle = bundles[bundles.length - 1];
     newVersion = newBundle.dekVersion;
     newDek = await deriveDekFromBundle(newBundle, np);
     const { id: _id, ...withoutId } = newBundle;
-    await saveLocalWrappedKeys(withoutId);
+    await deviceEncryptionState.cacheActiveWrappedKeyBundle(withoutId);
 
     if (bundles.length === 1) {
       // The old bundle is already gone → the re-encrypt finished on a previous
       // run; just finalize into steady-state e2ee under the new key.
-      setSessionKey(newDek);
+      deviceEncryptionState.activateSessionKey(newDek);
       const completedMigration = await finishE2EEMigration({ ...migration, updatedAt: nowIso(), lastError: undefined });
       return {
         syncMode: 'e2ee',
@@ -1195,7 +1147,7 @@ async function resumeE2EEKeyRotationImpl(
     // Owner-scoped heartbeat (NOT upsertRemoteSyncAccount) so a resume that fails
     // after another device took the rotation over can't clobber the new owner's
     // claim / mode — matches the other run-failure catches. No-ops if superseded.
-    await heartbeatMigrationProgress(failedMigration).catch(() => undefined);
+    await remoteSyncLogTransfer.heartbeat(failedMigration).catch(() => undefined);
     return {
       syncMode: 'rotating_e2ee_key',
       migration: failedMigration,
@@ -1288,26 +1240,13 @@ export async function resetEncryptionToPlain(): Promise<ResetToPlainResult> {
   //    pushPlainChanges), LWW-merged by other devices on their next pull.
   const transfer = await remoteSyncLogTransfer.copyPlainThenRemoveEncrypted({
     changes: plainChanges,
-    beforeWrite: () => advanceMigrationPhase(migration, 'transferring'),
-    beforeDelete: () => advanceMigrationPhase(migration, 'verifying'),
-    assertOwnership: () => assertStillMigrationOwner(migration.id),
+    migration,
   });
 
   await advanceMigrationPhase(migration, 'finalizing');
 
-  // 3. The verified remote source is gone; clear local encrypted scratch.
-  await db.transaction('rw', db.encrypted, db.migrationBackfill, async () => {
-    await db.encrypted.clear();
-    await db.migrationBackfill.clear();
-  });
-  await clearLocalWrappedKeys();
-  await deleteRemoteWrappedKeys().catch(() => undefined);
-  clearSession();
-  // Pull cursor pointed into the encrypted table's sequence; reset for plain.
-  clearPullCursor();
-
-  // 4. Land in a clean plaintext state. Guarded completion (ownership-checked)
-  //    so a device that took the transition over can't be clobbered.
+  // 3. Finalize authoritatively before deleting recovery material. If this
+  //    device lost ownership, the key remains available to the new owner.
   const completedAt = nowIso();
   const completedMigration: E2EEMigrationState = {
     ...migration,
@@ -1321,6 +1260,15 @@ export async function resetEncryptionToPlain(): Promise<ResetToPlainResult> {
     to: 'plain',
     activeDekVersion: null,
   });
+
+  // 4. The server is safely plain; clear local encrypted scratch.
+  await db.transaction('rw', db.encrypted, db.migrationBackfill, async () => {
+    await db.encrypted.clear();
+    await db.migrationBackfill.clear();
+  });
+  await deviceEncryptionState.clearForPlainMode();
+
+  // 5. Land in a clean local plaintext state.
   await saveProfile({
     passphraseEnabled: false,
     syncMode: 'plain',
@@ -1374,9 +1322,7 @@ export async function startFreshToPlain(): Promise<void> {
     await db.migrationBackfill.clear();
     await db.outbox.clear();
   });
-  await clearLocalWrappedKeys();
-  clearSession();
-  clearPullCursor();
+  await deviceEncryptionState.clearForPlainMode();
 
   const completedAt = nowIso();
   const completedMigration: E2EEMigrationState = {
@@ -1444,17 +1390,11 @@ export async function recoverWithCode(
   if (!recoveryCode?.trim()) throw new Error('Recovery code is required.');
   if (!newPassphrase) throw new Error('New passphrase is required.');
 
-  let bundle = await getLocalWrappedKeys();
-  if (!bundle) {
-    const remote = await fetchRemoteWrappedKeys();
-    if (!remote) {
-      throw new Error('No encrypted account is associated with this user.');
-    }
-    bundle = remote;
-    // Cache the fetched bundle locally so the rotation can reference it.
-    // The id is fixed to 'self' by saveLocalWrappedKeys.
-    const { id: _id, ...withoutId } = remote;
-    await saveLocalWrappedKeys(withoutId);
+  let bundle: WrappedKeyBundle;
+  try {
+    bundle = await deviceEncryptionState.requireWrappedKeyBundle();
+  } catch {
+    throw new Error('No encrypted account is associated with this user.');
   }
 
   // Unwrap the (old) DEK with the recovery KEK. A failure here is the canonical
@@ -1558,11 +1498,8 @@ function directionFor(
 export async function autoResumeMigration(): Promise<AutoResumeResult> {
   // A migration run is already executing in this tab (the user started it from
   // settings, or hit Resume in the modal). It owns the transition and drives its
-  // own UI; a concurrent sync cycle must not independently raise the resume
-  // prompt or try to drive the same migration. Doing so briefly flashed the
-  // rotation passphrase modal as a rotation finished — the run had flipped the
-  // profile to `rotating_e2ee_key`, this cycle saw that and set
-  // `migrationResumePending`, then the run cleared it.
+  // own UI; a concurrent sync cycle must not independently drive the same
+  // migration or publish stale lifecycle state.
   if (isMigrationRunInProgress()) return { status: 'in-progress' };
 
   const profile = await getProfile();
@@ -1605,7 +1542,7 @@ export async function autoResumeMigration(): Promise<AutoResumeResult> {
   // (the session key is persisted), so this resumes silently. When it isn't
   // (logout wiped it, persistence failed, or this device just took over), ask
   // the UI to collect the passphrase instead.
-  if (!getSessionKey()) {
+  if (!deviceEncryptionState.getSessionKey()) {
     return { status: 'needs-passphrase', direction: directionFor(migration, mode) };
   }
 

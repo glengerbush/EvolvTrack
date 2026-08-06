@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   dbDeleteMock: vi.fn(),
   dbCloseMock: vi.fn(),
   createClientMock: vi.fn(),
+  clearEncryptionStateMock: vi.fn(),
 }));
 
 vi.mock('@supabase/supabase-js', () => {
@@ -37,6 +38,12 @@ vi.mock('$lib/db/schema', () => ({
   db: {
     delete: (...args: unknown[]) => h.dbDeleteMock(...args),
     close: (...args: unknown[]) => h.dbCloseMock(...args),
+  },
+}));
+
+vi.mock('$lib/sync/device-encryption-state', () => ({
+  deviceEncryptionState: {
+    clearForLogout: (...args: unknown[]) => h.clearEncryptionStateMock(...args),
   },
 }));
 
@@ -75,6 +82,8 @@ beforeEach(() => {
   h.dbDeleteMock.mockReset();
   h.dbDeleteMock.mockResolvedValue(undefined);
   h.dbCloseMock.mockReset();
+  h.clearEncryptionStateMock.mockReset();
+  h.clearEncryptionStateMock.mockResolvedValue(undefined);
   localStorage.clear();
   sessionStorage.clear();
 });
@@ -248,6 +257,7 @@ describe('logoutAndClearLocalData', () => {
     // inspect them — not deferred to the next boot.
     expect(h.dbCloseMock).toHaveBeenCalled();
     expect(h.dbDeleteMock).toHaveBeenCalled();
+    expect(h.clearEncryptionStateMock).toHaveBeenCalled();
     expect(localStorage.getItem('k')).toBeNull();
     expect(sessionStorage.getItem('k')).toBeNull();
     // On a successful inline wipe the boot-guard sentinel is cleared again —
@@ -294,6 +304,15 @@ describe('logoutAndClearLocalData', () => {
     expect(localStorage.getItem('et.salt')).toBeNull();
     expect(h.dbDeleteMock).toHaveBeenCalled();
     expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
+  });
+
+  it('continues the database wipe when encryption-state cleanup fails', async () => {
+    h.clearEncryptionStateMock.mockRejectedValueOnce(new Error('IndexedDB blocked'));
+
+    await expect(logoutAndClearLocalData()).resolves.toBeUndefined();
+
+    expect(h.dbCloseMock).toHaveBeenCalled();
+    expect(h.dbDeleteMock).toHaveBeenCalled();
   });
 });
 

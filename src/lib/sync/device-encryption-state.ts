@@ -1,10 +1,15 @@
 import type { RecoveryCodeStatus, WrappedKeyBundle } from '$lib/domain/types';
+import type { E2EEMigrationState, SyncMode } from '$lib/domain/types';
+import { getProfile, getProfileSyncMode, setLocalProfileSyncState } from '$lib/domain/repo';
 import { DB_SCHEMA_VERSION, db, type EncryptedRecord } from '$lib/db/schema';
 import { canonicalSyncChange, type PlainSyncChange } from '$lib/sync/canonical-sync-change';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { getDeviceId, hydrateDeviceId } from '$lib/sync/account-state';
+import type { RemoteSyncAccount } from '$lib/sync/account-state';
 import {
   clearLocalWrappedKeys,
+  deleteRemoteWrappedKeys,
+  fetchAllRemoteWrappedKeys,
   fetchRemoteWrappedKeys,
   getLocalWrappedKeys,
   saveLocalWrappedKeys,
@@ -21,12 +26,14 @@ import {
   clearPullCursor,
   getPullCursor,
   hydratePullCursor,
+  setPullCursor,
 } from '$lib/sync/pull-cursor';
 import {
   PBKDF2_ITERATIONS,
   decryptRecord,
   derivePassphraseKek,
   deriveRecoveryKek,
+  generateDek,
   generateRecoveryCode as mintRecoveryCode,
   generateSaltB64,
   unwrapDek,
@@ -60,12 +67,29 @@ async function decodeLocalEncryptedRow(row: EncryptedRecord): Promise<PlainSyncC
 }
 
 export type DeviceEncryptionSnapshot = {
+  syncMode: SyncMode;
+  migration?: E2EEMigrationState;
   deviceId: string;
   hasSessionKey: boolean;
   pullCursor: string | null;
   wrappedKeys?: WrappedKeyBundle;
   recoveryStatus: RecoveryCodeStatus | 'unavailable';
 };
+
+const subscribers = new Set<(snapshot: DeviceEncryptionSnapshot) => void>();
+let currentSnapshot: DeviceEncryptionSnapshot = {
+  syncMode: 'plain',
+  deviceId: '',
+  hasSessionKey: false,
+  pullCursor: null,
+  recoveryStatus: 'unavailable',
+};
+
+function publish(snapshot: DeviceEncryptionSnapshot): DeviceEncryptionSnapshot {
+  currentSnapshot = snapshot;
+  for (const subscriber of subscribers) subscriber(snapshot);
+  return snapshot;
+}
 
 export type DeviceEncryptionStateError = Error & {
   name: 'DeviceEncryptionStateError';
@@ -129,10 +153,17 @@ async function setRecoveryStatus(
 export const deviceEncryptionState = {
   async hydrate(): Promise<DeviceEncryptionSnapshot> {
     await Promise.all([hydrateDeviceId(), rehydrateSession(), hydratePullCursor()]);
-    return this.snapshot();
+    const hydrated = await this.snapshot();
+    if (hydrated.syncMode === 'plain' && (hydrated.hasSessionKey || hydrated.wrappedKeys)) {
+      await clearLocalWrappedKeys();
+      clearSession();
+      return this.snapshot();
+    }
+    return hydrated;
   },
 
   async snapshot(options: { refreshRemote?: boolean } = {}): Promise<DeviceEncryptionSnapshot> {
+    const profile = await getProfile();
     let wrappedKeys = await getLocalWrappedKeys();
     if (options.refreshRemote) {
       try {
@@ -154,17 +185,78 @@ export const deviceEncryptionState = {
         // Offline snapshots remain useful from durable local state.
       }
     }
-    return {
+    return publish({
+      syncMode: getProfileSyncMode(profile),
+      migration: profile?.e2eeMigration,
       deviceId: getDeviceId(),
       hasSessionKey: hasSessionKey(),
       pullCursor: getPullCursor(),
       wrappedKeys,
       recoveryStatus: wrappedKeys?.recoveryStatus ?? 'unavailable',
-    };
+    });
+  },
+
+  subscribe(run: (snapshot: DeviceEncryptionSnapshot) => void): () => void {
+    subscribers.add(run);
+    run(currentSnapshot);
+    void this.snapshot();
+    return () => subscribers.delete(run);
   },
 
   getSessionKey(): string | null {
     return getSessionKey();
+  },
+
+  activateSessionKey(key: string): void {
+    setSessionKey(key);
+  },
+
+  async activeDekVersion(): Promise<number> {
+    return (await getLocalWrappedKeys())?.dekVersion ?? 1;
+  },
+
+  getActiveWrappedKeyBundle(): Promise<WrappedKeyBundle | undefined> {
+    return getLocalWrappedKeys();
+  },
+
+  requireWrappedKeyBundle(): Promise<WrappedKeyBundle> {
+    return currentBundle();
+  },
+
+  getRotationKeyBundles(): Promise<WrappedKeyBundle[]> {
+    return fetchAllRemoteWrappedKeys();
+  },
+
+  cacheActiveWrappedKeyBundle(bundle: Omit<WrappedKeyBundle, 'id'>): Promise<WrappedKeyBundle> {
+    return saveLocalWrappedKeys(bundle);
+  },
+
+  removeCloudKeyMaterial(dekVersion?: number): Promise<void> {
+    return deleteRemoteWrappedKeys(dekVersion);
+  },
+
+  async clearForLogout(): Promise<void> {
+    // Revoke usable in-memory secrets first. Persistent cleanup can fail when
+    // IndexedDB is blocked, but that must never leave this process unlocked.
+    clearSession();
+    clearPullCursor();
+    try {
+      await clearLocalWrappedKeys();
+    } catch {
+      // The logout boot sentinel retries durable cleanup on the next launch.
+    }
+  },
+
+  getPullCursor(): string | null {
+    return getPullCursor();
+  },
+
+  setPullCursor(cursor: string): void {
+    setPullCursor(cursor);
+  },
+
+  resetPullCursorForTableSwitch(): void {
+    clearPullCursor();
   },
 
   async hasReadableLocalTreatmentCiphertext(): Promise<boolean> {
@@ -254,9 +346,126 @@ export const deviceEncryptionState = {
     return code;
   },
 
+  async createWrappedKeyBundle(passphrase: string, dekVersion: number): Promise<{
+    dek: string;
+    bundle: WrappedKeyBundle;
+    recoveryCode: string;
+  }> {
+    const dek = await generateDek();
+    const passphraseSaltB64 = generateSaltB64();
+    const recoverySaltB64 = generateSaltB64();
+    const recoveryCode = mintRecoveryCode();
+    const passphraseKek = await derivePassphraseKek(passphrase, passphraseSaltB64, PBKDF2_ITERATIONS);
+    const recoveryKek = await deriveRecoveryKek(recoveryCode, recoverySaltB64, PBKDF2_ITERATIONS);
+    const bundle: WrappedKeyBundle = {
+      id: 'self',
+      dekVersion,
+      passphraseSaltB64,
+      passphraseWrapped: await wrapDek(passphraseKek, dek),
+      passphraseIterations: PBKDF2_ITERATIONS,
+      recoveryStatus: 'unconfirmed',
+      recoverySaltB64,
+      recoveryWrapped: await wrapDek(recoveryKek, dek),
+      recoveryIterations: PBKDF2_ITERATIONS,
+      updatedAt: new Date().toISOString(),
+    };
+    await persistBundle(bundle);
+    return { dek, bundle, recoveryCode };
+  },
+
+  async unwrapWithPassphrase(passphrase: string, bundle?: WrappedKeyBundle): Promise<string> {
+    const selected = bundle ?? await currentBundle();
+    const kek = await derivePassphraseKek(
+      passphrase,
+      selected.passphraseSaltB64,
+      selected.passphraseIterations,
+    );
+    return unwrapDek(kek, selected.passphraseWrapped.ciphertext, selected.passphraseWrapped.iv);
+  },
+
   async clearForPlainMode(): Promise<void> {
     await clearLocalWrappedKeys();
     clearSession();
     clearPullCursor();
+  },
+
+  async convergeToPlain(): Promise<DeviceEncryptionSnapshot> {
+    await this.clearForPlainMode();
+    await setLocalProfileSyncState({
+      syncMode: 'plain',
+      passphraseEnabled: false,
+      e2eeMigration: undefined,
+    });
+    return this.snapshot();
+  },
+
+  async converge(remote: RemoteSyncAccount): Promise<DeviceEncryptionSnapshot> {
+    const profile = await getProfile();
+    const localMode = getProfileSyncMode(profile);
+    const localMigration = profile?.e2eeMigration;
+
+    if (remote.syncMode === 'plain') {
+      if (localMode !== 'plain') return this.convergeToPlain();
+      if (getSessionKey() || await getLocalWrappedKeys()) {
+        await clearLocalWrappedKeys();
+        clearSession();
+      }
+      return this.snapshot();
+    }
+
+    if (localMode !== 'plain') {
+      if (remote.syncMode === 'e2ee' && remote.activeDekVersion != null) {
+        const localBundle = await getLocalWrappedKeys();
+        if (localBundle && remote.activeDekVersion > localBundle.dekVersion) {
+          await clearLocalWrappedKeys();
+          clearSession();
+          clearPullCursor();
+          return this.snapshot({ refreshRemote: true });
+        }
+      }
+
+      if (remote.syncMode === 'e2ee' && !remote.migration && (localMode !== 'e2ee' || localMigration)) {
+        await setLocalProfileSyncState({
+          syncMode: 'e2ee',
+          passphraseEnabled: true,
+          e2eeMigration: undefined,
+        });
+        clearPullCursor();
+        return this.snapshot({ refreshRemote: true });
+      }
+
+      if (
+        remote.migration
+        && (
+          !localMigration
+          || remote.migration.id !== localMigration.id
+          || remote.migration.ownerDeviceId !== localMigration.ownerDeviceId
+          || remote.migration.updatedAt > localMigration.updatedAt
+        )
+      ) {
+        await setLocalProfileSyncState({
+          syncMode: remote.syncMode,
+          passphraseEnabled: true,
+          e2eeMigration: remote.migration,
+        });
+      }
+      return this.snapshot();
+    }
+
+    if (!(await getLocalWrappedKeys())) {
+      try {
+        const remoteBundle = await fetchRemoteWrappedKeys();
+        if (remoteBundle) await saveLocalWrappedKeys(withoutId(remoteBundle));
+      } catch {
+        // The unlock path retries remote key retrieval.
+      }
+    }
+    await setLocalProfileSyncState({
+      syncMode: remote.syncMode,
+      passphraseEnabled: true,
+      e2eeMigration: remote.migration,
+    });
+    clearPullCursor();
+    return this.snapshot();
   },
 };

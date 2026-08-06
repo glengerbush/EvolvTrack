@@ -22,11 +22,17 @@ const state = vi.hoisted(() => ({
 
 vi.mock('$lib/domain/repo', () => ({
   getAllWeights: vi.fn(async () => [
-    { id: 'w1', date: '2026-05-01', weightLbs: 180, updatedAt: '2026-05-01T00:00:00.000Z' },
+    { id: 'w1', date: '2026-05-01', weightLbs: 180, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
   ]),
   getAllInjections: vi.fn(async () => []),
   getAllPrescriptions: vi.fn(async () => []),
-  getProfile: vi.fn(async () => state.mockProfile),
+  getProfile: vi.fn(async () => state.mockProfile && ({
+    ...state.mockProfile,
+    id: 'profile',
+    createdAt: state.mockProfile.createdAt ?? '2026-01-01T00:00:00.000Z',
+    updatedAt: state.mockProfile.updatedAt ?? '2026-05-09T00:00:00.000Z',
+    passphraseEnabled: state.mockProfile.passphraseEnabled ?? true,
+  } as ProfileSettings)),
   getProfileSyncMode: (p: ProfileSettings | undefined): SyncMode => p?.syncMode ?? 'plain',
   saveProfile: vi.fn(async (partial: Partial<ProfileSettings>) => {
     state.saveProfileCalls.push(partial);
@@ -148,6 +154,15 @@ vi.mock('$lib/sync/sync-engine', () => ({
   deleteRemotePlainChanges: vi.fn(async () => ({ deleted: 0 })),
   fetchRemoteEncryptedChanges: vi.fn(async () => []),
   pullSnapshotForMigration: vi.fn(async () => ({ fetched: 0, applied: 0 })),
+}));
+
+vi.mock('$lib/sync/remote-sync-log-transfer', () => ({
+  remoteSyncLogTransfer: {
+    createProgressReporter: () => async () => undefined,
+    heartbeat: vi.fn(async () => undefined),
+    rotateCiphertext: vi.fn(async () => 1),
+    readEncrypted: vi.fn(async () => []),
+  },
 }));
 
 import { recoverWithCode } from './e2ee-migration';

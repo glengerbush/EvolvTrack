@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   deleteDatabase: vi.fn(),
   openDatabase: vi.fn(),
+  clearDurableAuth: vi.fn(),
 }));
 const wipeKey = 'evolvtrack:wipe-db-on-boot';
 
@@ -17,6 +18,9 @@ vi.mock('$lib/db/schema', () => ({
 vi.mock('$lib/auth/supabase', () => ({
   WIPE_DB_ON_BOOT_KEY: 'evolvtrack:wipe-db-on-boot',
 }));
+vi.mock('$lib/db/durableKv', () => ({
+  durableClearOrThrow: (...args: unknown[]) => h.clearDurableAuth(...args),
+}));
 
 import { init } from './hooks.client';
 
@@ -24,6 +28,7 @@ beforeEach(() => {
   localStorage.clear();
   h.deleteDatabase.mockReset().mockResolvedValue(undefined);
   h.openDatabase.mockReset().mockResolvedValue(undefined);
+  h.clearDurableAuth.mockReset().mockResolvedValue(undefined);
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
@@ -42,7 +47,18 @@ describe('client boot database wipe', () => {
 
     expect(h.deleteDatabase).toHaveBeenCalledOnce();
     expect(h.openDatabase).toHaveBeenCalledOnce();
+    expect(h.clearDurableAuth).toHaveBeenCalledOnce();
     expect(localStorage.getItem(wipeKey)).toBeNull();
+  });
+
+  it('keeps the sentinel when durable auth cleanup fails', async () => {
+    localStorage.setItem(wipeKey, '1');
+    h.clearDurableAuth.mockRejectedValueOnce(new Error('auth DB blocked'));
+
+    await expect(init()).resolves.toBeUndefined();
+
+    expect(h.deleteDatabase).not.toHaveBeenCalled();
+    expect(localStorage.getItem(wipeKey)).toBe('1');
   });
 
   it('keeps the sentinel when deleting the database fails', async () => {

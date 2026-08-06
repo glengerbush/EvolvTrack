@@ -64,8 +64,13 @@ export async function durableRemove(key: string): Promise<void> {
 
 export async function durableClear(): Promise<void> {
   try {
-    await kvDb.kv.clear();
+    await durableClearOrThrow();
   } catch {
     // Non-fatal.
   }
+}
+
+/** Security-sensitive cleanup variant whose failure must remain observable. */
+export async function durableClearOrThrow(): Promise<void> {
+  await kvDb.kv.clear();
 }

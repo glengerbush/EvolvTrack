@@ -8,7 +8,7 @@
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
   import ThemeTuner from '$lib/components/settings/ThemeTuner.svelte';
-  import type { E2EEMigrationRunResult } from '$lib/sync/e2ee-migration';
+  import type { E2EETransitionResult as E2EEMigrationRunResult } from '$lib/sync/e2ee-lifecycle-runtime';
   import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { SyncTransitionConflictError } from '$lib/sync/account-state';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';

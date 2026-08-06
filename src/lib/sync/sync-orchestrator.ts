@@ -13,17 +13,15 @@
  */
 import { get } from 'svelte/store';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
-import { autoResumeMigration } from '$lib/sync/e2ee-migration';
-import { fetchRemoteSyncAccount, getAuthenticatedUserId, hydrateDeviceId } from '$lib/sync/account-state';
+import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
+import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
-import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
-import { fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
-import { clearPullCursor, hydratePullCursor } from '$lib/sync/pull-cursor';
-import { fetchServerTimeMs, supabase, supabaseUrl } from '$lib/auth/supabase';
+import { onOutboxChange } from '$lib/domain/repo';
+import { fetchServerTimeMs, supabaseUrl } from '$lib/auth/supabase';
 import { recordServerTime } from '$lib/sync/clock';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
-import { rehydrateSession } from '$lib/sync/session-key';
 import { deviceEncryptionState } from '$lib/sync/device-encryption-state';
+import { remoteSyncLogTransfer } from '$lib/sync/remote-sync-log-transfer';
 import { errorMessage } from '$lib/utils/errorMessage';
 import type { SyncMode } from '$lib/domain/types';
 import {
@@ -33,8 +31,6 @@ import {
   lastSyncError,
   lastSynced,
   licenseActive,
-  migrationResumePending,
-  migrationTakeoverAvailable,
   syncStatus,
 } from '$lib/stores/syncStore';
 
@@ -103,113 +99,7 @@ async function probeReachable(): Promise<boolean> {
 async function reconcileSyncMode(): Promise<void> {
   const remote = await fetchRemoteSyncAccount();
   if (!remote) return;
-
-  const profile = await getProfile();
-  const localMode = getProfileSyncMode(profile);
-  const localMigration = profile?.e2eeMigration;
-
-  if (remote.syncMode === 'plain') {
-    // Server is plain. If this device is still encrypted/mid-migration, the
-    // account owner turned E2EE off elsewhere — follow it down to plain: drop
-    // the key material and switch modes. Local data and the outbox (which holds
-    // plaintext payloads — encryption happens at push time) are untouched, so
-    // the next push just goes to the plaintext table and nothing is lost.
-    // Without this the device keeps trying encrypted writes that the server's
-    // RLS now rejects (the "[object Object]" sync error).
-    if (localMode !== 'plain') {
-      await deviceEncryptionState.clearForPlainMode();
-      await setLocalProfileSyncState({
-        syncMode: 'plain',
-        passphraseEnabled: false,
-        e2eeMigration: undefined,
-      });
-    }
-    return;
-  }
-
-  // Server is in a non-plain mode: e2ee, migrating_to_e2ee, ROTATING, or
-  // migrating_to_plain. All of these must be adopted onto the device. The
-  // migrating_to_plain case matters especially: if a disable got interrupted,
-  // the data still lives in the encrypted table — a device that defaulted to
-  // plain here would read the empty plaintext table and show NO data while the
-  // real data sits encrypted. Adopting the mode lets the device resume / take
-  // over the disable (which decrypts and re-publishes as plaintext) instead.
-  if (localMode !== 'plain') {
-    // A key rotation finished on another device: the active DEK version has
-    // advanced past the key this device holds, so our cached DEK can no longer
-    // read (or write) the server's rows. Drop the stale key and fall back to the
-    // locked state — the unlock screen fetches the new bundle and the user
-    // re-enters the (possibly changed) passphrase to derive the new DEK. Without
-    // this the device keeps the dead key, pulls 0 rows (filtered to its old
-    // version), and silently pushes orphaned old-version rows.
-    if (remote.syncMode === 'e2ee' && remote.activeDekVersion != null) {
-      const localBundle = await getLocalWrappedKeys();
-      if (localBundle && remote.activeDekVersion > localBundle.dekVersion) {
-        await deviceEncryptionState.clearForPlainMode();
-        return; // stays e2ee → 'locked' → UnlockSessionModal pulls the new bundle
-      }
-    }
-
-    // The migration finished on another device: the server settled into
-    // steady-state 'e2ee' with no migration record, but this device is still
-    // pinned in a transient migrating mode (it had been showing the take-over
-    // banner for that migration). Adopt the steady state and drop the stale
-    // migration record. Without this the local mode stays e.g.
-    // 'migrating_to_e2ee' forever, and every orchestrator cycle re-derives an
-    // 'awaiting-takeover' offer from it — so the take-over modal flaps on and
-    // off (SyncGate's poll clears it on seeing the steady-state server, then the
-    // next cycle re-raises it from the stale local mode). Converging here leaves
-    // the device 'e2ee'; with no cached session key that resolves to the unlock
-    // modal, which is the correct resting state. The pull cursor is reset
-    // because the rows were rewritten into the encrypted table.
-    if (remote.syncMode === 'e2ee' && !remote.migration && localMode !== 'e2ee') {
-      await setLocalProfileSyncState({
-        syncMode: 'e2ee',
-        passphraseEnabled: true,
-        e2eeMigration: undefined,
-      });
-      clearPullCursor();
-      return;
-    }
-
-    // Already in a non-plain mode locally. Keep migration *ownership*
-    // convergent: if another device took the migration over (different owner,
-    // at least as recent), adopt that so two devices don't both drive it.
-    if (
-      remote.migration &&
-      remote.migration.ownerDeviceId !== localMigration?.ownerDeviceId &&
-      (!localMigration || remote.migration.updatedAt >= localMigration.updatedAt)
-    ) {
-      await setLocalProfileSyncState({
-        syncMode: remote.syncMode,
-        passphraseEnabled: true,
-        e2eeMigration: remote.migration,
-      });
-    }
-    return;
-  }
-
-  // Local is plain but the server isn't. Cache the wrapped-key bundle so the
-  // unlock / resume paths can derive the DEK from the passphrase. Best-effort:
-  // if the fetch fails (network blip), those screens retry on their own path.
-  if (!(await getLocalWrappedKeys())) {
-    try {
-      const remoteBundle = await fetchRemoteWrappedKeys();
-      if (remoteBundle) {
-        const { id: _id, ...rest } = remoteBundle;
-        await saveLocalWrappedKeys(rest);
-      }
-    } catch (cause) {
-      console.warn('Failed to fetch remote wrapped-key bundle during reconcile:', cause);
-    }
-  }
-
-  await setLocalProfileSyncState({
-    syncMode: remote.syncMode,
-    passphraseEnabled: true,
-    e2eeMigration: remote.migration,
-  });
-  clearPullCursor();
+  await deviceEncryptionState.converge(remote);
 }
 
 /**
@@ -223,13 +113,12 @@ async function reconcileSyncMode(): Promise<void> {
  * normal sync.
  */
 async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
-  const resume = await autoResumeMigration();
+  const resume = await e2eeLifecycle.reconcile();
 
   if (resume.status === 'in-progress') {
     // A migration run owns the transition in this tab (started from settings,
-    // or the modal's Resume). It drives its own modal and clears its own resume
-    // prompt on completion — don't touch `migrationResumePending` here, or we'd
-    // flash the (rotation) passphrase modal mid-run. Pull/push are gated during
+    // or the modal's Resume). It drives its own lifecycle snapshot; a second
+    // reconcile could briefly publish a stale credential prompt. Pull/push are gated during
     // a migration anyway, so there's nothing else to do this cycle.
     syncStatus.set('idle');
     return 'halt';
@@ -239,14 +128,6 @@ async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
     // A migration owned by another device. Don't drive it; offer the user a
     // "take over on this device" banner instead. Pull/push are gated during a
     // migration anyway, so there's nothing else to do this cycle.
-    migrationTakeoverAvailable.set({
-      direction: resume.direction,
-      ownerDeviceId: resume.ownerDeviceId,
-      recordsConverted: resume.recordsConverted,
-      recordsTotal: resume.recordsTotal,
-      updatedAt: resume.updatedAt,
-    });
-    migrationResumePending.set(null);
     syncStatus.set('idle');
     return 'halt';
   }
@@ -256,25 +137,19 @@ async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
     // mid-run. Not an error: the aborted run left server state untouched. Drop
     // our resume prompt and clear any stale error; the next cycle's reconcile
     // adopts the new owner and re-raises the take-over banner with its data.
-    migrationResumePending.set(null);
     lastSyncError.set(null);
     connectivity.set('online');
     syncStatus.set('idle');
     return 'halt';
   }
 
-  migrationTakeoverAvailable.set(null);
-
   if (resume.status === 'needs-passphrase') {
     // Locked mid-migration: the orchestrator can't finish it unattended. Flag
     // the UI to collect the passphrase; pull/push are gated during a migration
     // anyway, so there's nothing else to do this cycle.
-    migrationResumePending.set(resume.direction);
     syncStatus.set('idle');
     return 'halt';
   }
-
-  migrationResumePending.set(null);
 
   if (resume.status === 'paused') {
     // Resume ran with the cached key but didn't complete (e.g. a network blip
@@ -464,15 +339,10 @@ export function startSyncOrchestrator(): () => void {
   // first pull, so a reopen reuses the cursor (no full re-pull) and the device
   // keeps its migration-ownership identity. All sync-triggering paths below wait
   // on this so the first cycle never reads an un-hydrated cursor.
-  const booted = Promise.all([hydratePullCursor(), hydrateDeviceId()]);
+  const booted = deviceEncryptionState.hydrate();
 
-  // Restore a persisted E2EE session key (if the user opted in via the unlock
-  // modal). This is async because the key lives in IndexedDB (localStorage is
-  // wiped on iOS PWA swipe-away). Once it resolves and unlocks, kick a sync so
-  // the first real cycle isn't skipped with `locked` — keeping the unlock banner
-  // from flashing on every refresh.
-  void Promise.all([rehydrateSession(), booted]).then(([unlocked]) => {
-    if (unlocked) trigger();
+  void booted.then((snapshot) => {
+    if (snapshot.hasSessionKey) trigger();
   });
 
   // Honest connectivity: an `online` event means the browser thinks the
@@ -494,35 +364,13 @@ export function startSyncOrchestrator(): () => void {
   }
   const offOutbox = onOutboxChange(trigger);
 
-  // Realtime just nudges a sync — the client still pulls by cursor. The
-  // subscription is re-targeted whenever the signed-in user changes.
-  let channel: ReturnType<typeof supabase.channel> | null = null;
-  function teardownChannel() {
-    if (channel) {
-      void supabase.removeChannel(channel);
-      channel = null;
-    }
-  }
-  const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
-    teardownChannel();
-    const userId = session?.user?.id;
+  // Realtime only nudges cursor-based sync; transport details stay in the
+  // owned remote adapter.
+  const stopWatching = remoteSyncLogTransfer.watch(trigger, (signedIn) => {
     // Invalidate the license-active cache on any auth transition so the next
     // sync cycle re-fetches for the new user (or skips entirely if signed out).
     licenseActive.set(null);
-    if (!userId) return;
-    channel = supabase
-      .channel('sync-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'sync_changes_encrypted', filter: `user_id=eq.${userId}` },
-        trigger,
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'sync_changes_plain', filter: `user_id=eq.${userId}` },
-        trigger,
-      )
-      .subscribe();
+    if (!signedIn) return;
     // Catch up on anything missed while this device was away — but only after
     // boot hydration, so this first pull reuses the persisted cursor instead of
     // racing it and re-pulling the whole history.
@@ -536,8 +384,7 @@ export function startSyncOrchestrator(): () => void {
       window.removeEventListener('offline', onOffline);
     }
     offOutbox();
-    teardownChannel();
-    authSub.subscription.unsubscribe();
+    stopWatching();
     orchestrator.dispose();
     if (appOrchestrator === orchestrator) appOrchestrator = null;
   };

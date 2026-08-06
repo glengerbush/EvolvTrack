@@ -7,6 +7,17 @@ const h = vi.hoisted(() => ({
   remoteWrites: [] as WrappedKeyBundle[],
   localWrites: [] as Array<Omit<WrappedKeyBundle, 'id'>>,
   encryptedRows: [] as Array<Record<string, unknown>>,
+  profile: { id: 'profile', syncMode: 'e2ee' } as Record<string, unknown>,
+  sessionKey: 'DEK' as string | null,
+  pullCursor: 'cursor-1' as string | null,
+}));
+
+vi.mock('$lib/domain/repo', () => ({
+  getProfile: vi.fn(async () => h.profile),
+  getProfileSyncMode: vi.fn((profile: { syncMode?: string }) => profile.syncMode ?? 'plain'),
+  setLocalProfileSyncState: vi.fn(async (state: Record<string, unknown>) => {
+    h.profile = { ...h.profile, ...state };
+  }),
 }));
 
 vi.mock('$lib/db/schema', () => ({
@@ -26,21 +37,24 @@ vi.mock('$lib/sync/wrapped-keys', () => ({
     h.bundle = { id: 'self', ...bundle };
     return h.bundle;
   }),
-  clearLocalWrappedKeys: vi.fn(async () => undefined),
+  clearLocalWrappedKeys: vi.fn(async () => { h.bundle = undefined; }),
+  fetchAllRemoteWrappedKeys: vi.fn(async () => h.remoteBundle ? [h.remoteBundle] : []),
+  deleteRemoteWrappedKeys: vi.fn(async () => undefined),
 }));
 
 vi.mock('$lib/sync/session-key', () => ({
-  getSessionKey: vi.fn(() => 'DEK'),
-  hasSessionKey: vi.fn(() => true),
+  getSessionKey: vi.fn(() => h.sessionKey),
+  hasSessionKey: vi.fn(() => h.sessionKey !== null),
   rehydrateSession: vi.fn(async () => true),
-  setSessionKey: vi.fn(),
-  clearSession: vi.fn(),
+  setSessionKey: vi.fn((key: string) => { h.sessionKey = key; }),
+  clearSession: vi.fn(() => { h.sessionKey = null; }),
 }));
 
 vi.mock('$lib/sync/pull-cursor', () => ({
-  getPullCursor: vi.fn(() => null),
+  getPullCursor: vi.fn(() => h.pullCursor),
   hydratePullCursor: vi.fn(async () => undefined),
-  clearPullCursor: vi.fn(),
+  setPullCursor: vi.fn((cursor: string) => { h.pullCursor = cursor; }),
+  clearPullCursor: vi.fn(() => { h.pullCursor = null; }),
 }));
 
 vi.mock('$lib/sync/account-state', () => ({
@@ -54,6 +68,7 @@ vi.mock('$lib/crypto/e2ee', () => ({
   decryptRecord: vi.fn(),
   derivePassphraseKek: vi.fn(),
   deriveRecoveryKek: vi.fn(),
+  generateDek: vi.fn(),
   generateRecoveryCode: vi.fn(),
   generateSaltB64: vi.fn(),
   unwrapDek: vi.fn(),
@@ -65,12 +80,16 @@ import {
   decryptRecord,
   derivePassphraseKek,
   deriveRecoveryKek,
+  generateDek,
   generateRecoveryCode,
   generateSaltB64,
   unwrapDek,
   wrapDek,
 } from '$lib/crypto/e2ee';
 import { setSessionKey } from '$lib/sync/session-key';
+import { clearSession } from '$lib/sync/session-key';
+import { clearPullCursor } from '$lib/sync/pull-cursor';
+import { clearLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 
 function bundle(status: WrappedKeyBundle['recoveryStatus']): WrappedKeyBundle {
   return {
@@ -93,8 +112,12 @@ beforeEach(() => {
   h.remoteWrites.length = 0;
   h.localWrites.length = 0;
   h.encryptedRows.length = 0;
+  h.profile = { id: 'profile', syncMode: 'e2ee' };
+  h.sessionKey = 'DEK';
+  h.pullCursor = 'cursor-1';
   vi.mocked(setSessionKey).mockClear();
   vi.mocked(generateRecoveryCode).mockReturnValue('NEW-RECOVERY-CODE');
+  vi.mocked(generateDek).mockResolvedValue('NEW-DEK');
   vi.mocked(generateSaltB64).mockReturnValue('new-recovery-salt');
   vi.mocked(deriveRecoveryKek).mockResolvedValue('RECOVERY-KEK');
   vi.mocked(derivePassphraseKek).mockResolvedValue('PASSPHRASE-KEK');
@@ -142,6 +165,14 @@ describe('device encryption state', () => {
     });
   });
 
+  it('creates and persists a complete wrapped-key bundle as one capability', async () => {
+    const created = await deviceEncryptionState.createWrappedKeyBundle('passphrase', 3);
+
+    expect(created).toMatchObject({ dek: 'NEW-DEK', recoveryCode: 'NEW-RECOVERY-CODE' });
+    expect(h.remoteWrites.at(-1)).toMatchObject({ dekVersion: 3, recoveryStatus: 'unconfirmed' });
+    expect(h.localWrites.at(-1)).toMatchObject({ dekVersion: 3, recoveryStatus: 'unconfirmed' });
+  });
+
   it('converges another device’s recovery choice into the local snapshot', async () => {
     h.bundle = bundle('confirmed');
     h.remoteBundle = {
@@ -165,11 +196,84 @@ describe('device encryption state', () => {
     );
     vi.mocked(decryptRecord)
       .mockRejectedValueOnce(new Error('bad ciphertext'))
-      .mockResolvedValueOnce({ aggregate: 'entry', op: 'upsert', record: { id: 'good' } });
+      .mockResolvedValueOnce({
+        aggregate: 'entry', op: 'upsert',
+        record: {
+          id: 'good', date: '2026-08-06',
+          createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-06T00:00:00.000Z',
+        },
+      });
 
     await expect(deviceEncryptionState.hasReadableLocalTreatmentCiphertext()).resolves.toBe(true);
 
     vi.mocked(decryptRecord).mockRejectedValue(new Error('bad ciphertext'));
     await expect(deviceEncryptionState.hasReadableLocalTreatmentCiphertext()).resolves.toBe(false);
+  });
+
+  it('publishes coherent snapshots and clears encryption state when converging to plain', async () => {
+    const snapshots: Array<{ syncMode: string; hasSessionKey: boolean }> = [];
+    const unsubscribe = deviceEncryptionState.subscribe((snapshot) => snapshots.push(snapshot));
+
+    await deviceEncryptionState.convergeToPlain();
+    unsubscribe();
+
+    expect(snapshots.at(-1)).toMatchObject({ syncMode: 'plain', hasSessionKey: false });
+    expect(clearSession).toHaveBeenCalled();
+    expect(clearPullCursor).toHaveBeenCalled();
+  });
+
+  it('clears every account-scoped encryption value on logout', async () => {
+    await deviceEncryptionState.clearForLogout();
+
+    await expect(deviceEncryptionState.snapshot()).resolves.toMatchObject({
+      hasSessionKey: false,
+      pullCursor: null,
+      wrappedKeys: undefined,
+    });
+  });
+
+  it('revokes memory state even when durable key cleanup fails', async () => {
+    vi.mocked(clearLocalWrappedKeys).mockRejectedValueOnce(new Error('blocked'));
+
+    await expect(deviceEncryptionState.clearForLogout()).resolves.toBeUndefined();
+
+    expect(h.sessionKey).toBeNull();
+    expect(h.pullCursor).toBeNull();
+  });
+
+  it('drops a stale session and cursor before adopting a newer remote DEK', async () => {
+    h.bundle = bundle('confirmed');
+    h.remoteBundle = { ...bundle('confirmed'), dekVersion: 3, updatedAt: '2026-08-06T01:00:00.000Z' };
+
+    await expect(deviceEncryptionState.converge({
+      syncMode: 'e2ee', migration: undefined, activeDekVersion: 3,
+    })).resolves.toMatchObject({ wrappedKeys: { dekVersion: 3 }, hasSessionKey: false, pullCursor: null });
+  });
+
+  it('repairs stray key material in plain mode without losing its valid cursor', async () => {
+    h.profile = { id: 'profile', syncMode: 'plain' };
+
+    await expect(deviceEncryptionState.hydrate()).resolves.toMatchObject({
+      syncMode: 'plain', hasSessionKey: false, wrappedKeys: undefined, pullCursor: 'cursor-1',
+    });
+  });
+
+  it('adopts a newer transition checkpoint even when its owner is unchanged', async () => {
+    h.profile = {
+      id: 'profile', syncMode: 'migrating_to_e2ee',
+      e2eeMigration: {
+        id: 'old-migration', ownerDeviceId: 'device-1', phase: 'preparing',
+        startedAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-06T00:00:00.000Z',
+      },
+    };
+    await deviceEncryptionState.converge({
+      syncMode: 'migrating_to_e2ee',
+      migration: {
+        id: 'new-migration', ownerDeviceId: 'device-1', phase: 'transferring',
+        startedAt: '2026-08-06T00:01:00.000Z', updatedAt: '2026-08-06T00:02:00.000Z',
+      },
+    });
+
+    expect(h.profile.e2eeMigration).toMatchObject({ id: 'new-migration', phase: 'transferring' });
   });
 });
