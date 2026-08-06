@@ -2,22 +2,15 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { dev } from '$app/environment';
-  import { bulkUpdateEntries, bulkUpdatePrescriptions, getProfileSyncMode } from '$lib/domain/repo';
-  import { db } from '$lib/db/schema';
-  import { fromLiveQuery } from '$lib/db/liveQuery';
+  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/repo';
   import { errorMessage } from '$lib/utils/errorMessage';
   import type { HealthEntry, Medication, Prescription } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
   import LicenseSettings from '$lib/components/settings/LicenseSettings.svelte';
   import ThemeTuner from '$lib/components/settings/ThemeTuner.svelte';
-  import {
-    startE2EEMigration,
-    startE2EEDisableMigration,
-    startE2EEKeyRotation,
-    type E2EEMigrationRunResult,
-  } from '$lib/sync/e2ee-migration';
+  import type { E2EEMigrationRunResult } from '$lib/sync/e2ee-migration';
+  import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { SyncTransitionConflictError } from '$lib/sync/account-state';
-  import { migrationResumePending } from '$lib/stores/syncStore';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
   import DisableE2EEModal from '$lib/components/settings/DisableE2EEModal.svelte';
   import ChangePasswordModal from '$lib/components/settings/ChangePasswordModal.svelte';
@@ -61,15 +54,8 @@
   let { only = null }: { only?: Section[] | null } = $props();
   const showSection = (name: Section) => !only || only.includes(name);
 
-  // Derive the encryption state from a live query on the profile — the same
-  // source the sync pill reads — so the card never goes stale. A login-time
-  // `reconcileSyncMode` (server says encrypted, this device was plain) flips the
-  // profile under us; reading it once on mount would leave the card showing
-  // "disabled" while the pill prompts for an unlock passphrase. (See the
-  // matching live query in `syncIndicator.ts`.)
-  const profile = fromLiveQuery(() => db.profile.get('profile'), undefined);
-  const syncMode = $derived(getProfileSyncMode($profile));
-  const e2eeMigration = $derived($profile?.e2eeMigration);
+  const syncMode = $derived($e2eeLifecycle.syncMode);
+  const transitionUpdatedAt = $derived($e2eeLifecycle.transitionUpdatedAt);
   let e2eeRequested = $state(false);
 
   // `e2eeRequested` only gates the "create passphrase" form shown while sync is
@@ -79,6 +65,7 @@
   // plain would wrongly re-show the enable form.
   $effect(() => {
     if (syncMode !== 'plain') e2eeRequested = false;
+    void e2eeLifecycle.refresh();
   });
   let e2eeBusy = $state(false);
   let passphrase = $state('');
@@ -144,10 +131,13 @@
     codeToShow = next;
   }
 
-  function dismissRecoveryCode() {
-    // The code is deliberately not persisted in component state. Wiping it
-    // when the modal closes means the only way to see it again is to rotate
-    // to a fresh one, which invalidates anything written down before.
+  async function confirmRecoveryCode() {
+    await e2eeLifecycle.acknowledgeRecoveryCode();
+    codeToShow = null;
+  }
+
+  async function continueWithoutRecoveryCode() {
+    await e2eeLifecycle.continueWithoutRecoveryCode();
     codeToShow = null;
   }
 
@@ -164,11 +154,13 @@
 
   function handleE2eeCheckbox(checked: boolean) {
     if (syncMode === 'plain') {
+      if (checked && !$e2eeLifecycle.allowedActions.includes('enable')) return;
       e2eeRequested = checked;
       if (!checked) { passphrase = ''; passphraseConfirm = ''; }
       return;
     }
     if (syncMode === 'e2ee' && !checked) {
+      if (!$e2eeLifecycle.allowedActions.includes('disable')) return;
       // Don't flip e2eeRequested yet — the modal collects the passphrase and
       // runs the disable migration on confirm. If the user cancels, the
       // controlled checkbox snaps back to checked on the next render.
@@ -188,7 +180,7 @@
     disableError = null;
     status = 'Starting encryption disable...';
     try {
-      const result = await startE2EEDisableMigration(enteredPassphrase);
+      const result = await e2eeLifecycle.disable(enteredPassphrase);
       applyMigrationResult(result);
       // Close the modal whether the disable completed or paused — the relevant
       // UI moves into the migration-status branch and the user can resume there.
@@ -201,13 +193,9 @@
     }
   }
 
-  function applyMigrationResult(result: E2EEMigrationRunResult) {
-    // `syncMode` / `e2eeMigration` are derived from the profile live query, so
-    // the migration's own `saveProfile` writes drive them — nothing to set here.
-    // A completed run clears any "resume needs your passphrase" prompt the
-    // orchestrator raised; otherwise the next sync cycle reconciles it.
-    if (result.completed) migrationResumePending.set(null);
-    if (result.recoveryCode) showRecoveryCode(result.recoveryCode);
+  function applyMigrationResult(result: E2EEMigrationRunResult, recoveryAlreadyOffered = false) {
+    // The lifecycle refresh performed by each command publishes the new state.
+    if (!recoveryAlreadyOffered && result.recoveryCode) showRecoveryCode(result.recoveryCode);
     if (result.syncMode === 'plain') codeToShow = null;
     passphrase = '';
     passphraseConfirm = '';
@@ -216,7 +204,6 @@
       // Another device took this migration over while this one was driving it.
       // Not a failure: it finishes there and this device converges on the next
       // sync cycle. Drop the resume prompt and show a neutral status.
-      migrationResumePending.set(null);
       status = 'Another device took over this migration. It will finish there.';
       return;
     }
@@ -251,7 +238,7 @@
     e2eeBusy = true;
     status = 'Starting encryption upgrade...';
     try {
-      applyMigrationResult(await startE2EEMigration(passphrase));
+      applyMigrationResult(await e2eeLifecycle.enable(passphrase, showRecoveryCode), true);
     } catch (error) {
       status = e2eeErrorMessage(error);
     } finally {
@@ -309,7 +296,10 @@
     passphraseError = null;
     status = 'Changing passphrase and re-encrypting under a new key…';
     try {
-      applyMigrationResult(await startE2EEKeyRotation(currentPassphrase, nextPassphrase));
+      applyMigrationResult(
+        await e2eeLifecycle.rotate(currentPassphrase, nextPassphrase, showRecoveryCode),
+        true,
+      );
       passphraseModalOpen = false;
     } catch (error) {
       passphraseError = e2eeErrorMessage(error);
@@ -692,8 +682,8 @@
       {:else}
         <div class="sync-mode-row">
           <span class="sync-mode-pill" data-mode={syncMode}>{syncModeLabel}</span>
-          {#if e2eeMigration?.updatedAt}
-            <span class="sync-mode-meta">updated {new Date(e2eeMigration.updatedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>
+          {#if transitionUpdatedAt}
+            <span class="sync-mode-meta">updated {new Date(transitionUpdatedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>
           {/if}
         </div>
         <label class="e2ee-toggle">
@@ -716,7 +706,11 @@
             <input bind:value={passphraseConfirm} type="password" placeholder="Confirm passphrase" class:mismatch={!passphraseMatch} />
             {#if !passphraseMatch}<span class="field-error">Passphrases do not match</span>{/if}
           </label>
-          <button class="btn btn-primary" disabled={e2eeBusy || !passphrase || !passphraseMatch} onclick={enableE2EE}>
+          <button
+            class="btn btn-primary"
+            disabled={e2eeBusy || !passphrase || !passphraseMatch || !$e2eeLifecycle.allowedActions.includes('enable')}
+            onclick={enableE2EE}
+          >
             {e2eeBusy ? 'Starting...' : 'Enable E2EE + generate recovery code'}
           </button>
         {:else if migrationInProgress}
@@ -733,7 +727,12 @@
           </div>
         {:else if e2eeEnabled}
           <div class="passphrase-action">
-            <button class="btn btn-primary" type="button" disabled={e2eeBusy} onclick={openPassphraseModal}>
+            <button
+              class="btn btn-primary"
+              type="button"
+              disabled={e2eeBusy || !$e2eeLifecycle.allowedActions.includes('rotate')}
+              onclick={openPassphraseModal}
+            >
               Change passphrase
             </button>
             <p class="toggle-hint">
@@ -811,7 +810,11 @@
 {/if}
 
 {#if codeToShow}
-  <RecoveryCodesModal code={codeToShow} onClose={dismissRecoveryCode} />
+  <RecoveryCodesModal
+    code={codeToShow}
+    onDone={confirmRecoveryCode}
+    onContinueWithout={continueWithoutRecoveryCode}
+  />
 {/if}
 
 {#if disableModalOpen}

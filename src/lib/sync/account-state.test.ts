@@ -5,17 +5,21 @@ const h = vi.hoisted(() => ({
   upsertMock: vi.fn(),
   fromMock: vi.fn(),
   getUserMock: vi.fn(),
+  rpcMock: vi.fn(),
 }));
 
 vi.mock('$lib/auth/supabase', () => ({
   supabase: {
     auth: { getUser: (...args: unknown[]) => h.getUserMock(...args) },
     from: (...args: unknown[]) => h.fromMock(...args),
+    rpc: (...args: unknown[]) => h.rpcMock(...args),
   },
 }));
 
 import {
   __resetDeviceIdForTests,
+  abandonSyncTransition,
+  advanceSyncTransitionPhase,
   getDeviceId,
   hydrateDeviceId,
   requireAuthenticatedUser,
@@ -32,9 +36,11 @@ beforeEach(async () => {
   h.upsertMock.mockReset();
   h.fromMock.mockReset();
   h.getUserMock.mockReset();
+  h.rpcMock.mockReset();
   h.upsertMock.mockResolvedValue({ error: null });
   h.fromMock.mockImplementation(() => ({ upsert: h.upsertMock }));
   h.getUserMock.mockResolvedValue({ data: { user: { id: 'user-1' } }, error: null });
+  h.rpcMock.mockResolvedValue({ data: null, error: null });
 });
 
 afterEach(async () => {
@@ -182,5 +188,32 @@ describe('upsertRemoteSyncAccount', () => {
     h.getUserMock.mockResolvedValueOnce({ data: { user: null }, error: null });
     await expect(upsertRemoteSyncAccount('plain')).rejects.toThrow(/sign in/i);
     expect(h.upsertMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('advanceSyncTransitionPhase', () => {
+  it('advances an owned transition through the guarded RPC', async () => {
+    await advanceSyncTransitionPhase({
+      migrationId: 'migration-1',
+      ownerDeviceId: 'device-1',
+      phase: 'transferring',
+    });
+
+    expect(h.rpcMock).toHaveBeenCalledWith('advance_sync_transition_phase', {
+      p_migration_id: 'migration-1',
+      p_owner_device_id: 'device-1',
+      p_phase: 'transferring',
+    });
+  });
+});
+
+describe('abandonSyncTransition', () => {
+  it('abandons only through the guarded RPC', async () => {
+    await abandonSyncTransition({ migrationId: 'migration-1', ownerDeviceId: 'device-1' });
+
+    expect(h.rpcMock).toHaveBeenCalledWith('abandon_sync_transition', {
+      p_migration_id: 'migration-1',
+      p_owner_device_id: 'device-1',
+    });
   });
 });

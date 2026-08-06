@@ -10,15 +10,8 @@
   //    passphrase to continue) we surface the reason and collect the passphrase
   //    to resume right here — no bouncing out to a settings field that silently
   //    cleared on submit.
-  import {
-    resumeMigrationByDirection,
-    resumeE2EEKeyRotation,
-    resetEncryptionToPlain,
-    startFreshToPlain,
-  } from '$lib/sync/e2ee-migration';
-  import { migrationResumePending } from '$lib/stores/syncStore';
+  import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { requestSync } from '$lib/sync/sync-orchestrator';
-  import { db } from '$lib/db/schema';
   import { errorMessage } from '$lib/utils/errorMessage';
   import { focusTrap } from '$lib/utils/focusTrap';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
@@ -44,7 +37,8 @@
 
   // Anything other than "quietly running" means we put the passphrase + resume
   // affordance in front of the user: a hard error, or a known need for the key.
-  const needsAction = $derived(awaitingPassphrase || !!error);
+  const canResume = $derived($e2eeLifecycle.allowedActions.includes('resume'));
+  const needsAction = $derived(canResume && (awaitingPassphrase || !!error));
 
   const title = $derived(
     direction === 'disable'
@@ -77,19 +71,13 @@
   let localError = $state<string | null>(null);
   let resetting = $state(false);
 
-  // Whether this device holds any data worth keeping. Drives which recovery
-  // options we offer: "keep my data" needs data; "start fresh" is for when there
-  // is none (every device empty) and the encrypted copy can't be unlocked.
-  let hasLocalData = $state(true);
   $effect(() => {
-    void (async () => {
-      const [e, p] = await Promise.all([
-        db.entries.count(),
-        db.prescriptions.count(),
-      ]);
-      hasLocalData = e + p > 0;
-    })();
+    direction;
+    void e2eeLifecycle.refresh();
   });
+  const canResetToPlain = $derived($e2eeLifecycle.allowedActions.includes('reset-to-plain'));
+  const canStartFresh = $derived($e2eeLifecycle.allowedActions.includes('start-fresh'));
+  const canAbandon = $derived($e2eeLifecycle.allowedActions.includes('abandon-prepared'));
 
   const shownError = $derived(localError ?? error);
 
@@ -101,20 +89,15 @@
       // A rotation needs both keys; everything else needs one. For a panic
       // rotate the user leaves the new field blank, so it falls back to the
       // same passphrase for both bundles.
-      const result =
-        direction === 'rotate'
-          ? await resumeE2EEKeyRotation(passphrase, newPassphrase || passphrase)
-          : await resumeMigrationByDirection(direction, passphrase);
+      const result = await e2eeLifecycle.resume(passphrase, newPassphrase || passphrase);
       if (result.superseded) {
         // Another device took this migration over while we were resuming. Stand
         // down rather than fight for it: clear the prompt and let sync converge
         // us to the take-over banner (or steady state if it finishes there).
-        migrationResumePending.set(null);
         passphrase = '';
         newPassphrase = '';
         requestSync();
       } else if (result.completed) {
-        migrationResumePending.set(null);
         passphrase = '';
         newPassphrase = '';
         requestSync();
@@ -149,11 +132,24 @@
     resetting = true;
     localError = null;
     try {
-      await resetEncryptionToPlain();
-      migrationResumePending.set(null);
+      await e2eeLifecycle.resetToPlain();
       requestSync();
     } catch (cause) {
       localError = errorMessage(cause) ??'Could not reset. Please try again.';
+    } finally {
+      resetting = false;
+    }
+  }
+
+  async function abandonPrepared() {
+    if (resetting || busy) return;
+    resetting = true;
+    localError = null;
+    try {
+      await e2eeLifecycle.abandonPrepared();
+      requestSync();
+    } catch (cause) {
+      localError = errorMessage(cause) ?? 'Could not cancel. Please try again.';
     } finally {
       resetting = false;
     }
@@ -182,8 +178,7 @@
     resetting = true;
     localError = null;
     try {
-      await startFreshToPlain();
-      migrationResumePending.set(null);
+      await e2eeLifecycle.startFresh(true);
       requestSync();
     } catch (cause) {
       localError = errorMessage(cause) ??'Could not start fresh. Please try again.';
@@ -245,11 +240,11 @@
       </p>
     </div>
 
-    {#if needsAction}
-      {#if shownError}
-        <p class="field-error" role="alert">{shownError}</p>
-      {/if}
+    {#if shownError}
+      <p class="field-error" role="alert">{shownError}</p>
+    {/if}
 
+    {#if needsAction}
       {#if direction === 'rotate'}
         <label class="passphrase">
           Passphrase you were using before
@@ -292,6 +287,11 @@
       {/if}
 
       <div class="modal-actions">
+        {#if canAbandon}
+          <button type="button" class="ghost" onclick={abandonPrepared} disabled={busy || resetting}>
+            Cancel change
+          </button>
+        {/if}
         <button type="button" class="primary" onclick={resume} disabled={busy || resetting || !passphrase}>
           {busy ? 'Resuming…' : 'Resume'}
         </button>
@@ -301,8 +301,9 @@
         <BackupButton compact />
       </div>
 
-      <div class="reset-block">
-        {#if hasLocalData}
+      {#if canResetToPlain || canStartFresh}
+        <div class="reset-block">
+        {#if canResetToPlain}
           <p class="reset-note">
             Stuck and can’t unlock? You can reset encryption and keep the data on
             this device, then turn it back on cleanly.
@@ -310,10 +311,7 @@
           <button type="button" class="reset-btn" onclick={resetToPlain} disabled={resetting || busy}>
             {resetting ? 'Resetting…' : 'Reset encryption & keep this device’s data'}
           </button>
-          <button type="button" class="reset-btn danger" onclick={startFresh} disabled={resetting || busy}>
-            Start fresh &amp; erase synced data
-          </button>
-        {:else}
+        {:else if canStartFresh}
           <p class="reset-note">
             There’s no data on this device. If all your devices are empty and this
             can’t be unlocked, start fresh to get back into your account, then
@@ -323,7 +321,8 @@
             {resetting ? 'Erasing…' : 'Start fresh & erase synced data'}
           </button>
         {/if}
-      </div>
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -491,9 +490,6 @@
     color: color-mix(in oklab, var(--danger, #b91c1c) 80%, var(--text) 20%);
     border: 1px solid color-mix(in oklab, var(--danger, #b91c1c) 45%, transparent);
     cursor: pointer;
-  }
-  .reset-btn + .reset-btn {
-    margin-top: 0.5rem;
   }
   .reset-btn:hover:not(:disabled) {
     background: color-mix(in oklab, var(--danger, #b91c1c) 8%, var(--surface));

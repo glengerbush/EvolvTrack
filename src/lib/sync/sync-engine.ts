@@ -8,6 +8,13 @@ import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
 import { ENCRYPTION_FORMAT_VERSION, decryptRecord, encryptRecord } from '$lib/crypto/e2ee';
 import { getLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import type { OutboxEntry, SyncAggregate, SyncMode } from '$lib/domain/types';
+import {
+  canonicalSyncChange,
+  type PlainSyncChange,
+  type SyncEnvelope,
+} from '$lib/sync/canonical-sync-change';
+
+export type { PlainSyncChange } from '$lib/sync/canonical-sync-change';
 
 /** Stay below Supabase's default 1,000-row Data API cap and page explicitly.
  * Migration/recovery reads must be exhaustive: truncating one before deleting
@@ -23,6 +30,8 @@ type PlainRemoteRow = {
   payload: unknown;
   created_at: string;
   inserted_at: string;
+  protocol_version: number;
+  schema_version: number;
 };
 
 type EncryptedPullRow = {
@@ -31,6 +40,9 @@ type EncryptedPullRow = {
   iv: string;
   created_at: string;
   inserted_at: string;
+  protocol_version: number;
+  encryption_version: number;
+  schema_version: number;
 };
 
 type EncryptedStoredRow = {
@@ -109,16 +121,6 @@ async function serverIsMidTransition(): Promise<boolean> {
 
 type PushEncryptedChangesOptions = {
   allowMigrating?: boolean;
-};
-
-export type PlainSyncChange = {
-  id: string;
-  aggregate: SyncAggregate;
-  op: 'upsert' | 'delete';
-  payload: unknown;
-  protocolVersion: number;
-  schemaVersion: number;
-  createdAt: string;
 };
 
 export type EncryptedSyncChange = {
@@ -202,12 +204,8 @@ export async function pushOutbox(): Promise<PushOutboxResult> {
  * written without the wrapper decodes to a null record (see the guard in
  * `applyRemoteChange`).
  */
-function plainWireEnvelope(aggregate: SyncAggregate, op: 'upsert' | 'delete', record: unknown) {
-  return { aggregate, op, record };
-}
-
 function syncEnvelope(row: OutboxEntry) {
-  return plainWireEnvelope(row.aggregate, row.op, row.payload);
+  return canonicalSyncChange.envelope(row.aggregate, row.op, row.payload);
 }
 
 async function pushPlainOutbox(rows: OutboxEntry[], userId: string): Promise<void> {
@@ -296,18 +294,6 @@ type PulledEvent = {
   insertedAt: string;
 };
 
-type SyncEnvelopeShape = {
-  aggregate?: SyncAggregate;
-  op?: 'upsert' | 'delete';
-  record?: unknown;
-};
-
-function entityIdFromRowId(rowId: string): string {
-  // Row ids are `${aggregate}:${entityId}`; aggregates never contain a colon.
-  const idx = rowId.indexOf(':');
-  return idx >= 0 ? rowId.slice(idx + 1) : rowId;
-}
-
 /**
  * Pull remote events newer than the local cursor and apply them
  * last-writer-wins. Incremental by the server-set `inserted_at` column. Reads
@@ -353,11 +339,15 @@ export async function pullAndApply(): Promise<PullResult> {
   return { fetched: events.length, applied };
 }
 
-async function pullPlain(userId: string, cursor: string | null): Promise<PulledEvent[]> {
+async function pullPlain(
+  userId: string,
+  cursor: string | null,
+  rejectMalformed = false,
+): Promise<PulledEvent[]> {
   const rows = await fetchAllPages<PlainRemoteRow>((from, to) => {
     let query = supabase
       .from('sync_changes_plain')
-      .select('id,aggregate,op,payload,created_at,inserted_at')
+      .select('id,aggregate,op,payload,created_at,inserted_at,protocol_version,schema_version')
       .eq('user_id', userId)
       .order('inserted_at', { ascending: true })
       .order('id', { ascending: true });
@@ -365,17 +355,32 @@ async function pullPlain(userId: string, cursor: string | null): Promise<PulledE
     return query.range(from, to);
   });
 
-  return rows.map((row) => {
-    const envelope = (row.payload ?? {}) as SyncEnvelopeShape;
-    return {
-      aggregate: (envelope.aggregate ?? row.aggregate) as SyncAggregate,
-      entityId: entityIdFromRowId(row.id),
-      op: (envelope.op ?? row.op) as 'upsert' | 'delete',
-      record: envelope.record ?? null,
+  const events: PulledEvent[] = [];
+  for (const row of rows) {
+    const envelope = (row.payload ?? {}) as Partial<SyncEnvelope>;
+    const decoded = canonicalSyncChange.decode({
+      sourceId: row.id,
+      envelope: {
+        aggregate: envelope.aggregate ?? row.aggregate,
+        op: envelope.op ?? row.op,
+        record: envelope.record ?? null,
+      },
+      protocolVersion: row.protocol_version,
+      schemaVersion: row.schema_version,
+    });
+    if (!decoded.accepted) {
+      if (rejectMalformed) {
+        throw new Error(`Plain sync row ${row.id} was rejected: ${decoded.reason}.`);
+      }
+      continue;
+    }
+    events.push({
+      ...decoded.change,
       remoteUpdatedAt: row.created_at,
       insertedAt: row.inserted_at,
-    };
-  });
+    });
+  }
+  return events;
 }
 
 async function pullEncrypted(
@@ -390,7 +395,7 @@ async function pullEncrypted(
   const rows = await fetchAllPages<EncryptedPullRow>((from, to) => {
     let query = supabase
       .from('sync_changes_encrypted')
-      .select('id,ciphertext,iv,created_at,inserted_at')
+      .select('id,ciphertext,iv,created_at,inserted_at,protocol_version,encryption_version,schema_version')
       .eq('user_id', userId)
       .eq('dek_version', dekVersion)
       .order('inserted_at', { ascending: true })
@@ -401,9 +406,9 @@ async function pullEncrypted(
 
   const events: PulledEvent[] = [];
   for (const row of rows) {
-    let envelope: SyncEnvelopeShape;
+    let envelope: SyncEnvelope;
     try {
-      envelope = await decryptRecord<SyncEnvelopeShape>(sessionKey, row.ciphertext, row.iv);
+      envelope = await decryptRecord<SyncEnvelope>(sessionKey, row.ciphertext, row.iv);
     } catch (cause) {
       // Re-throw with the row id so the orchestrator's sync-cycle log makes it
       // obvious which row tripped the crypto error (otherwise the message is
@@ -416,14 +421,18 @@ async function pullEncrypted(
     // the server columns were dropped to stop leaking per-aggregate volume.
     // An envelope missing either field is a corrupted/forged row — skip it
     // rather than guess at what the row was.
-    if (!envelope.aggregate || !envelope.op) {
-      throw new Error(`Encrypted sync row ${row.id} is missing aggregate/op in its envelope.`);
+    const outcome = canonicalSyncChange.decode({
+      sourceId: row.id,
+      envelope,
+      protocolVersion: row.protocol_version,
+      schemaVersion: row.schema_version,
+      encryptionVersion: row.encryption_version,
+    });
+    if (!outcome.accepted) {
+      throw new Error(`Encrypted sync row ${row.id} was rejected: ${outcome.reason}.`);
     }
     events.push({
-      aggregate: envelope.aggregate,
-      entityId: entityIdFromRowId(row.id),
-      op: envelope.op,
-      record: envelope.record ?? null,
+      ...outcome.change,
       remoteUpdatedAt: row.created_at,
       insertedAt: row.inserted_at,
     });
@@ -487,11 +496,7 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
   // exists both as an enable-backfill row and a steady-state row; a Postgres
   // upsert rejects a batch that touches the same (user_id, id) twice
   // ("ON CONFLICT DO UPDATE command cannot affect row a second time").
-  const deduped = [...new Map(
-    [...changes]
-      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
-      .map((change) => [change.id, change] as const),
-  ).values()];
+  const deduped = canonicalSyncChange.dedupe(changes);
 
   const payload = deduped.map((change) => ({
     id: change.id,
@@ -501,7 +506,7 @@ export async function pushPlainChanges(changes: PlainSyncChange[]) {
     // Wrap in the same envelope `pushPlainOutbox` uses so `pullPlain` can read
     // `record` back out. Storing the bare record here was the disable-migration
     // bug that left every converted row decoding to a null upsert.
-    payload: plainWireEnvelope(change.aggregate, change.op, change.payload),
+    payload: canonicalSyncChange.envelope(change.aggregate, change.op, change.payload),
     protocol_version: change.protocolVersion,
     schema_version: change.schemaVersion,
     created_at: change.createdAt,
@@ -576,7 +581,7 @@ export async function pullSnapshotForMigration(
 ): Promise<{ fetched: number; applied: number }> {
   const user = await requireAuthenticatedUser();
 
-  const events = await pullPlain(user.id, null);
+  const events = await pullPlain(user.id, null, true);
   if (sessionKey) {
     events.push(...(await pullEncrypted(user.id, null, sessionKey)));
   }
@@ -602,7 +607,7 @@ export async function pullSnapshotForMigration(
  */
 export async function fetchRemotePlainChanges(): Promise<PlainSyncChange[]> {
   const user = await requireAuthenticatedUser();
-  const events = await pullPlain(user.id, null);
+  const events = await pullPlain(user.id, null, true);
   return events.map((event) => ({
     id: `${event.aggregate}:${event.entityId}`,
     aggregate: event.aggregate,

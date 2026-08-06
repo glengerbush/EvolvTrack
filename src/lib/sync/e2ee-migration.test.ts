@@ -95,6 +95,8 @@ vi.mock('$lib/sync/session-key', () => ({
 
 vi.mock('$lib/sync/account-state', () => ({
   getDeviceId: vi.fn(() => 'device-1'),
+  advanceSyncTransitionPhase: vi.fn(async () => undefined),
+  startFreshSync: vi.fn(async () => undefined),
   upsertRemoteSyncAccount: vi.fn(async (mode: SyncMode, migration?: E2EEMigrationState) => {
     state.upsertAccountCalls.push({ mode, migration });
   }),
@@ -183,6 +185,7 @@ vi.mock('$lib/sync/sync-engine', () => ({
   fetchRemoteEncryptedChanges: (...args: unknown[]) => fetchRemoteEncryptedChangesMock(...args),
   fetchRemotePlainChanges: (...args: unknown[]) => fetchRemotePlainChangesMock(...args),
   pullSnapshotForMigration: (...args: unknown[]) => pullSnapshotForMigrationMock(...args),
+  reEncryptServerRows: vi.fn(async () => 0),
 }));
 
 // Imports MUST come after vi.mock so the mocks are applied.
@@ -205,6 +208,7 @@ import {
   completeSyncTransition,
   fetchRemoteSyncAccount,
   MigrationSupersededError,
+  startFreshSync,
   SyncTransitionConflictError,
 } from '$lib/sync/account-state';
 import { getAllEntries } from '$lib/domain/repo';
@@ -239,6 +243,7 @@ function bundleFor(passphrase: string): WrappedKeyBundle {
       iv: 'wiv',
     },
     passphraseIterations: 600_000,
+    recoveryStatus: 'confirmed',
     recoverySaltB64: 'SALT',
     recoveryWrapped: { ciphertext: 'wrap(RKEK,DEK_BYTES)', iv: 'wiv' },
     recoveryIterations: 600_000,
@@ -265,9 +270,15 @@ beforeEach(() => {
   pushPlainChangesMock.mockClear();
   pushPlainChangesMock.mockResolvedValue({ pushed: 0 });
   deleteRemoteEncryptedChangesMock.mockClear();
-  deleteRemoteEncryptedChangesMock.mockResolvedValue({ deleted: 0 });
+  deleteRemoteEncryptedChangesMock.mockImplementation(async () => {
+    fetchRemoteEncryptedChangesMock.mockResolvedValue([]);
+    return { deleted: 0 };
+  });
   deleteRemotePlainChangesMock.mockClear();
-  deleteRemotePlainChangesMock.mockResolvedValue({ deleted: 0 });
+  deleteRemotePlainChangesMock.mockImplementation(async () => {
+    fetchRemotePlainChangesMock.mockResolvedValue([]);
+    return { deleted: 0 };
+  });
   fetchRemoteEncryptedChangesMock.mockClear();
   fetchRemoteEncryptedChangesMock.mockResolvedValue([]);
   fetchRemotePlainChangesMock.mockClear();
@@ -289,6 +300,8 @@ beforeEach(() => {
   vi.mocked(deleteRemoteWrappedKeys).mockClear();
   vi.mocked(setSessionKey).mockClear();
   vi.mocked(clearSession).mockClear();
+  vi.mocked(startFreshSync).mockReset();
+  vi.mocked(startFreshSync).mockResolvedValue(undefined);
   vi.mocked(getSessionKey).mockReturnValue(null);
   clearPullCursor();
 });
@@ -310,6 +323,21 @@ describe('startE2EEMigration — argument validation', () => {
 });
 
 describe('startE2EEMigration — happy path from plain', () => {
+  it('offers the durable recovery code before converting records', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    const events: string[] = [];
+    pullSnapshotForMigrationMock.mockImplementationOnce(async () => {
+      events.push('convert');
+      return { fetched: 0, applied: 0 };
+    });
+
+    await startE2EEMigration('hunter2', {
+      onRecoveryCode: (code) => events.push(`code:${code}`),
+    });
+
+    expect(events).toEqual(['code:TEST-RECO-CODE-2026', 'convert']);
+  });
+
   it('mints a DEK + recovery code, wraps both, and persists the bundle locally and remotely', async () => {
     state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
     pushEncryptedChangesMock.mockResolvedValueOnce({ pushed: 2 });
@@ -565,7 +593,7 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
   it('decrypts remote events when present and pushes them as plain events', async () => {
     fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([
       {
-        id: 'r-1',
+        id: 'entry:w99',
         aggregate: 'entry',
         op: 'upsert',
         ciphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99"}}',
@@ -604,6 +632,39 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     // And it sweeps ALL encrypted rows at the end (no id list) so orphan-version
     // rows the decrypt skipped don't linger on the server.
     expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalledWith();
+  });
+
+  it.each([
+    {
+      name: 'payload identity',
+      row: {
+        id: 'entry:source-id',
+        ciphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"payload-id"}}',
+        encryptionVersion: 1,
+      },
+    },
+    {
+      name: 'encryption version',
+      row: {
+        id: 'entry:w99',
+        ciphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99"}}',
+        encryptionVersion: 999,
+      },
+    },
+  ])('preserves encrypted sources when $name validation fails', async ({ row }) => {
+    fetchRemoteEncryptedChangesMock.mockResolvedValueOnce([{
+      ...row,
+      iv: 'iv',
+      protocolVersion: 1,
+      schemaVersion: 3,
+      createdAt: '2026-05-01T00:00:00.000Z',
+    }]);
+
+    const result = await startE2EEDisableMigration('pw');
+
+    expect(result.completed).toBe(false);
+    expect(result.error).toMatch(/rejected/i);
+    expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
   });
 
   it('folds rows already in the plaintext table into the conversion set (handles both tables)', async () => {
@@ -718,7 +779,7 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
 
   it('clears local encrypted + migrationBackfill tables on success', async () => {
     await db.migrationBackfill.put({
-      id: 'leftover',
+      id: 'entry:w99',
       aggregate: 'entry',
       op: 'upsert',
       payloadCiphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"w99"}}',
@@ -1018,8 +1079,15 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
     pushPlainChangesMock.mockResolvedValueOnce({ pushed: 3 });
     const result = await resetEncryptionToPlain();
 
-    // Never touches the (undecryptable) encrypted rows on the server.
-    expect(fetchRemoteEncryptedChangesMock).not.toHaveBeenCalled();
+    // Reads ciphertext metadata to prove destination completeness, never
+    // decrypts it, then verifies the source is empty after the sweep.
+    expect(fetchRemoteEncryptedChangesMock).toHaveBeenCalledTimes(2);
+    expect(fetchRemoteEncryptedChangesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      deleteRemoteEncryptedChangesMock.mock.invocationCallOrder[0],
+    );
+    expect(deleteRemoteEncryptedChangesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchRemoteEncryptedChangesMock.mock.invocationCallOrder[1],
+    );
     const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
     const ids = changes.map((c) => c.id);
     expect(ids).toContain('entry:w1');
@@ -1060,6 +1128,25 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
     expect(pushPlainChangesMock).not.toHaveBeenCalled();
     expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
   });
+
+  it('republishes valid local ciphertext when no plaintext treatment rows remain', async () => {
+    vi.mocked(getAllEntries).mockResolvedValueOnce([]);
+    vi.mocked(getSessionKey).mockReturnValueOnce('DEK_BYTES');
+    await db.encrypted.put({
+      id: 'entry:encrypted-only',
+      entity: 'entry',
+      ciphertext: 'ct:{"aggregate":"entry","op":"upsert","record":{"id":"encrypted-only"}}',
+      iv: 'iv',
+      keyVersion: 1,
+      updatedAt: '2026-05-01T00:00:00.000Z',
+    });
+
+    await resetEncryptionToPlain();
+
+    expect(pushPlainChangesMock).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ id: 'entry:encrypted-only' }),
+    ]));
+  });
 });
 
 describe('startFreshToPlain — erase and start over (no local data required)', () => {
@@ -1067,21 +1154,34 @@ describe('startFreshToPlain — erase and start over (no local data required)', 
     state.mockProfile = { id: 'profile', syncMode: 'migrating_to_e2ee' } as ProfileSettings;
   });
 
-  it('erases the encrypted + plaintext server data and the key bundle, then lands in plain', async () => {
+  it('atomically erases cloud sync data and only then clears local recovery material', async () => {
     await startFreshToPlain();
 
-    expect(deleteRemoteEncryptedChangesMock).toHaveBeenCalled();
-    expect(deleteRemotePlainChangesMock).toHaveBeenCalled();
+    expect(startFreshSync).toHaveBeenCalledWith({
+      migrationId: expect.any(String),
+      ownerDeviceId: 'device-1',
+    });
+    expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
+    expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
     expect(clearLocalWrappedKeys).toHaveBeenCalled();
-    expect(deleteRemoteWrappedKeys).toHaveBeenCalled();
+    expect(deleteRemoteWrappedKeys).not.toHaveBeenCalled();
     expect(clearSession).toHaveBeenCalled();
 
     const finalSave = state.saveProfileCalls.at(-1);
     expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
     // Gated transition (see resetEncryptionToPlain): claim migrating_to_plain,
-    // finalize to plain via the guarded complete RPC.
+    // then let the atomic Start Fresh RPC finalize it.
     expect(state.beginTransitionCalls.at(-1)?.to).toBe('migrating_to_plain');
-    expect(state.completeTransitionCalls.at(-1)?.to).toBe('plain');
+    expect(state.completeTransitionCalls).toHaveLength(0);
+  });
+
+  it('preserves local recovery material when atomic cloud cleanup fails', async () => {
+    vi.mocked(startFreshSync).mockRejectedValueOnce(new Error('network down'));
+
+    await expect(startFreshToPlain()).rejects.toThrow(/network down/);
+
+    expect(clearLocalWrappedKeys).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
   });
 
   it('never pushes local data (it discards rather than keeps)', async () => {

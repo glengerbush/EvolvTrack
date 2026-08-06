@@ -83,6 +83,8 @@ vi.mock('$lib/sync/session-key', () => ({
 
 vi.mock('$lib/sync/account-state', () => ({
   getDeviceId: vi.fn(() => 'device-1'),
+  advanceSyncTransitionPhase: vi.fn(async () => undefined),
+  startFreshSync: vi.fn(async () => undefined),
   upsertRemoteSyncAccount: vi.fn(async (mode: SyncMode, migration?: E2EEMigrationState) => {
     state.upsertAccountCalls.push({ mode, migration });
   }),
@@ -168,6 +170,7 @@ function bundleForCode(code: string, dekToken: string, passphraseToken = 'OLD_PW
       iv: 'wiv',
     },
     passphraseIterations: 600_000,
+    recoveryStatus: 'confirmed',
     recoverySaltB64: 'SALT',
     recoveryWrapped: {
       ciphertext: `wrap(RKEK(${code}),${dekToken})`,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { setupWizardPending } from '$lib/stores/setupWizardStore';
-  import { startE2EEMigration } from '$lib/sync/e2ee-migration';
+  import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
   import { importTrackingFile, importResultSummary } from '$lib/importExport/importer';
   import { requestSync } from '$lib/sync/sync-orchestrator';
@@ -110,8 +110,12 @@
     busy = true;
     e2eeStatus = 'Enabling encryption…';
     try {
-      const result = await startE2EEMigration(passphrase);
-      if (result.recoveryCode) recoveryCode = result.recoveryCode;
+      let recoveryOffered = false;
+      const result = await e2eeLifecycle.enable(passphrase, (code) => {
+        recoveryOffered = true;
+        recoveryCode = code;
+      });
+      if (!recoveryOffered && result.recoveryCode) recoveryCode = result.recoveryCode;
       migrationPaused = !result.completed;
       if (result.completed) {
         e2eeStatus = `Encryption enabled. ${result.encryptedEventCount} local record${result.encryptedEventCount === 1 ? '' : 's'} encrypted.`;
@@ -136,8 +140,30 @@
     step = 'import';
   }
 
-  function acknowledgeRecoveryCodes() {
-    step = 'import';
+  async function acknowledgeRecoveryCodes() {
+    busy = true;
+    try {
+      await e2eeLifecycle.acknowledgeRecoveryCode();
+      recoveryCode = null;
+      step = 'import';
+    } catch (error) {
+      e2eeStatus = (error as Error).message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function continueWithoutRecoveryCode() {
+    busy = true;
+    try {
+      await e2eeLifecycle.continueWithoutRecoveryCode();
+      recoveryCode = null;
+      step = 'import';
+    } catch (error) {
+      e2eeStatus = (error as Error).message;
+    } finally {
+      busy = false;
+    }
   }
 
   async function handleImportFile(event: Event) {
@@ -336,8 +362,11 @@
       </div>
       <footer class="wizard-footer">
         {#if recoveryCode}
-          <button class="btn btn-primary" type="button" onclick={acknowledgeRecoveryCodes}>
-            I've saved my code — continue
+          <button class="btn btn-ghost" type="button" disabled={busy} onclick={continueWithoutRecoveryCode}>
+            Continue without recovery code
+          </button>
+          <button class="btn btn-primary" type="button" disabled={busy} onclick={acknowledgeRecoveryCodes}>
+            {busy ? 'Saving…' : "I've saved my code — continue"}
           </button>
         {:else}
           <button class="btn btn-ghost" type="button" onclick={skipE2EE} disabled={busy}>

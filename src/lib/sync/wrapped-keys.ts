@@ -25,15 +25,17 @@ type WrappedKeyRow = {
   passphrase_wrapped_ciphertext: string;
   passphrase_wrapped_iv: string;
   passphrase_iterations: number | null;
-  recovery_salt_b64: string;
-  recovery_wrapped_ciphertext: string;
-  recovery_wrapped_iv: string;
+  recovery_status: WrappedKeyBundle['recoveryStatus'] | null;
+  recovery_salt_b64: string | null;
+  recovery_wrapped_ciphertext: string | null;
+  recovery_wrapped_iv: string | null;
   recovery_iterations: number | null;
   updated_at: string;
 };
 
 function rowToBundle(row: WrappedKeyRow): WrappedKeyBundle {
-  return {
+  const recoveryStatus = row.recovery_status ?? 'confirmed';
+  const bundle: WrappedKeyBundle = {
     id: BUNDLE_KEY,
     dekVersion: row.dek_version,
     passphraseSaltB64: row.passphrase_salt_b64,
@@ -42,14 +44,22 @@ function rowToBundle(row: WrappedKeyRow): WrappedKeyBundle {
       iv: row.passphrase_wrapped_iv,
     },
     passphraseIterations: row.passphrase_iterations ?? LEGACY_PBKDF2_ITERATIONS,
-    recoverySaltB64: row.recovery_salt_b64,
-    recoveryWrapped: {
-      ciphertext: row.recovery_wrapped_ciphertext,
-      iv: row.recovery_wrapped_iv,
-    },
-    recoveryIterations: row.recovery_iterations ?? LEGACY_PBKDF2_ITERATIONS,
+    recoveryStatus,
     updatedAt: row.updated_at,
   };
+  if (
+    row.recovery_salt_b64
+    && row.recovery_wrapped_ciphertext
+    && row.recovery_wrapped_iv
+  ) {
+    bundle.recoverySaltB64 = row.recovery_salt_b64;
+    bundle.recoveryWrapped = {
+      ciphertext: row.recovery_wrapped_ciphertext,
+      iv: row.recovery_wrapped_iv,
+    };
+    bundle.recoveryIterations = row.recovery_iterations ?? LEGACY_PBKDF2_ITERATIONS;
+  }
+  return bundle;
 }
 
 /** Backfill iteration counts on a bundle read from a store that predates the
@@ -57,8 +67,11 @@ function rowToBundle(row: WrappedKeyRow): WrappedKeyBundle {
 function withIterationDefaults(bundle: WrappedKeyBundle): WrappedKeyBundle {
   return {
     ...bundle,
+    recoveryStatus: bundle.recoveryStatus ?? 'confirmed',
     passphraseIterations: bundle.passphraseIterations ?? LEGACY_PBKDF2_ITERATIONS,
-    recoveryIterations: bundle.recoveryIterations ?? LEGACY_PBKDF2_ITERATIONS,
+    recoveryIterations: bundle.recoveryWrapped
+      ? bundle.recoveryIterations ?? LEGACY_PBKDF2_ITERATIONS
+      : undefined,
   };
 }
 
@@ -125,10 +138,11 @@ export async function upsertRemoteWrappedKeys(bundle: WrappedKeyBundle): Promise
       passphrase_wrapped_ciphertext: bundle.passphraseWrapped.ciphertext,
       passphrase_wrapped_iv: bundle.passphraseWrapped.iv,
       passphrase_iterations: bundle.passphraseIterations,
-      recovery_salt_b64: bundle.recoverySaltB64,
-      recovery_wrapped_ciphertext: bundle.recoveryWrapped.ciphertext,
-      recovery_wrapped_iv: bundle.recoveryWrapped.iv,
-      recovery_iterations: bundle.recoveryIterations,
+      recovery_salt_b64: bundle.recoverySaltB64 ?? null,
+      recovery_wrapped_ciphertext: bundle.recoveryWrapped?.ciphertext ?? null,
+      recovery_wrapped_iv: bundle.recoveryWrapped?.iv ?? null,
+      recovery_iterations: bundle.recoveryIterations ?? null,
+      recovery_status: bundle.recoveryStatus,
       updated_at: bundle.updatedAt,
     },
     { onConflict: 'user_id,dek_version' },

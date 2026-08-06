@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { recoverWithCode } from '$lib/sync/e2ee-migration';
+  import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { SyncTransitionConflictError } from '$lib/sync/account-state';
 
@@ -42,17 +42,21 @@
     busy = true;
     error = null;
     try {
-      const result = await recoverWithCode(code, newPassphrase);
+      let recoveryOffered = false;
+      const result = await e2eeLifecycle.recover(code, newPassphrase, (newCode) => {
+        recoveryOffered = true;
+        onRecovered(newCode);
+      });
       // recoverWithCode always rotates, so a fresh recovery code is in the
       // result. Hand it to the caller so they can present the once-only
       // modal — closing this dialog without showing it would lose it.
-      if (!result.recoveryCode) {
+      if (!recoveryOffered && !result.recoveryCode) {
         error = result.error ?? 'Recovery completed without issuing a new code. Try again.';
         busy = false;
         return;
       }
       requestSync();
-      onRecovered(result.recoveryCode);
+      if (!recoveryOffered && result.recoveryCode) onRecovered(result.recoveryCode);
     } catch (err) {
       // A transition conflict means another device is mid-change (e.g. already
       // rotating). Tell the user to wait rather than showing the raw RPC error.

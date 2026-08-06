@@ -1,13 +1,11 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { derivePassphraseKek, unwrapDek } from '$lib/crypto/e2ee';
-  import { setSessionKey } from '$lib/sync/session-key';
   import {
-    fetchRemoteWrappedKeys,
-    getLocalWrappedKeys,
-    saveLocalWrappedKeys,
-  } from '$lib/sync/wrapped-keys';
+    deviceEncryptionState,
+    isDeviceEncryptionStateError,
+  } from '$lib/sync/device-encryption-state';
   import { requestSync } from '$lib/sync/sync-orchestrator';
+  import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { logoutAndClearLocalData } from '$lib/auth/supabase';
   import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
@@ -64,7 +62,14 @@
     newRecoveryCode = code;
   }
 
-  function acknowledgeNewCode() {
+  async function acknowledgeNewCode() {
+    await e2eeLifecycle.acknowledgeRecoveryCode();
+    newRecoveryCode = null;
+    onClose();
+  }
+
+  async function continueWithoutNewCode() {
+    await e2eeLifecycle.continueWithoutRecoveryCode();
     newRecoveryCode = null;
     onClose();
   }
@@ -74,39 +79,15 @@
     busy = true;
     error = null;
     try {
-      let bundle = await getLocalWrappedKeys();
-      if (!bundle) {
-        // Fresh device that hasn't cached the bundle yet (orchestrator
-        // reconcile usually pre-fetches this, but the user can also open the
-        // modal before the first sync cycle runs). Try the server before
-        // sending them down the recovery-code path.
-        try {
-          const remote = await fetchRemoteWrappedKeys();
-          if (remote) {
-            const { id: _id, ...rest } = remote;
-            bundle = await saveLocalWrappedKeys(rest);
-          }
-        } catch (cause) {
-          error = (cause as Error).message ?? 'Could not reach the server to fetch your encrypted key.';
-          busy = false;
-          return;
-        }
-      }
-      if (!bundle) {
-        error = 'No encrypted bundle on the server for this account. Use a recovery code to set up this device.';
-        busy = false;
-        return;
-      }
-      const kek = await derivePassphraseKek(passphrase, bundle.passphraseSaltB64, bundle.passphraseIterations);
-      let dek: string;
       try {
-        dek = await unwrapDek(kek, bundle.passphraseWrapped.ciphertext, bundle.passphraseWrapped.iv);
-      } catch {
-        error = "That passphrase didn't unlock your encrypted data.";
+        await deviceEncryptionState.unlock(passphrase);
+      } catch (cause) {
+        error = isDeviceEncryptionStateError(cause) && cause.code === 'missing-key'
+          ? 'No encrypted bundle is available. Use a recovery code to set up this device.'
+          : (cause as Error).message;
         busy = false;
         return;
       }
-      setSessionKey(dek);
       // Best-effort: ask the browser for persistent storage so it won't
       // evict the cached key under disk pressure. Safe to ignore failures.
       if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
@@ -185,7 +166,11 @@
 {/if}
 
 {#if newRecoveryCode}
-  <RecoveryCodesModal code={newRecoveryCode} onClose={acknowledgeNewCode} />
+  <RecoveryCodesModal
+    code={newRecoveryCode}
+    onDone={acknowledgeNewCode}
+    onContinueWithout={continueWithoutNewCode}
+  />
 {/if}
 
 <style>

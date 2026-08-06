@@ -84,6 +84,7 @@ function row(dekVersion: number) {
     recovery_salt_b64: 'rs',
     recovery_wrapped_ciphertext: 'rc',
     recovery_wrapped_iv: 'ri',
+    recovery_status: 'confirmed',
     updated_at: '2026-06-03T00:00:00.000Z',
   };
 }
@@ -115,6 +116,22 @@ describe('fetchRemoteWrappedKeys', () => {
     setResult(null);
     expect(await fetchRemoteWrappedKeys()).toBeNull();
   });
+
+  it('represents an explicit recovery-code opt-out without wrapping material', async () => {
+    setResult({
+      ...row(2),
+      recovery_status: 'declined',
+      recovery_salt_b64: null,
+      recovery_wrapped_ciphertext: null,
+      recovery_wrapped_iv: null,
+      recovery_iterations: null,
+    });
+
+    const bundle = await fetchRemoteWrappedKeys(2);
+
+    expect(bundle).toMatchObject({ recoveryStatus: 'declined' });
+    expect(bundle?.recoveryWrapped).toBeUndefined();
+  });
 });
 
 describe('fetchAllRemoteWrappedKeys', () => {
@@ -137,6 +154,7 @@ describe('upsertRemoteWrappedKeys', () => {
       recoverySaltB64: 'rs',
       recoveryWrapped: { ciphertext: 'rc', iv: 'ri' },
       recoveryIterations: 600_000,
+      recoveryStatus: 'unconfirmed',
       updatedAt: '2026-06-03T00:00:00.000Z',
     };
     await upsertRemoteWrappedKeys(bundle);
@@ -146,6 +164,7 @@ describe('upsertRemoteWrappedKeys', () => {
       dek_version: 2,
       passphrase_iterations: 600_000,
       recovery_iterations: 600_000,
+      recovery_status: 'unconfirmed',
     });
   });
 });

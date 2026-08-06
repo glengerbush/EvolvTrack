@@ -22,16 +22,17 @@ insert into public.wrapped_keys (
   passphrase_wrapped_iv,
   recovery_salt_b64,
   recovery_wrapped_ciphertext,
-  recovery_wrapped_iv
+  recovery_wrapped_iv,
+  recovery_iterations
 )
 values
   (
     '10000000-0000-0000-0000-000000000001',
-    1, 'salt-1', 'cipher-1', 'iv-1', 'recovery-salt-1', 'recovery-cipher-1', 'recovery-iv-1'
+    1, 'salt-1', 'cipher-1', 'iv-1', 'recovery-salt-1', 'recovery-cipher-1', 'recovery-iv-1', 210000
   ),
   (
     '20000000-0000-0000-0000-000000000002',
-    1, 'salt-2', 'cipher-2', 'iv-2', 'recovery-salt-2', 'recovery-cipher-2', 'recovery-iv-2'
+    1, 'salt-2', 'cipher-2', 'iv-2', 'recovery-salt-2', 'recovery-cipher-2', 'recovery-iv-2', 210000
   );
 
 insert into public.licenses (

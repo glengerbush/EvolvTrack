@@ -407,6 +407,24 @@ describe('fetchRemotePlainChanges', () => {
     h.selectImpl.mockResolvedValueOnce({ data: [], error: null });
     expect(await fetchRemotePlainChanges()).toEqual([]);
   });
+
+  it('halts destructive conversion when a plaintext source is malformed', async () => {
+    h.selectImpl.mockResolvedValueOnce({
+      data: [{
+        id: 'entry:right-id',
+        aggregate: 'entry',
+        op: 'upsert',
+        payload: { aggregate: 'entry', op: 'upsert', record: { id: 'wrong-id' } },
+        protocol_version: SYNC_PROTOCOL_VERSION,
+        schema_version: DB_SCHEMA_VERSION,
+        created_at: '2026-05-01T00:00:00.000Z',
+        inserted_at: '2026-05-01T00:00:01.000Z',
+      }],
+      error: null,
+    });
+
+    await expect(fetchRemotePlainChanges()).rejects.toThrow(/entity-identity/);
+  });
 });
 
 describe('fetchRemoteEncryptedChanges', () => {

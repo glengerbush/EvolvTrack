@@ -1,13 +1,17 @@
 <script lang="ts">
   let {
     code,
-    onClose,
+    onDone,
+    onContinueWithout,
   }: {
     code: string;
-    onClose: () => void;
+    onDone: () => Promise<void> | void;
+    onContinueWithout: () => Promise<void> | void;
   } = $props();
 
   let copyLabel = $state('Copy');
+  let busy = $state(false);
+  let error = $state('');
 
   async function copyCode() {
     try {
@@ -20,21 +24,20 @@
     }
   }
 
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      onClose();
+  async function choose(action: () => Promise<void> | void) {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      await action();
+    } catch (cause) {
+      error = (cause as Error).message;
+      busy = false;
     }
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) onClose();
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-<div class="modal-backdrop" role="presentation" onclick={handleBackdropClick}>
+<div class="modal-backdrop" role="presentation">
   <div
     class="modal"
     role="dialog"
@@ -49,9 +52,15 @@
       your encrypted data cannot be recovered.
     </p>
     <p class="code-box"><code>{code}</code></p>
+    {#if error}<p class="modal-error" role="alert">{error}</p>{/if}
     <div class="modal-actions">
-      <button type="button" class="ghost" onclick={onClose}>Done</button>
-      <button type="button" class="primary" onclick={copyCode}>{copyLabel}</button>
+      <button type="button" class="ghost" disabled={busy} onclick={() => choose(onContinueWithout)}>
+        Continue without recovery code
+      </button>
+      <button type="button" class="ghost" disabled={busy} onclick={copyCode}>{copyLabel}</button>
+      <button type="button" class="primary" disabled={busy} onclick={() => choose(onDone)}>
+        {busy ? 'Saving…' : 'Done'}
+      </button>
     </div>
   </div>
 </div>
@@ -135,5 +144,9 @@
     background: var(--brand, #1f7a3a);
     border: 1px solid var(--brand, #1f7a3a);
     color: #fff;
+  }
+
+  .modal-error {
+    color: var(--danger, #b42318) !important;
   }
 </style>

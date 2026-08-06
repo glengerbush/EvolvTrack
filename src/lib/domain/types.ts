@@ -21,6 +21,8 @@ export type SyncMode =
   | 'rotating_e2ee_key';
 export type SyncAggregate = 'entry' | 'prescription' | 'profile';
 export type E2EEMigrationDirection = 'enable' | 'disable' | 'rotate';
+export type E2EETransitionPhase = 'preparing' | 'transferring' | 'verifying' | 'finalizing';
+export type RecoveryCodeStatus = 'missing' | 'unconfirmed' | 'confirmed' | 'declined';
 
 /**
  * A user's wrapped data encryption key, in both passphrase-wrapped and
@@ -41,17 +43,19 @@ export interface WrappedKeyBundle {
   /** PBKDF2 iterations the passphrase KEK was derived with. Stored so a raised
    *  work factor never locks out keys wrapped under the old one. */
   passphraseIterations: number;
-  recoverySaltB64: string;
-  recoveryWrapped: { ciphertext: string; iv: string };
+  recoveryStatus: RecoveryCodeStatus;
+  recoverySaltB64?: string;
+  recoveryWrapped?: { ciphertext: string; iv: string };
   /** PBKDF2 iterations the recovery KEK was derived with (can differ from the
    *  passphrase half — e.g. after a recovery-code rotation). */
-  recoveryIterations: number;
+  recoveryIterations?: number;
   updatedAt: IsoDateTime;
 }
 
 export interface E2EEMigrationState {
   id: string;
   direction?: E2EEMigrationDirection;
+  phase?: E2EETransitionPhase;
   ownerDeviceId: string;
   startedAt: IsoDateTime;
   updatedAt: IsoDateTime;

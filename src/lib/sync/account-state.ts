@@ -1,7 +1,7 @@
 import { nanoid } from 'nanoid';
 import { supabase } from '$lib/auth/supabase';
 import { durableGet, durableSet } from '$lib/db/durableKv';
-import type { E2EEMigrationState, SyncMode } from '$lib/domain/types';
+import type { E2EEMigrationState, E2EETransitionPhase, SyncMode } from '$lib/domain/types';
 
 const SYNC_MODES: ReadonlySet<SyncMode> = new Set<SyncMode>([
   'plain',
@@ -133,7 +133,7 @@ export async function fetchRemoteSyncAccount(): Promise<RemoteSyncAccount | null
   const { data, error } = await supabase
     .from('sync_accounts')
     .select(
-      'sync_mode, e2ee_migration_id, e2ee_migration_direction, migration_owner_device_id, migration_started_at, migration_updated_at, migration_completed_at, plaintext_high_water_mark, migration_records_total, migration_records_converted, active_dek_version, pending_dek_version',
+      'sync_mode, e2ee_migration_id, e2ee_migration_direction, e2ee_transition_phase, migration_owner_device_id, migration_started_at, migration_updated_at, migration_completed_at, plaintext_high_water_mark, migration_records_total, migration_records_converted, active_dek_version, pending_dek_version',
     )
     .eq('user_id', user.id)
     .maybeSingle();
@@ -149,6 +149,7 @@ export async function fetchRemoteSyncAccount(): Promise<RemoteSyncAccount | null
     ? {
         id: data.e2ee_migration_id as string,
         direction: (data.e2ee_migration_direction as E2EEMigrationState['direction']) ?? undefined,
+        phase: (data.e2ee_transition_phase as E2EETransitionPhase | null) ?? undefined,
         ownerDeviceId: (data.migration_owner_device_id as string | null) ?? '',
         startedAt: startedAt ?? updatedAt ?? nowIso(),
         updatedAt: updatedAt ?? startedAt ?? nowIso(),
@@ -261,6 +262,59 @@ export async function claimMigrationOwner(params: {
   }
 }
 
+export async function advanceSyncTransitionPhase(params: {
+  migrationId: string;
+  ownerDeviceId: string;
+  phase: E2EETransitionPhase;
+}): Promise<void> {
+  await requireAuthenticatedUser();
+  const { error } = await supabase.rpc('advance_sync_transition_phase', {
+    p_migration_id: params.migrationId,
+    p_owner_device_id: params.ownerDeviceId,
+    p_phase: params.phase,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new MigrationSupersededError();
+    }
+    throw error;
+  }
+}
+
+export async function abandonSyncTransition(params: {
+  migrationId: string;
+  ownerDeviceId: string;
+}): Promise<void> {
+  await requireAuthenticatedUser();
+  const { error } = await supabase.rpc('abandon_sync_transition', {
+    p_migration_id: params.migrationId,
+    p_owner_device_id: params.ownerDeviceId,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new MigrationSupersededError();
+    }
+    throw error;
+  }
+}
+
+export async function startFreshSync(params: {
+  migrationId: string;
+  ownerDeviceId: string;
+}): Promise<void> {
+  await requireAuthenticatedUser();
+  const { error } = await supabase.rpc('start_fresh_sync', {
+    p_migration_id: params.migrationId,
+    p_owner_device_id: params.ownerDeviceId,
+  });
+  if (error) {
+    if (/sync_transition_conflict/.test(error.message ?? '')) {
+      throw new MigrationSupersededError();
+    }
+    throw error;
+  }
+}
+
 /**
  * Finalize a migration into its steady-state mode, but only if this device
  * still owns it (see the `complete_sync_transition` RPC). If another device
@@ -327,6 +381,7 @@ export async function upsertRemoteSyncAccount(
     sync_mode: syncMode,
     e2ee_migration_id: migration?.id ?? null,
     e2ee_migration_direction: migration?.direction ?? null,
+    e2ee_transition_phase: migration?.phase ?? null,
     migration_owner_device_id: migration?.ownerDeviceId ?? null,
     migration_started_at: migration?.startedAt ?? null,
     migration_updated_at: migration?.updatedAt ?? null,

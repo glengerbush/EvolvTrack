@@ -17,12 +17,13 @@ import { autoResumeMigration } from '$lib/sync/e2ee-migration';
 import { fetchRemoteSyncAccount, getAuthenticatedUserId, hydrateDeviceId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
 import { getProfile, getProfileSyncMode, onOutboxChange, setLocalProfileSyncState } from '$lib/domain/repo';
-import { clearLocalWrappedKeys, fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
+import { fetchRemoteWrappedKeys, getLocalWrappedKeys, saveLocalWrappedKeys } from '$lib/sync/wrapped-keys';
 import { clearPullCursor, hydratePullCursor } from '$lib/sync/pull-cursor';
 import { fetchServerTimeMs, supabase, supabaseUrl } from '$lib/auth/supabase';
 import { recordServerTime } from '$lib/sync/clock';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';
-import { clearSession, rehydrateSession } from '$lib/sync/session-key';
+import { rehydrateSession } from '$lib/sync/session-key';
+import { deviceEncryptionState } from '$lib/sync/device-encryption-state';
 import { errorMessage } from '$lib/utils/errorMessage';
 import type { SyncMode } from '$lib/domain/types';
 import {
@@ -116,9 +117,7 @@ async function reconcileSyncMode(): Promise<void> {
     // Without this the device keeps trying encrypted writes that the server's
     // RLS now rejects (the "[object Object]" sync error).
     if (localMode !== 'plain') {
-      await clearLocalWrappedKeys();
-      clearSession();
-      clearPullCursor();
+      await deviceEncryptionState.clearForPlainMode();
       await setLocalProfileSyncState({
         syncMode: 'plain',
         passphraseEnabled: false,
@@ -146,9 +145,7 @@ async function reconcileSyncMode(): Promise<void> {
     if (remote.syncMode === 'e2ee' && remote.activeDekVersion != null) {
       const localBundle = await getLocalWrappedKeys();
       if (localBundle && remote.activeDekVersion > localBundle.dekVersion) {
-        await clearLocalWrappedKeys();
-        clearSession();
-        clearPullCursor();
+        await deviceEncryptionState.clearForPlainMode();
         return; // stays e2ee → 'locked' → UnlockSessionModal pulls the new bundle
       }
     }
