@@ -12,7 +12,8 @@ export type IsoDate = string & { readonly [isoDateBrand]: true };
 /** ISO 8601 timestamp with timezone (e.g. `"2025-09-01T12:34:56.789Z"`). */
 export type IsoDateTime = string;
 
-export type WeightUnit = 'lbs' | 'kg';
+export const WEIGHT_UNITS = ['lbs', 'kg'] as const;
+export type WeightUnit = (typeof WEIGHT_UNITS)[number];
 export type SyncMode =
   | 'plain'
   | 'migrating_to_e2ee'
@@ -86,36 +87,24 @@ export function isMedication(value: unknown): value is Medication {
   return typeof value === 'string' && (MEDICATIONS as readonly string[]).includes(value);
 }
 
-export type PrescriptionStatus = 'warning' | 'active' | 'neutral';
+export const PRESCRIPTION_STATUSES = ['warning', 'active', 'neutral'] as const;
+export type PrescriptionStatus = (typeof PRESCRIPTION_STATUSES)[number];
 
-export type DosageColKey =
-  | 'type'
-  | 'concentration'
-  | 'additive'
-  | 'mlInVial'
-  | 'prescribedDosage'
-  | 'dosesLeft';
+export const DOSAGE_COL_KEYS = [
+  'type', 'concentration', 'additive', 'mlInVial', 'prescribedDosage', 'dosesLeft',
+] as const;
+export type DosageColKey = (typeof DOSAGE_COL_KEYS)[number];
 
-export type VialColKey =
-  | 'compoundDate'
-  | 'bud'
-  | 'lotNumber'
-  | 'pharmacy'
-  | 'cost'
-  | 'costPerMg';
+export const VIAL_COL_KEYS = [
+  'compoundDate', 'bud', 'lotNumber', 'pharmacy', 'cost', 'costPerMg',
+] as const;
+export type VialColKey = (typeof VIAL_COL_KEYS)[number];
 
-export type HealthColKey =
-  | 'day'
-  | 'date'
-  | 'weight'
-  | 'wellness'
-  | 'symptoms'
-  | 'system'
-  | 'loss'
-  | 'dose'
-  | 'medication'
-  | 'shotLocation'
-  | 'notes';
+export const HEALTH_COL_KEYS = [
+  'day', 'date', 'weight', 'wellness', 'symptoms', 'system', 'loss', 'dose',
+  'medication', 'shotLocation', 'notes',
+] as const;
+export type HealthColKey = (typeof HEALTH_COL_KEYS)[number];
 
 /**
  * A single health-log row — the unified record that replaces the old

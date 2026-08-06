@@ -1,8 +1,11 @@
 export type DashboardTab = 'health' | 'medication' | 'calculators' | 'info' | 'settings';
-export type ThemeName = 'default' | 'colorblind' | 'greyscale';
-export type ColorMode = 'light' | 'dark';
+export const THEME_NAMES = ['default', 'colorblind', 'greyscale'] as const;
+export type ThemeName = (typeof THEME_NAMES)[number];
+export const COLOR_MODES = ['light', 'dark'] as const;
+export type ColorMode = (typeof COLOR_MODES)[number];
 // What the user selected. `'system'` defers to `prefers-color-scheme`.
-export type ColorModePreference = ColorMode | 'system';
+export const COLOR_MODE_PREFERENCES = [...COLOR_MODES, 'system'] as const;
+export type ColorModePreference = (typeof COLOR_MODE_PREFERENCES)[number];
 
 export type DashboardTheme = {
   bgTint: string;
@@ -57,8 +60,6 @@ export const DASHBOARD_THEME_KEYS: ReadonlyArray<keyof DashboardTheme> = [
   'danger',
 ];
 
-export const THEME_NAMES: readonly ThemeName[] = ['default', 'colorblind', 'greyscale'] as const;
-export const COLOR_MODES: readonly ColorMode[] = ['light', 'dark'] as const;
 
 export type DrugPalette = {
   sema: string;

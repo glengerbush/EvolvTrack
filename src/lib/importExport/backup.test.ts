@@ -111,4 +111,10 @@ describe('parseBackupPayload', () => {
     expect(parseBackupPayload({})).toBeNull();
     expect(parseBackupPayload('a string')).toBeNull();
   });
+
+  it('rejects a backup containing a domain-invalid value', () => {
+    const payload = validPayload();
+    payload.data.entries[0].date = '2026-02-30';
+    expect(parseBackupPayload(payload)).toBeNull();
+  });
 });

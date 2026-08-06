@@ -1,4 +1,5 @@
 import type { SyncAggregate } from '$lib/domain/types';
+import { canonicalDomain } from '$lib/domain/canonical-domain';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
 import { ENCRYPTION_FORMAT_VERSION, encryptRecord } from '$lib/crypto/e2ee';
 import { SYNC_PROTOCOL_VERSION, type SyncOperation } from '$lib/sync/protocol';
@@ -63,103 +64,6 @@ function envelope(
   return { aggregate, op, record };
 }
 
-function optionalType(
-  record: Record<string, unknown>,
-  key: string,
-  type: 'string' | 'number' | 'boolean',
-): boolean {
-  return record[key] == null || typeof record[key] === type;
-}
-
-function stringArray(value: unknown): boolean {
-  return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === 'string'));
-}
-
-function isoTimestamp(value: unknown): value is string {
-  return typeof value === 'string'
-    && /^\d{4}-\d{2}-\d{2}T/.test(value)
-    && Number.isFinite(Date.parse(value));
-}
-
-function isoDate(value: unknown): value is string {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-function stringMap(value: unknown): boolean {
-  return value === undefined || (
-    value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.values(value).every((item) => typeof item === 'string')
-  );
-}
-
-function timestampMap(value: unknown): boolean {
-  return value === undefined || (
-    value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.values(value).every(isoTimestamp)
-  );
-}
-
-function validPayloadShape(aggregate: SyncAggregate, value: Record<string, unknown>): boolean {
-  if (typeof value.id !== 'string'
-    || !isoTimestamp(value.createdAt)
-    || !isoTimestamp(value.updatedAt)) {
-    return false;
-  }
-  if (!timestampMap(value.fieldUpdatedAt)) return false;
-  if (aggregate === 'entry') {
-    return isoDate(value.date)
-      && optionalType(value, 'weightLbs', 'number')
-      && optionalType(value, 'wellness', 'number')
-      && optionalType(value, 'amountMg', 'number')
-      && optionalType(value, 'notes', 'string')
-      && optionalType(value, 'medication', 'string')
-      && optionalType(value, 'site', 'string')
-      && optionalType(value, 'prescriptionId', 'string')
-      && optionalType(value, 'planned', 'boolean')
-      && (value.confirmedAt == null || isoTimestamp(value.confirmedAt))
-      && optionalType(value, 'skipped', 'boolean')
-      && stringArray(value.symptoms);
-  }
-  if (aggregate === 'prescription') {
-    return optionalType(value, 'type', 'string')
-      && optionalType(value, 'compoundDate', 'string')
-      && optionalType(value, 'refillDate', 'string')
-      && optionalType(value, 'bud', 'string')
-      && optionalType(value, 'lotNumber', 'string')
-      && optionalType(value, 'concentrationMgMl', 'number')
-      && optionalType(value, 'vialMl', 'number')
-      && optionalType(value, 'prescribedDoseMg', 'number')
-      && optionalType(value, 'dosesLeft', 'number')
-      && optionalType(value, 'manualMgUsed', 'number')
-      && optionalType(value, 'costUsd', 'number')
-      && optionalType(value, 'pharmacy', 'string')
-      && optionalType(value, 'additive', 'string')
-      && optionalType(value, 'status', 'string')
-      && optionalType(value, 'sortOrder', 'number')
-      && optionalType(value, 'archived', 'boolean');
-  }
-  return typeof value.passphraseEnabled === 'boolean'
-    && optionalType(value, 'startWeight', 'number')
-    && optionalType(value, 'goalWeight', 'number')
-    && optionalType(value, 'colorTheme', 'string')
-    && optionalType(value, 'colorModePreference', 'string')
-    && optionalType(value, 'weightUnit', 'string')
-    && optionalType(value, 'showArchivedVials', 'boolean')
-    && stringArray(value.dosageColOrder)
-    && stringArray(value.dosageHiddenCols)
-    && stringArray(value.vialColOrder)
-    && stringArray(value.vialHiddenCols)
-    && stringArray(value.healthColOrder)
-    && stringArray(value.healthHiddenCols)
-    && stringArray(value.symptomOptions)
-    && stringArray(value.shotLocationOptions)
-    && stringMap(value.symptomColors);
-}
-
 function decode(input: {
   sourceId: string;
   envelope: unknown;
@@ -210,9 +114,11 @@ function decode(input: {
     if ((decoded.record as { id?: unknown }).id !== decoded.entityId) {
       return { accepted: false, reason: 'entity-identity' };
     }
-    if (!validPayloadShape(decoded.aggregate, decoded.record as Record<string, unknown>)) {
+    const parsed = canonicalDomain.parse(decoded.aggregate, decoded.record);
+    if (!parsed.accepted) {
       return { accepted: false, reason: 'payload' };
     }
+    decoded.record = parsed.value;
   }
   return { accepted: true, change: decoded };
 }
@@ -245,12 +151,12 @@ function fromRecord(input: {
   if (!decoded.accepted) {
     throw new Error(`Canonical sync change ${input.sourceId} was rejected: ${decoded.reason}.`);
   }
-  const record = input.record as { updatedAt?: string } | null | undefined;
+  const record = decoded.change.record as { updatedAt?: string } | null | undefined;
   return {
     id: `${decoded.change.aggregate}:${decoded.change.entityId}`,
     aggregate: input.aggregate,
     op: input.op,
-    payload: input.record,
+    payload: decoded.change.record,
     protocolVersion: input.protocolVersion,
     schemaVersion: input.schemaVersion,
     createdAt: record?.updatedAt ?? input.sourceUpdatedAt,
@@ -282,7 +188,7 @@ async function seal(
   }
   const encrypted = await encryptRecord(key, {
     ...context,
-    ...envelope(change.aggregate, change.op, change.payload),
+    ...envelope(change.aggregate, change.op, decoded.change.record),
   });
   return {
     id: change.id,

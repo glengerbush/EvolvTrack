@@ -2,7 +2,11 @@ import { db } from '$lib/db/schema';
 import { emitHealthChange, enqueueImportedRows } from '$lib/domain/repo';
 import { setStartWeightIfUnset } from '$lib/stores/progressStore';
 import { hydrateSymptomStoresFromProfile } from '$lib/stores/symptomStore';
-import { BACKUP_FORMAT_VERSION, parseBackupPayload } from '$lib/importExport/backup';
+import {
+  BACKUP_FORMAT_VERSION,
+  isEvolvTrackBackupEnvelope,
+  parseBackupPayload,
+} from '$lib/importExport/backup';
 import {
   SPREADSHEET_FORMAT_VERSION,
   getSpreadsheetMetadata,
@@ -44,7 +48,9 @@ import type {
   VialColKey,
   WeightUnit,
 } from '$lib/domain/types';
-import type { ThemeName } from '$lib/theme/dashboardTheme';
+import { DOSAGE_COL_KEYS, HEALTH_COL_KEYS, VIAL_COL_KEYS, WEIGHT_UNITS } from '$lib/domain/types';
+import { canonicalDomain } from '$lib/domain/canonical-domain';
+import { THEME_NAMES, type ThemeName } from '$lib/theme/dashboardTheme';
 
 type ObjectTable = {
   name: string;
@@ -80,12 +86,8 @@ const CONFIRMED_FIELDS = ['confirmed at', 'taken at', 'completed at'];
 const WEIGHT_ID_FIELDS = ['weight id', '_weightid', 'weightid'];
 const INJECTION_ID_FIELDS = ['injection id', '_injectionid', 'injectionid', 'shot id'];
 const PRESCRIPTION_ID_FIELDS = ['prescription id', '_prescriptionid', 'prescriptionid', 'medication id'];
+const NO_COMPATIBLE_IMPORT_DATA = 'No compatible health, injection, medication, or settings rows were found in that file.';
 
-const HEALTH_KEYS: readonly HealthColKey[] = ['day', 'date', 'weight', 'wellness', 'symptoms', 'system', 'loss', 'dose', 'medication', 'shotLocation', 'notes'];
-const DOSAGE_KEYS: readonly DosageColKey[] = ['type', 'concentration', 'additive', 'mlInVial', 'prescribedDosage', 'dosesLeft'];
-const VIAL_KEYS: readonly VialColKey[] = ['compoundDate', 'bud', 'lotNumber', 'pharmacy', 'cost', 'costPerMg'];
-const THEMES: readonly ThemeName[] = ['default', 'colorblind', 'greyscale'];
-const WEIGHT_UNITS: readonly WeightUnit[] = ['lbs', 'kg'];
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -272,16 +274,16 @@ function parseSettingsTable(table: ObjectTable | null): ProfileSettings | undefi
   return {
     id: 'profile',
     passphraseEnabled: false,
-    colorTheme: THEMES.includes(colorTheme as ThemeName) ? colorTheme as ThemeName : undefined,
+    colorTheme: THEME_NAMES.includes(colorTheme as ThemeName) ? colorTheme as ThemeName : undefined,
     weightUnit: WEIGHT_UNITS.includes(weightUnit as WeightUnit) ? weightUnit as WeightUnit : undefined,
     startWeight: parseNumber(map.get('start weight')),
     goalWeight: parseNumber(map.get('goal weight')),
-    healthColOrder: parseColumnList(map.get('health column order'), HEALTH_KEYS) as HealthColKey[],
-    healthHiddenCols: parseColumnList(map.get('health hidden columns'), HEALTH_KEYS) as HealthColKey[],
-    dosageColOrder: parseColumnList(map.get('dosage column order'), DOSAGE_KEYS) as DosageColKey[],
-    dosageHiddenCols: parseColumnList(map.get('dosage hidden columns'), DOSAGE_KEYS) as DosageColKey[],
-    vialColOrder: parseColumnList(map.get('vial column order'), VIAL_KEYS) as VialColKey[],
-    vialHiddenCols: parseColumnList(map.get('vial hidden columns'), VIAL_KEYS) as VialColKey[],
+    healthColOrder: parseColumnList(map.get('health column order'), HEALTH_COL_KEYS) as HealthColKey[],
+    healthHiddenCols: parseColumnList(map.get('health hidden columns'), HEALTH_COL_KEYS) as HealthColKey[],
+    dosageColOrder: parseColumnList(map.get('dosage column order'), DOSAGE_COL_KEYS) as DosageColKey[],
+    dosageHiddenCols: parseColumnList(map.get('dosage hidden columns'), DOSAGE_COL_KEYS) as DosageColKey[],
+    vialColOrder: parseColumnList(map.get('vial column order'), VIAL_COL_KEYS) as VialColKey[],
+    vialHiddenCols: parseColumnList(map.get('vial hidden columns'), VIAL_COL_KEYS) as VialColKey[],
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -402,6 +404,7 @@ async function parseJsonFile(file: File): Promise<ImportParseResult> {
       warnings,
     };
   }
+  if (isEvolvTrackBackupEnvelope(payload)) throw new Error(NO_COMPATIBLE_IMPORT_DATA);
 
   const tables = collectObjectTablesFromJson(payload);
   const parsed = parseGenericTables(tables);
@@ -449,6 +452,12 @@ function hasImportData(data: ImportData) {
   return data.entries.length > 0 || data.prescriptions.length > 0 || Boolean(data.profile);
 }
 
+function canonicalizeImportData(data: ImportData): ImportData {
+  const parsed = canonicalDomain.parseCollections(data);
+  if (parsed.accepted) return parsed.value;
+  throw new Error(NO_COMPATIBLE_IMPORT_DATA);
+}
+
 export async function parseTrackingFile(file: File): Promise<ImportParseResult> {
   const extension = file.name.split('.').pop()?.toLowerCase();
   let result: ImportParseResult;
@@ -463,8 +472,10 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
     throw new Error('Unsupported import file. Use an EvolvTrack backup, CSV, JSON, ODS, or XLSX file.');
   }
 
+  result.data = canonicalizeImportData(result.data);
+
   if (!hasImportData(result.data)) {
-    throw new Error('No compatible health, injection, medication, or settings rows were found in that file.');
+    throw new Error(NO_COMPATIBLE_IMPORT_DATA);
   }
 
   return {

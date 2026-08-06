@@ -80,25 +80,25 @@ describe('canonical sync change', () => {
     })).toThrow(/entity-identity/);
   });
 
-  it('preserves identity and payload across representative aggregate round trips', () => {
+  it('preserves identity and canonical fields across representative aggregate round trips', () => {
     const records = [
-      ['entry', { id: 'dose-1', date: '2026-08-06', notes: null, ...timestamps }],
-      ['prescription', { id: 'vial-1', medication: 'Test', ...timestamps }],
-      ['profile', { id: 'profile', displayName: 'A', passphraseEnabled: false, ...timestamps }],
+      ['entry', { id: 'dose-1', date: '2026-08-06', notes: null, ...timestamps },
+        { id: 'dose-1', date: '2026-08-06', ...timestamps }],
+      ['prescription', { id: 'vial-1', lotNumber: 'lot-1', ...timestamps },
+        { id: 'vial-1', lotNumber: 'lot-1', ...timestamps }],
+      ['profile', { id: 'profile', passphraseEnabled: true, weightUnit: 'kg', ...timestamps },
+        { id: 'profile', passphraseEnabled: false, weightUnit: 'kg', ...timestamps }],
     ] as const;
 
-    for (let iteration = 0; iteration < 20; iteration += 1) {
-      for (const [aggregate, seed] of records) {
-        const record = { ...seed, iteration };
-        const sourceId = `${aggregate}:${record.id}`;
-        const change = canonicalSyncChange.fromRecord({
-          aggregate, op: 'upsert', record, sourceId,
-          sourceUpdatedAt: '2026-08-01T00:00:00.000Z', protocolVersion: 1, schemaVersion: 3,
-        });
-        expect(canonicalSyncChange.decodeEnvelope(change.id,
-          canonicalSyncChange.envelope(change.aggregate, change.op, change.payload),
-        )).toEqual({ aggregate, entityId: record.id, op: 'upsert', record });
-      }
+    for (const [aggregate, record, expected] of records) {
+      const sourceId = `${aggregate}:${record.id}`;
+      const change = canonicalSyncChange.fromRecord({
+        aggregate, op: 'upsert', record, sourceId,
+        sourceUpdatedAt: '2026-08-01T00:00:00.000Z', protocolVersion: 1, schemaVersion: 3,
+      });
+      expect(canonicalSyncChange.decodeEnvelope(change.id,
+        canonicalSyncChange.envelope(change.aggregate, change.op, change.payload),
+      )).toEqual({ aggregate, entityId: record.id, op: 'upsert', record: expected });
     }
   });
 
@@ -124,7 +124,23 @@ describe('canonical sync change', () => {
     expect(canonicalSyncChange.decode({
       sourceId: 'profile:profile',
       envelope: canonicalSyncChange.envelope('profile', 'upsert', {
-        id: 'profile', ...timestamps, passphraseEnabled: 'yes',
+        id: 'profile', ...timestamps, passphraseEnabled: false, weightUnit: 'stone',
+      }),
+    })).toEqual({ accepted: false, reason: 'payload' });
+  });
+
+  it('rejects domain-invalid payloads before apply', () => {
+    expect(canonicalSyncChange.decode({
+      sourceId: 'entry:dose-1',
+      envelope: canonicalSyncChange.envelope('entry', 'upsert', {
+        id: 'dose-1', date: '2026-02-30', ...timestamps,
+      }),
+    })).toEqual({ accepted: false, reason: 'payload' });
+
+    expect(canonicalSyncChange.decode({
+      sourceId: 'prescription:vial-1',
+      envelope: canonicalSyncChange.envelope('prescription', 'upsert', {
+        id: 'vial-1', status: 'invented', ...timestamps,
       }),
     })).toEqual({ accepted: false, reason: 'payload' });
   });

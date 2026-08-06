@@ -237,6 +237,51 @@ describe('remote sync-log transfer', () => {
     ]);
   });
 
+  it('re-encrypts the canonical parsed envelope instead of untrusted fields', async () => {
+    const memory = createInMemorySyncLogAdapter();
+    const transfer = createRemoteSyncLogTransfer(memory);
+    await memory.writeEncrypted([{
+      id: 'profile:profile',
+      ciphertext: `OLD:${JSON.stringify({
+        aggregate: 'profile',
+        op: 'upsert',
+        record: {
+          id: 'profile',
+          passphraseEnabled: true,
+          syncMode: 'e2ee',
+          e2eeMigration: { id: 'untrusted' },
+          weightUnit: 'kg',
+          unknown: 'must not survive',
+          createdAt: plainChange.createdAt,
+          updatedAt: plainChange.createdAt,
+        },
+      })}`,
+      iv: 'test-iv',
+      protocolVersion: 1,
+      encryptionVersion: 1,
+      dekVersion: 1,
+      schemaVersion: 3,
+      createdAt: plainChange.createdAt,
+      insertedAt: plainChange.createdAt,
+    }]);
+
+    await transfer.rotateCiphertext({
+      oldDek: 'OLD', oldVersion: 1, newDek: 'NEW', newVersion: 2,
+    });
+
+    expect(JSON.parse(memory.snapshot().encrypted[0].ciphertext.slice('NEW:'.length))).toEqual({
+      aggregate: 'profile',
+      op: 'upsert',
+      record: {
+        id: 'profile',
+        passphraseEnabled: false,
+        weightUnit: 'kg',
+        createdAt: plainChange.createdAt,
+        updatedAt: plainChange.createdAt,
+      },
+    });
+  });
+
   it('preserves source when ownership changes before delete', async () => {
     const memory = createInMemorySyncLogAdapter();
     await memory.writePlain([{

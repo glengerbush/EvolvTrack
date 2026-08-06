@@ -270,7 +270,11 @@ export function createRemoteSyncLogTransfer(
           encryptionVersion: row.encryptionVersion,
         });
         if (!decoded.accepted) throw new Error(`Encrypted sync row ${row.id} was rejected: ${decoded.reason}.`);
-        const encrypted = await encryptRecord(params.newDek, envelope);
+        const encrypted = await encryptRecord(params.newDek, canonicalSyncChange.envelope(
+          decoded.change.aggregate,
+          decoded.change.op,
+          decoded.change.record,
+        ));
         output.push({ ...row, ...encrypted, dekVersion: params.newVersion, encryptionVersion: ENCRYPTION_FORMAT_VERSION });
       }
       await adapter.writeEncrypted(output);

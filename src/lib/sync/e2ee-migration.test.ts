@@ -38,7 +38,7 @@ const state = vi.hoisted(() => ({
 vi.mock('$lib/domain/repo', () => ({
   getAllEntries: vi.fn(async () => [
     { id: 'w1', date: '2026-05-01', weightLbs: 180, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
-    { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Sema', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+    { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Semaglutide (Ozempic / Wegovy)', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
   ]),
   getAllPrescriptions: vi.fn(async () => []),
   getProfile: vi.fn(async () => state.mockProfile && ({

@@ -75,6 +75,24 @@ describe('parseTrackingFile — backup JSON', () => {
     );
     expect(result.warnings.some((w) => /format version/i.test(w))).toBe(true);
   });
+
+  it('rejects a recognized backup atomically when one Health Entry is invalid', async () => {
+    const payload = backupPayload({
+      entries: [
+        backupPayload().data.entries[0],
+        {
+          id: 'invalid',
+          date: '2026-02-30',
+          weightLbs: 190,
+          createdAt: '2026-05-10T12:00:00.000Z',
+          updatedAt: '2026-05-10T12:00:00.000Z',
+        },
+      ],
+    });
+    await expect(parseTrackingFile(jsonFile('invalid-backup.json', payload))).rejects.toThrow(
+      /No compatible/,
+    );
+  });
 });
 
 describe('parseTrackingFile — external JSON', () => {
@@ -99,6 +117,16 @@ describe('parseTrackingFile — external JSON', () => {
     });
   });
 
+  it('does not mistake a third-party backup marker for an EvolvTrack backup', async () => {
+    const payload = {
+      kind: 'backup',
+      rows: [{ Date: '2026-05-09', Weight: 181 }],
+    };
+    const result = await parseTrackingFile(jsonFile('external-backup.json', payload));
+    expect(result.source).toBe('External JSON');
+    expect(result.data.entries[0]).toMatchObject({ date: '2026-05-09', weightLbs: 181 });
+  });
+
   it('skips rows without a parseable date', async () => {
     const payload = [
       { Date: 'garbage', Weight: 200 },
@@ -119,6 +147,13 @@ describe('parseTrackingFile — external JSON', () => {
 
   it('rejects a JSON file with no recognizable rows', async () => {
     await expect(parseTrackingFile(jsonFile('empty.json', { something: 'else' }))).rejects.toThrow(
+      /No compatible/,
+    );
+  });
+
+  it('rejects parsed external rows that violate the canonical domain', async () => {
+    const payload = [{ Date: '2026-05-10', Weight: 180, Wellness: 11 }];
+    await expect(parseTrackingFile(jsonFile('unsafe.json', payload))).rejects.toThrow(
       /No compatible/,
     );
   });

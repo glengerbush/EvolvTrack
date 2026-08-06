@@ -16,6 +16,7 @@ import type {
   SyncMode,
   WrappedKeyBundle,
 } from '$lib/domain/types';
+import { canonicalDomain } from '$lib/domain/canonical-domain';
 import {
   ENCRYPTION_FORMAT_VERSION,
   PBKDF2_ITERATIONS,
@@ -184,20 +185,6 @@ async function advanceMigrationPhase(
   await saveProfile({ e2eeMigration: { ...migration } });
 }
 
-function profilePayload(profile: ProfileSettings): unknown {
-  const {
-    e2eeMigration: _e2eeMigration,
-    syncMode: _syncMode,
-    passphraseEnabled: _passphraseEnabled,
-    ...syncableProfile
-  } = profile;
-
-  return {
-    ...syncableProfile,
-    passphraseEnabled: false,
-  };
-}
-
 async function collectBackfillItems(): Promise<BackfillItem[]> {
   const [entries, prescriptions, profile] = await Promise.all([
     getAllEntries(),
@@ -228,7 +215,7 @@ async function collectBackfillItems(): Promise<BackfillItem[]> {
       id: 'profile',
       op: 'upsert',
       updatedAt: profile.updatedAt ?? nowIso(),
-      payload: profilePayload(profile),
+      payload: canonicalDomain.serializeSyncableProfile(profile),
     });
   }
 

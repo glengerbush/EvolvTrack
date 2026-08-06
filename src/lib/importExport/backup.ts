@@ -3,6 +3,7 @@ import { APP_VERSION } from '$lib/version';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
 import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
 import type { HealthEntry, Prescription, ProfileSettings } from '$lib/domain/types';
+import { canonicalDomain } from '$lib/domain/canonical-domain';
 import { dateStamp, downloadText } from '$lib/importExport/download';
 
 export const BACKUP_FORMAT_VERSION = 1;
@@ -23,12 +24,6 @@ export type EvolvTrackBackup = {
   };
 };
 
-const entitySchema = z.object({
-  id: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-}).passthrough();
-
 const backupSchema = z.object({
   app: z.literal(BACKUP_APP_ID),
   kind: z.literal(BACKUP_KIND),
@@ -37,9 +32,9 @@ const backupSchema = z.object({
   dbSchemaVersion: z.number(),
   exportedAt: z.string(),
   data: z.object({
-    entries: z.array(entitySchema),
-    prescriptions: z.array(entitySchema),
-    profile: entitySchema.optional(),
+    entries: z.array(z.unknown()),
+    prescriptions: z.array(z.unknown()),
+    profile: z.unknown().optional(),
   }),
 });
 
@@ -49,6 +44,10 @@ export async function createBackup(): Promise<EvolvTrackBackup> {
     getAllPrescriptions(),
     getProfile(),
   ]);
+
+  const backupProfile = profile
+    ? canonicalDomain.serializeSyncableProfile(profile)
+    : undefined;
 
   return {
     app: BACKUP_APP_ID,
@@ -60,7 +59,7 @@ export async function createBackup(): Promise<EvolvTrackBackup> {
     data: {
       entries,
       prescriptions,
-      profile,
+      profile: backupProfile,
     },
   };
 }
@@ -71,8 +70,20 @@ export async function downloadBackup() {
   downloadText(JSON.stringify(backup, null, 2), filename, 'application/json');
 }
 
+export function isEvolvTrackBackupEnvelope(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  return (payload as { app?: unknown }).app === BACKUP_APP_ID;
+}
+
 export function parseBackupPayload(payload: unknown): EvolvTrackBackup | null {
   const result = backupSchema.safeParse(payload);
   if (!result.success) return null;
-  return result.data as unknown as EvolvTrackBackup;
+
+  const parsed = canonicalDomain.parseCollections(result.data.data);
+  if (!parsed.accepted) return null;
+
+  return {
+    ...result.data,
+    data: parsed.value,
+  };
 }

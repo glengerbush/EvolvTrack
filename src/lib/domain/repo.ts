@@ -11,6 +11,7 @@ import type {
   SyncAggregate,
   SyncMode,
 } from '$lib/domain/types';
+import { canonicalDomain } from '$lib/domain/canonical-domain';
 import { localDateKey } from '$lib/utils/dateKeys';
 import {
   MERGEABLE_AGGREGATES,
@@ -129,8 +130,7 @@ export function getProfileSyncMode(profile: ProfileSettings | undefined): SyncMo
  * synced copy is, by definition, not the locally-encrypted one.
  */
 function toSyncableProfile(profile: ProfileSettings): unknown {
-  const { syncMode: _syncMode, e2eeMigration: _e2eeMigration, ...rest } = profile;
-  return { ...rest, passphraseEnabled: false };
+  return canonicalDomain.serializeSyncableProfile(profile);
 }
 
 async function enqueueOutbox(
