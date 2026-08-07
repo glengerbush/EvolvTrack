@@ -33,6 +33,7 @@ const state = vi.hoisted(() => ({
   upsertRemoteBundleCalls: [] as WrappedKeyBundle[],
   clearLocalCalls: 0,
   deleteRemoteCalls: 0,
+  destinationVerificationError: undefined as Error | undefined,
 }));
 
 vi.mock('$lib/domain/repo', () => ({
@@ -104,6 +105,7 @@ vi.mock('$lib/sync/session-key', () => ({
   setSessionKey: vi.fn(),
   clearSession: vi.fn(),
   getSessionKey: vi.fn(() => null),
+  hasSessionKey: vi.fn(() => false),
 }));
 
 vi.mock('$lib/sync/account-state', () => ({
@@ -229,6 +231,7 @@ vi.mock('$lib/sync/remote-sync-log-transfer', () => ({
         migrationId: options.migration.id, ownerDeviceId: options.migration.ownerDeviceId, phase: 'verifying',
       });
       options.migration.phase = 'verifying';
+      if (state.destinationVerificationError) throw state.destinationVerificationError;
       const remote = await account.fetchRemoteSyncAccount();
       if (remote?.migration?.ownerDeviceId !== 'device-1') throw new account.MigrationSupersededError();
       await deleteRemotePlainChangesMock();
@@ -264,7 +267,6 @@ import {
   isMigrationRunInProgress,
   resumeE2EEDisableMigration,
   resumeE2EEMigration,
-  resumeMigrationByDirection,
   resetEncryptionToPlain,
   startFreshToPlain,
   startE2EEDisableMigration,
@@ -301,6 +303,11 @@ import {
 } from '$lib/sync/wrapped-keys';
 import { clearSession, getSessionKey, setSessionKey } from '$lib/sync/session-key';
 import { clearPullCursor, getPullCursor, setPullCursor } from '$lib/sync/pull-cursor';
+import { createE2EELifecycle } from '$lib/sync/e2ee-lifecycle';
+import {
+  productionE2EETransitionExecutor,
+  type RuntimeE2EELifecycleResults,
+} from '$lib/sync/e2ee-transition-executor';
 
 function bundleFor(passphrase: string): WrappedKeyBundle {
   // Matches the wrap mock: ciphertext is `wrap(KEK(passphrase),DEK_BYTES)`.
@@ -335,6 +342,7 @@ beforeEach(() => {
   state.upsertRemoteBundleCalls.length = 0;
   state.clearLocalCalls = 0;
   state.deleteRemoteCalls = 0;
+  state.destinationVerificationError = undefined;
   pushEncryptedChangesMock.mockClear();
   pushEncryptedChangesMock.mockResolvedValue({ pushed: 0 });
   pushPlainChangesMock.mockClear();
@@ -393,6 +401,23 @@ describe('startE2EEMigration — argument validation', () => {
 });
 
 describe('startE2EEMigration — happy path from plain', () => {
+  it('preserves copy-before-delete through the lifecycle seam', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    pushEncryptedChangesMock.mockResolvedValueOnce({ pushed: 2 });
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+
+    const result = await lifecycle.enable('hunter2') as { completed: boolean };
+
+    expect(result.completed).toBe(true);
+    expect(pushEncryptedChangesMock).toHaveBeenCalled();
+    expect(deleteRemotePlainChangesMock).toHaveBeenCalled();
+    expect(pushEncryptedChangesMock.mock.invocationCallOrder[0])
+      .toBeLessThan(deleteRemotePlainChangesMock.mock.invocationCallOrder[0]);
+    expect(lifecycle.getSnapshot()).toMatchObject({ syncMode: 'e2ee' });
+  });
+
   it('offers the durable recovery code before converting records', async () => {
     state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
     const events: string[] = [];
@@ -519,6 +544,26 @@ describe('startE2EEMigration — happy path from plain', () => {
     // Deleting plaintext before the encrypted copies are safely on the server
     // would be data loss — finish() is never reached on a failed push.
     expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
+  });
+
+  it('retains the source when destination verification fails through the lifecycle seam', async () => {
+    state.mockProfile = { id: 'profile', syncMode: 'plain' } as ProfileSettings;
+    state.destinationVerificationError = new Error('Destination integrity verification failed');
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+
+    const result = await lifecycle.enable('pw') as { completed: boolean; error?: string };
+
+    expect(result).toMatchObject({
+      completed: false,
+      error: 'Destination integrity verification failed',
+    });
+    expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
+    expect(lifecycle.getSnapshot()).toMatchObject({
+      syncMode: 'migrating_to_e2ee',
+      errorClassification: 'integrity',
+    });
   });
 
   it('wipes any residual encrypted state from a prior interrupted attempt before minting', async () => {
@@ -853,14 +898,44 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
     expect(pushPlainChangesMock).toHaveBeenCalledTimes(1);
   });
 
-  it('clears local keys after atomic remote finalization and switches profile to plain', async () => {
-    await startE2EEDisableMigration('pw');
+  it('cleans up only after authoritative finalization through the lifecycle seam', async () => {
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+
+    await lifecycle.disable('pw');
+
     expect(clearLocalWrappedKeys).toHaveBeenCalled();
     expect(deleteRemoteWrappedKeys).not.toHaveBeenCalled();
     expect(state.completeTransitionCalls.at(-1)?.to).toBe('plain');
+    expect(vi.mocked(completeSyncTransition).mock.invocationCallOrder.at(-1))
+      .toBeLessThan(vi.mocked(clearLocalWrappedKeys).mock.invocationCallOrder.at(-1)!);
     expect(clearSession).toHaveBeenCalled();
     const finalSave = state.saveProfileCalls[state.saveProfileCalls.length - 1];
     expect(finalSave).toMatchObject({ passphraseEnabled: false, syncMode: 'plain' });
+    expect(lifecycle.getSnapshot()).toMatchObject({
+      syncMode: 'plain',
+      allowedActions: ['enable'],
+    });
+  });
+
+  it('retains recovery material when authoritative finalization fails through the lifecycle seam', async () => {
+    vi.mocked(completeSyncTransition).mockRejectedValueOnce(
+      new Error('Authoritative finalization failed'),
+    );
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+
+    const result = await lifecycle.disable('pw') as { completed: boolean; error?: string };
+
+    expect(result).toMatchObject({ completed: false, error: 'Authoritative finalization failed' });
+    expect(clearLocalWrappedKeys).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(lifecycle.getSnapshot()).toMatchObject({
+      syncMode: 'migrating_to_plain',
+      allowedActions: expect.arrayContaining(['resume']),
+    });
   });
 
   it('clears local encrypted + migrationBackfill tables on success', async () => {
@@ -1029,10 +1104,17 @@ describe('autoResumeMigration — crash recovery', () => {
     vi.mocked(getSessionKey).mockReturnValue('DEK_BYTES');
     pushEncryptedChangesMock.mockRejectedValueOnce(new Error('network down'));
 
-    const outcome = await autoResumeMigration();
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+    const outcome = await lifecycle.reconcile();
 
     expect(outcome.status).toBe('paused');
     expect(outcome).toMatchObject({ result: { completed: false, error: 'network down' } });
+    expect(lifecycle.getSnapshot()).toMatchObject({
+      syncMode: 'migrating_to_e2ee',
+      errorClassification: 'network',
+    });
   });
 
   it('reports superseded (not paused) when another device takes the enable over mid-run', async () => {
@@ -1052,7 +1134,10 @@ describe('autoResumeMigration — crash recovery', () => {
       pendingDekVersion: undefined,
     });
 
-    const outcome = await autoResumeMigration();
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+    const outcome = await lifecycle.reconcile();
 
     // A clean hand-off, not a failure: the orchestrator must NOT surface an error.
     expect(outcome.status).toBe('superseded');
@@ -1060,6 +1145,7 @@ describe('autoResumeMigration — crash recovery', () => {
     // the new owner can finish from intact server state.
     expect(state.completeTransitionCalls).toHaveLength(0);
     expect(deleteRemotePlainChangesMock).not.toHaveBeenCalled();
+    expect(lifecycle.getSnapshot()).toMatchObject({ syncMode: 'migrating_to_e2ee' });
   });
 
   it('reports superseded when the guarded finalize loses the disable race', async () => {
@@ -1123,36 +1209,6 @@ describe('autoResumeMigration — stands down while a run owns the transition in
     await run;
     // Guard releases once the run settles, so the next cycle can reconcile.
     expect(isMigrationRunInProgress()).toBe(false);
-  });
-});
-
-describe('resumeMigrationByDirection', () => {
-  // Routes to the right resume function per direction. We assert routing via
-  // each resume path's distinctive "nothing in progress" rejection, with a
-  // steady-state profile so none of them actually run a migration.
-  it('routes enable → resumeE2EEMigration', async () => {
-    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
-    await expect(resumeMigrationByDirection('enable', 'pw')).rejects.toThrow(
-      /No E2EE migration is in progress/i,
-    );
-  });
-
-  it('routes disable → resumeE2EEDisableMigration', async () => {
-    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
-    await expect(resumeMigrationByDirection('disable', 'pw')).rejects.toThrow(
-      /No E2EE disable migration is in progress/i,
-    );
-  });
-
-  it('routes rotate → resumeE2EEKeyRotation', async () => {
-    state.mockProfile = { id: 'profile', syncMode: 'e2ee' } as ProfileSettings;
-    await expect(resumeMigrationByDirection('rotate', 'pw')).rejects.toThrow(
-      /No key rotation is in progress/i,
-    );
-  });
-
-  it('requires a passphrase regardless of direction', async () => {
-    await expect(resumeMigrationByDirection('enable', '')).rejects.toThrow(/passphrase is required/i);
   });
 });
 
@@ -1268,6 +1324,21 @@ describe('startFreshToPlain — erase and start over (no local data required)', 
 
     expect(clearLocalWrappedKeys).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
+  });
+
+  it('preserves recovery material on cleanup failure through the lifecycle seam', async () => {
+    state.localBundle = bundleFor('pw');
+    state.remoteBundle = state.localBundle;
+    vi.mocked(startFreshSync).mockRejectedValueOnce(new Error('network down'));
+    const lifecycle = createE2EELifecycle<RuntimeE2EELifecycleResults>(
+      productionE2EETransitionExecutor,
+    );
+
+    await expect(lifecycle.startFresh(true)).rejects.toThrow(/network down/);
+
+    expect(clearLocalWrappedKeys).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(lifecycle.getSnapshot()).toMatchObject({ syncMode: 'migrating_to_plain' });
   });
 
   it('never pushes local data (it discards rather than keeps)', async () => {

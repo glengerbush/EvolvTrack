@@ -209,7 +209,13 @@ describe('E2EE lifecycle', () => {
   it('classifies required input and retryable network state in one snapshot', async () => {
     const interrupted = makeLifecycle({
       syncMode: 'migrating_to_plain',
-      migration: { ...migration, direction: 'disable', lastError: 'Network timeout' },
+      migration: {
+        ...migration,
+        direction: 'disable',
+        recordsConverted: 7,
+        recordsTotal: 12,
+        lastError: 'Network timeout',
+      },
       deviceId: 'device-1',
       hasSessionKey: false,
       hasReadableLocalData: false,
@@ -221,8 +227,11 @@ describe('E2EE lifecycle', () => {
     expect(interrupted.lifecycle.getSnapshot()).toMatchObject({
       ownership: 'self',
       requiredInput: 'passphrase',
+      recordsConverted: 7,
+      recordsTotal: 12,
       errorClassification: 'network',
       connectivity: 'offline',
+      allowedActions: ['resume', 'start-fresh'],
     });
   });
 

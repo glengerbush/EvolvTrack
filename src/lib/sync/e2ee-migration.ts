@@ -65,10 +65,6 @@ type BackfillItem = {
  * backfill. Other devices read `migration_updated_at` freshness against this to
  * tell a running migration from a stalled one. */
 export const MIGRATION_HEARTBEAT_MS = 2000;
-/** No heartbeat for this long ⇒ the owning device is treated as stalled/offline
- * and the take-over affordance is emphasised. Several missed heartbeats. */
-export const MIGRATION_STALE_MS = 25000;
-
 /** Reports backfill progress as `(converted, total)`; may be throttled. */
 type ProgressReporter = (converted: number, total: number) => Promise<void> | void;
 
@@ -1146,20 +1142,6 @@ async function resumeE2EEKeyRotationImpl(
   }
 
   return driveRotation(oldDek, oldVersion, newDek, newVersion, migration);
-}
-
-/**
- * Resume whichever migration is in flight, dispatched by direction. The single
- * entry point the migration modal calls so it doesn't have to branch on the
- * three resume functions itself.
- */
-export function resumeMigrationByDirection(
-  direction: E2EEMigrationDirection,
-  passphrase: string,
-): Promise<E2EEMigrationRunResult> {
-  if (direction === 'disable') return resumeE2EEDisableMigration(passphrase);
-  if (direction === 'rotate') return resumeE2EEKeyRotation(passphrase);
-  return resumeE2EEMigration(passphrase);
 }
 
 export type ResetToPlainResult = { pushed: number };
