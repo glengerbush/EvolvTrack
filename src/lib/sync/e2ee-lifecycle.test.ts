@@ -109,7 +109,7 @@ describe('E2EE lifecycle', () => {
     expect(interrupted.commands).toEqual([{ type: 'resume-disable', passphrase: 'passphrase' }]);
   });
 
-  it('refuses Start Fresh while this device has readable treatment data', async () => {
+  it('refuses Start Fresh while this device has readable health data', async () => {
     const withData = makeLifecycle({
       syncMode: 'migrating_to_plain',
       migration: { ...migration, direction: 'disable' },
@@ -119,7 +119,7 @@ describe('E2EE lifecycle', () => {
       runInProgress: false,
     });
 
-    await expect(withData.lifecycle.startFresh(true)).rejects.toThrow(/readable treatment data/i);
+    await expect(withData.lifecycle.startFresh(true)).rejects.toThrow(/readable health data/i);
     expect(withData.commands).toEqual([]);
   });
 

@@ -41,7 +41,7 @@ export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
 // device's UI has even shown the blocking migration modal.
 //
 // Enforced inside every Health Entry, Vial, and import transaction before its
-// first treatment-data write. Incoming sync changes do not pass through this
+// first health-data write. Incoming sync changes do not pass through this
 // guard, and profile settings are exempt because transition progress is stored
 // there and the profile carries no treatment observations.
 //

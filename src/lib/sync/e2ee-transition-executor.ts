@@ -67,7 +67,7 @@ export function createE2EETransitionExecutor(
 
 async function hasReadableLocalData(): Promise<boolean> {
   const hasPlainData = await hasPlainHealthData();
-  return hasPlainData || deviceEncryptionState.hasReadableLocalTreatmentCiphertext();
+  return hasPlainData || deviceEncryptionState.hasReadableLocalHealthCiphertext();
 }
 
 async function readProductionFacts(): Promise<E2EELifecycleFacts> {

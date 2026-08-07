@@ -1272,7 +1272,7 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
     expect(deleteRemoteEncryptedChangesMock).not.toHaveBeenCalled();
   });
 
-  it('republishes valid local ciphertext when no plaintext treatment rows remain', async () => {
+  it('republishes valid local ciphertext when no plaintext health rows remain', async () => {
     vi.mocked(getAllEntries).mockResolvedValueOnce([]);
     vi.mocked(getSessionKey).mockReturnValueOnce('DEK_BYTES');
     await db.encrypted.put({

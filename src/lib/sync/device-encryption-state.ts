@@ -260,7 +260,7 @@ export const deviceEncryptionState = {
     clearPullCursor();
   },
 
-  async hasReadableLocalTreatmentCiphertext(): Promise<boolean> {
+  async hasReadableLocalHealthCiphertext(): Promise<boolean> {
     if (!getSessionKey()) return false;
     for (const row of await db.encrypted.toArray()) {
       try {

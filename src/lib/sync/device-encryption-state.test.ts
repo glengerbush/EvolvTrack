@@ -190,7 +190,7 @@ describe('device encryption state', () => {
     expect(h.localWrites.at(-1)).toMatchObject({ recoveryStatus: 'declined' });
   });
 
-  it('counts only valid, unlockable local treatment ciphertext as readable', async () => {
+  it('counts only valid, unlockable local health ciphertext as readable', async () => {
     h.encryptedRows.push(
       { id: 'entry:corrupt', entity: 'entry', ciphertext: 'bad', iv: 'iv', keyVersion: 1, updatedAt: 'now' },
       { id: 'entry:good', entity: 'entry', ciphertext: 'good', iv: 'iv', keyVersion: 1, updatedAt: 'now' },
@@ -205,10 +205,10 @@ describe('device encryption state', () => {
         },
       });
 
-    await expect(deviceEncryptionState.hasReadableLocalTreatmentCiphertext()).resolves.toBe(true);
+    await expect(deviceEncryptionState.hasReadableLocalHealthCiphertext()).resolves.toBe(true);
 
     vi.mocked(decryptRecord).mockRejectedValue(new Error('bad ciphertext'));
-    await expect(deviceEncryptionState.hasReadableLocalTreatmentCiphertext()).resolves.toBe(false);
+    await expect(deviceEncryptionState.hasReadableLocalHealthCiphertext()).resolves.toBe(false);
   });
 
   it('publishes coherent snapshots and clears encryption state when converging to plain', async () => {

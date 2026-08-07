@@ -377,14 +377,14 @@ export function createE2EELifecycle<R extends E2EELifecycleResults = E2EELifecyc
       }
       const facts = await port.read();
       if (facts.hasReadableLocalData) {
-        throw new Error('Start Fresh is unavailable while this device has readable treatment data.');
+        throw new Error('Start Fresh is unavailable while this device has readable health data.');
       }
       return execute({ type: 'start-fresh' });
     },
     async resetToPlain() {
       const facts = await port.read();
       if (!facts.hasReadableLocalData) {
-        throw new Error('There is no readable treatment data on this device to keep.');
+        throw new Error('There is no readable health data on this device to keep.');
       }
       return execute({ type: 'reset-to-plain' });
     },
