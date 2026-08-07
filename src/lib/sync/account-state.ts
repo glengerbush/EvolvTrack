@@ -79,6 +79,11 @@ export function __resetDeviceIdForTests(): void {
   deviceId = null;
 }
 
+/** Revoke the current runtime identity during Device Data Erasure. */
+export function clearDeviceIdForErasure(): void {
+  deviceId = null;
+}
+
 export async function requireAuthenticatedUser() {
   const { data, error } = await supabase.auth.getUser();
   if (error) throw error;

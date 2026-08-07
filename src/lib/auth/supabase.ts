@@ -1,7 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 import { resolve } from '$app/paths';
-import { db } from '$lib/db/schema';
-import { durableClearOrThrow, durableGet, durableRemove, durableSet } from '$lib/db/durableKv';
+import {
+  durableClearOrThrow,
+  durableGet,
+  durableRemove,
+  durableSet,
+} from '$lib/db/durableKv';
+import {
+  cancelPreparedAccountDeletionErasure,
+  confirmAccountDeletionErasure,
+  getPendingDeviceDataErasure,
+  prepareAccountDeletionErasure,
+} from '$lib/security/device-data-erasure';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string;
 const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
@@ -84,6 +94,17 @@ export const supabase = createClient(url || 'https://example.supabase.co', publi
     storage: indexedDbAuthStorage
   }
 });
+
+/**
+ * Revoke this runtime's usable Supabase session without depending on the
+ * network. Stopping refresh and draining auth-js's lock prevents an in-flight
+ * refresh from restoring credentials after the durable auth store is cleared.
+ */
+export async function revokeLocalAuthSessionForDeviceDataErasure(): Promise<void> {
+  await supabase.auth.stopAutoRefresh?.();
+  await supabase.auth.getSession();
+  await durableClearOrThrow();
+}
 
 /**
  * The server's "now" in epoch-ms, read from the `Date` response header of a cheap
@@ -185,110 +206,42 @@ export async function changeLoginPassword(
 
 /**
  * Permanently deletes the signed-in user's account on the server (auth.users
- * + every FK-cascaded row) and then wipes local state, identical to a
+ * + every FK-cascaded row) and then performs Device Data Erasure, identical to
  * logout. Throws if the RPC fails so the caller can surface the error before
- * any local cleanup runs.
+ * local erasure begins.
  */
-export async function deleteAccountAndClearLocalData() {
-  const { error } = await supabase.rpc('delete_self');
+async function accountDeletionWasConfirmed(id: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc('account_deletion_confirmed', {
+    p_request_id: id,
+  });
   if (error) throw new Error(error.message);
-  // `delete_self` removes the auth user and invalidates this access token.
-  // Calling signOut afterward only sends the now-invalid token to `/logout`,
-  // producing a noisy 403. The server-side account is already gone; finish
-  // with the same local credential/data wipe used by logout.
-  await clearLocalAuthAndData();
+  return data === true;
 }
 
-export async function logoutAndClearLocalData() {
-  // Tell the server to end *this device's* session. `scope: 'local'` (the
-  // supabase default) leaves the user's sessions on other devices alone —
-  // logging out on a laptop should not boot the user's phone PWA. Best-effort:
-  // network failures, expired tokens, or server outages must NOT abort local
-  // cleanup, otherwise the persisted session key and other auth state stay on
-  // disk after the user clicked "Log out". The local credentials are gone
-  // regardless of whether the server got the memo.
-  try {
-    await supabase.auth.signOut({ scope: 'local' });
-  } catch {
-    // Best-effort server signout.
+async function requestAccountDeletion(id: string, recovering: boolean): Promise<void> {
+  const { error } = await supabase.rpc('delete_self', { p_request_id: id });
+  if (!error || (await accountDeletionWasConfirmed(id))) {
+    await confirmAccountDeletionErasure(id);
+    return;
   }
 
-  await clearLocalAuthAndData();
+  if (!recovering) await cancelPreparedAccountDeletionErasure(id);
+  throw new Error(error.message);
 }
 
-async function clearLocalAuthAndData() {
-  // Dynamic import avoids the auth → device state → wrapped-key adapter → auth
-  // initialization cycle while keeping logout cleanup behind the coherent seam.
-  try {
-    const { deviceEncryptionState } = await import('$lib/sync/device-encryption-state');
-    await deviceEncryptionState.clearForLogout();
-  } catch {
-    // Continue through every independent cleanup layer.
-  }
-
-  try {
-    localStorage.clear();
-    sessionStorage.clear();
-  } catch {
-    // Best-effort local cleanup.
-  }
-
-  // Wipe IndexedDB. The local domain tables are plaintext at rest, so they
-  // must be gone before the user can inspect them after logging out. Set the
-  // boot-guard sentinel FIRST so that if the inline wipe below is interrupted
-  // (tab closed mid-logout, or a second PWA tab holds the connection open and
-  // blocks the delete), `hooks.client.ts` still finishes the job on next boot.
-  try {
-    localStorage.setItem(WIPE_DB_ON_BOOT_KEY, '1');
-  } catch {
-    // Best-effort: if this fails the inline wipe below is the only line of
-    // defense; stale rows may linger if it's also interrupted.
-  }
-
-  // Wipe the separate IndexedDB-backed auth store (session + DEK). Keep the
-  // boot sentinel when this fails so early startup retries both databases.
-  let durableAuthCleared = false;
-  try {
-    await durableClearOrThrow();
-    durableAuthCleared = true;
-  } catch {
-    // Retried by hooks.client.ts.
-  }
-
-  // Force-close the connection first. Module-scoped `liveQuery` subscribers
-  // (outboxCount, profileStore, rawPrescriptions, medicationRows) otherwise
-  // hold the database open and Dexie's blocked-delete timeout silently wins,
-  // leaving the data on disk. `close()` drops those connections so the delete
-  // actually completes here, before we navigate away.
-  try {
-    db.close();
-    await db.delete();
-    if (durableAuthCleared) {
-      // Both databases are gone; the boot guard no longer needs to run.
-      try {
-        localStorage.removeItem(WIPE_DB_ON_BOOT_KEY);
-      } catch {
-        // Non-fatal: a redundant boot wipe is harmless.
-      }
-    }
-  } catch {
-    // Delete was blocked or threw (e.g. another tab holds the DB open). Leave
-    // the sentinel set so the boot guard retries on next launch.
-  }
-
-  if ('caches' in window) {
-    try {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((key) => caches.delete(key)));
-    } catch {
-      // Best-effort cache cleanup.
-    }
-  }
-
-  // Logout callers follow this with a full reload to the auth route, which
-  // lets the
-  // boot guard wipe IndexedDB before any liveQuery subscribes again.
+export async function deleteAccountAndEraseDeviceData(): Promise<void> {
+  const id = await prepareAccountDeletionErasure();
+  await requestAccountDeletion(id, false);
 }
 
-/** localStorage flag consumed by the client boot guard to wipe IndexedDB. */
-export const WIPE_DB_ON_BOOT_KEY = 'evolvtrack-wipe-db-on-boot';
+/** Retry/verify a crash-interrupted account deletion before local erasure. */
+export async function resumePreparedAccountDeletion(): Promise<void> {
+  const marker = await getPendingDeviceDataErasure();
+  if (!marker || marker.phase !== 'account-deletion-prepared') return;
+
+  if (await accountDeletionWasConfirmed(marker.operationId)) {
+    await confirmAccountDeletionErasure(marker.operationId);
+    return;
+  }
+  await requestAccountDeletion(marker.operationId, true);
+}

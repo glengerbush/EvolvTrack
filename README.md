@@ -84,6 +84,15 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
   key and the recovery-code-derived key, persisted server-side in the
   `wrapped_keys` table.
 
+## Device Data Erasure (src/lib/security/)
+
+  - `device-data-erasure.ts` — the sole destructive local-storage coordinator.
+  It durably marks forward-only erasure, revokes runtime secrets across tabs,
+  deletes health and authentication databases plus browser preferences, and
+  reports completion only after verification.
+  - `auth/logout.ts` — owns pending-change logout choices. It never starts sync
+  before consent and never silently falls back to destructive logout.
+
 ## Encryption (src/lib/crypto/ + src/lib/workers/)
 
   End-to-end encryption runs in a Web Worker so the main thread doesn't block on PBKDF2 /

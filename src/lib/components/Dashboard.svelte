@@ -6,7 +6,8 @@
   import { isDemoMode } from "$lib/stores/demoStore";
   import { authState } from "$lib/stores/authStore";
   import { setupWizardPending } from "$lib/stores/setupWizardStore";
-  import { logoutAndClearLocalData } from "$lib/auth/supabase";
+  import LogoutFlow from '$lib/components/auth/LogoutFlow.svelte';
+  import { deviceDataErasureState } from '$lib/security/device-data-erasure';
   import SetupWizard from "$lib/components/SetupWizard.svelte";
   import SyncStatusPill from "$lib/components/sync/SyncStatusPill.svelte";
   import HealthTab from "$lib/components/dashboard/tabs/HealthTab.svelte";
@@ -164,22 +165,18 @@
   }
 
   function handleBeforeUnload(event: BeforeUnloadEvent) {
+    if ($deviceDataErasureState.status !== 'idle') return;
     if (!hasAnyUnsavedChanges) return;
     event.preventDefault();
     event.returnValue = UNSAVED_NAVIGATION_MESSAGE;
   }
 
-  async function handleLogout() {
-    if (hasAnyUnsavedChanges && !confirm(UNSAVED_NAVIGATION_MESSAGE)) return;
-    try {
-      await logoutAndClearLocalData();
-    } finally {
-      window.location.href = resolve('/auth');
-    }
+  function confirmLogoutNavigation() {
+    return !hasAnyUnsavedChanges || confirm(UNSAVED_NAVIGATION_MESSAGE);
   }
 
   // Topbar button mode:
-  //   - signed-in: "Log out" (wipes local data on the way out)
+  //   - signed-in: "Log out" (performs Device Data Erasure on the way out)
   //   - demo:     "Exit demo" (wipes demo seed data, returns to landing)
   //   - offline (not demo, not signed-in): "Sign up" CTA that preserves data
   const topbarAuthMode = $derived<'logout' | 'signup' | 'exit-demo'>(
@@ -224,7 +221,13 @@
     <div class="topbar-right">
       <SyncStatusPill />
       {#if topbarAuthMode === 'logout'}
-        <button class="logout-button" onclick={handleLogout}>Log out</button>
+        <LogoutFlow beforeStart={confirmLogoutNavigation}>
+          {#snippet children(startLogout, logoutBusy)}
+            <button class="logout-button" disabled={logoutBusy} onclick={startLogout}>
+              {logoutBusy ? 'Checking…' : 'Log out'}
+            </button>
+          {/snippet}
+        </LogoutFlow>
       {:else if topbarAuthMode === 'signup'}
         <button class="signup-button" onclick={handleSignUp}>Sign up</button>
       {:else if topbarAuthMode === 'exit-demo'}

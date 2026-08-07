@@ -94,6 +94,10 @@ _Avoid_: Recovery failure, missing acknowledgment
 Synchronized treatment data that remains available as readable local Health Entries and Vials, unlockable ciphertext, or a restorable backup.
 _Avoid_: Usable local data, surviving rows
 
+**Device Data Erasure**:
+The non-cancellable process that removes the account session, encryption keys, health data, and preferences stored by one copy of EvolvTrack without changing synced cloud data, other devices, or exported backup files. It completes only after removal is verified; interrupted erasure resumes before normal app use. Signed-in Device Data Erasure happens through "Log out"; when already signed out, the user-facing action is "Remove app data."
+_Avoid_: Local cleanup, clear local data, wipe
+
 **Start Fresh**:
 The destructive recovery action that abandons synchronized treatment data after the person confirms no Recoverable Copy exists. It returns sync to plain mode only after cloud changes and wrapped keys are verified deleted.
 _Avoid_: Hard reset, start over

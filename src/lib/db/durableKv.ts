@@ -12,9 +12,8 @@ import Dexie, { type Table } from 'dexie';
  * user out even though their data (in IndexedDB) survived. Those two values
  * live here now, so a kill-and-reopen keeps the user signed in and unlocked.
  *
- * It lives in its own database so it survives the health-data db's logout
- * `delete()` / boot-wipe churn untouched; logout clears it explicitly via
- * `durableClear`.
+ * It lives in its own database so auth/session persistence can be managed
+ * independently. Device Data Erasure deletes both databases together.
  *
  * Every operation is best-effort: in a context without IndexedDB (private
  * mode, some embedded webviews) the calls resolve to a no-op / null rather
@@ -72,5 +71,22 @@ export async function durableClear(): Promise<void> {
 
 /** Security-sensitive cleanup variant whose failure must remain observable. */
 export async function durableClearOrThrow(): Promise<void> {
+  if (!kvDb.isOpen()) await kvDb.open();
   await kvDb.kv.clear();
+}
+
+/** Delete the complete durable authentication database during Device Data Erasure. */
+export async function durableDeleteOrThrow(): Promise<void> {
+  kvDb.close();
+  await kvDb.delete();
+}
+
+/** Release this tab's authentication-database connection before cross-tab erasure. */
+export function durableClose(): void {
+  kvDb.close();
+}
+
+/** Recreate an empty durable authentication database after verified erasure. */
+export async function durableOpen(): Promise<void> {
+  if (!kvDb.isOpen()) await kvDb.open();
 }

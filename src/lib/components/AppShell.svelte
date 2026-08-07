@@ -2,7 +2,7 @@
   import { resolve } from '$app/paths';
   import type { Snippet } from 'svelte';
   import SyncStatusPill from '$lib/components/sync/SyncStatusPill.svelte';
-  import { logoutAndClearLocalData } from '$lib/auth/supabase';
+  import LogoutFlow from '$lib/components/auth/LogoutFlow.svelte';
 
   type NavItem = { label: string; href: string };
 
@@ -31,13 +31,6 @@
     children?: Snippet;
   } = $props();
 
-  async function handleLogout() {
-    try {
-      await logoutAndClearLocalData();
-    } finally {
-      window.location.href = resolve('/auth');
-    }
-  }
 </script>
 
 <div class="shell">
@@ -59,7 +52,13 @@
         <SyncStatusPill />
       {/if}
       {#if showLogout}
-        <button class="logout-btn" type="button" onclick={handleLogout}>Log out</button>
+        <LogoutFlow>
+          {#snippet children(startLogout, logoutBusy)}
+            <button class="logout-btn" type="button" disabled={logoutBusy} onclick={startLogout}>
+              {logoutBusy ? 'Checking…' : 'Log out'}
+            </button>
+          {/snippet}
+        </LogoutFlow>
       {/if}
     </nav>
   </header>

@@ -21,10 +21,11 @@
   import { weightUnit } from '$lib/stores/unitStore';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { authState } from '$lib/stores/authStore';
-  import { clearAllData } from '$lib/domain/health-data-storage';
+  import { beginDeviceDataErasure } from '$lib/security/device-data-erasure';
+  import { confirmRemoveAppData } from './remove-app-data-confirmation';
   import {
     changeLoginPassword,
-    deleteAccountAndClearLocalData,
+    deleteAccountAndEraseDeviceData,
     displayUserIdentifier,
   } from '$lib/auth/supabase';
   import { downloadBackup } from '$lib/importExport/backup';
@@ -407,13 +408,13 @@
       : null,
   );
 
-  async function clearLocalData() {
-    if (!confirm('This permanently deletes all data on this device. Continue?')) return;
+  async function removeAppData() {
+    const confirmed = confirmRemoveAppData();
+    if (!confirmed) return;
     dangerBusy = true;
     try {
-      await clearAllData();
-      status = 'Local data cleared.';
-      await goto(resolve('/'));
+      await beginDeviceDataErasure();
+      window.location.href = resolve('/');
     } catch (error) {
       status = errorMessage(error);
     } finally {
@@ -452,7 +453,7 @@
     dangerBusy = true;
     status = 'Deleting account…';
     try {
-      await deleteAccountAndClearLocalData();
+      await deleteAccountAndEraseDeviceData();
       // The cleanup wipes local state; navigate to the landing page.
       window.location.href = resolve('/');
     } catch (error) {
@@ -769,7 +770,7 @@
 
   {#if showSection('danger') && !$isDemoMode}
     <div class="card-wrap">
-      <h2>{isSignedIn ? 'Delete account' : 'Clear local data'}</h2>
+      <h2>{isSignedIn ? 'Delete account' : 'Remove app data'}</h2>
       <div class="panel danger-panel">
         {#if isSignedIn}
           <p class="toggle-hint">
@@ -783,15 +784,15 @@
           >{dangerBusy ? 'Deleting…' : 'Delete account'}</button>
         {:else}
           <p class="toggle-hint">
-            Wipes every weight, dose, and prescription stored on this device.
-            This cannot be undone — download a backup first if you might want this data back.
+            Permanently removes health data and preferences stored by this copy of EvolvTrack.
+            Synced cloud data and exported backup files are unchanged.
           </p>
           <button
             class="btn btn-danger"
             type="button"
             disabled={dangerBusy}
-            onclick={clearLocalData}
-          >{dangerBusy ? 'Clearing…' : 'Clear local data'}</button>
+            onclick={removeAppData}
+          >{dangerBusy ? 'Removing…' : 'Remove app data'}</button>
         {/if}
       </div>
     </div>

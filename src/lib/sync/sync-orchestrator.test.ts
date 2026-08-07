@@ -132,6 +132,7 @@ import {
   SYNC_DEBOUNCE_MS,
   createSyncOrchestrator,
   startSyncOrchestrator,
+  stopSyncOrchestrator,
 } from './sync-orchestrator';
 
 /** Flush a handful of microtask turns (the cycle awaits several promises:
@@ -507,11 +508,35 @@ describe('createSyncOrchestrator — scheduleSync', () => {
 
   it('does nothing after dispose', async () => {
     const orchestrator = createSyncOrchestrator();
-    orchestrator.dispose();
+    await orchestrator.dispose();
     orchestrator.scheduleSync();
     await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS);
 
     expect(h.pullImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not finish disposal until an active cycle can no longer write locally', async () => {
+    let resolvePull: (() => void) | undefined;
+    h.pullImpl.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePull = () => resolve({ fetched: 0, applied: 0 });
+      }),
+    );
+    const orchestrator = createSyncOrchestrator();
+    const cycle = orchestrator.syncNow();
+    await flush();
+
+    let disposed = false;
+    const disposal = orchestrator.dispose().then(() => {
+      disposed = true;
+    });
+    await flush();
+    expect(disposed).toBe(false);
+
+    resolvePull?.();
+    await Promise.all([cycle, disposal]);
+    expect(disposed).toBe(true);
+    expect(h.pushImpl).not.toHaveBeenCalled();
   });
 });
 
@@ -579,6 +604,17 @@ describe('startSyncOrchestrator — glue', () => {
     expect(h.removeChannel).toHaveBeenCalledWith(h.channelObj);
 
     // A focus event after teardown must not trigger another sync.
+    window.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS);
+    expect(h.pullImpl).not.toHaveBeenCalled();
+  });
+
+  it('Device Data Erasure stops listeners and subscriptions, not only the timer core', async () => {
+    startSyncOrchestrator();
+
+    stopSyncOrchestrator();
+
+    expect(h.authUnsubscribe).toHaveBeenCalled();
     window.dispatchEvent(new Event('focus'));
     await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS);
     expect(h.pullImpl).not.toHaveBeenCalled();

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { durableGet, durableSet } from '$lib/db/durableKv';
+import { durableClear, durableGet, durableSet } from '$lib/db/durableKv';
 
 const h = vi.hoisted(() => ({
   signInWithPasswordMock: vi.fn(),
@@ -10,12 +10,15 @@ const h = vi.hoisted(() => ({
   signOutMock: vi.fn(),
   resetPasswordForEmailMock: vi.fn(),
   getUserMock: vi.fn(),
+  getSessionMock: vi.fn(),
   updateUserMock: vi.fn(),
+  stopAutoRefreshMock: vi.fn(),
   rpcMock: vi.fn(),
-  dbDeleteMock: vi.fn(),
-  dbCloseMock: vi.fn(),
   createClientMock: vi.fn(),
-  clearEncryptionStateMock: vi.fn(),
+  prepareErasureMock: vi.fn(),
+  confirmErasureMock: vi.fn(),
+  cancelErasureMock: vi.fn(),
+  pendingErasureMock: vi.fn(),
 }));
 
 vi.mock('@supabase/supabase-js', () => {
@@ -27,31 +30,27 @@ vi.mock('@supabase/supabase-js', () => {
       signOut: h.signOutMock,
       resetPasswordForEmail: h.resetPasswordForEmailMock,
       getUser: h.getUserMock,
+      getSession: h.getSessionMock,
       updateUser: h.updateUserMock,
+      stopAutoRefresh: h.stopAutoRefreshMock,
     },
     rpc: h.rpcMock,
   }));
   return { createClient: h.createClientMock };
 });
 
-vi.mock('$lib/db/schema', () => ({
-  db: {
-    delete: (...args: unknown[]) => h.dbDeleteMock(...args),
-    close: (...args: unknown[]) => h.dbCloseMock(...args),
-  },
-}));
-
-vi.mock('$lib/sync/device-encryption-state', () => ({
-  deviceEncryptionState: {
-    clearForLogout: (...args: unknown[]) => h.clearEncryptionStateMock(...args),
-  },
+vi.mock('$lib/security/device-data-erasure', () => ({
+  prepareAccountDeletionErasure: h.prepareErasureMock,
+  confirmAccountDeletionErasure: h.confirmErasureMock,
+  cancelPreparedAccountDeletionErasure: h.cancelErasureMock,
+  getPendingDeviceDataErasure: h.pendingErasureMock,
 }));
 
 import {
-  WIPE_DB_ON_BOOT_KEY,
   changeLoginPassword,
-  deleteAccountAndClearLocalData,
-  logoutAndClearLocalData,
+  deleteAccountAndEraseDeviceData,
+  resumePreparedAccountDeletion,
+  revokeLocalAuthSessionForDeviceDataErasure,
   requestPasswordReset,
   signInWithMagicLink,
   signInWithPassword,
@@ -59,7 +58,8 @@ import {
   supabase,
 } from './supabase';
 
-beforeEach(() => {
+beforeEach(async () => {
+  await durableClear();
   h.signInWithPasswordMock.mockReset();
   h.signInWithPasswordMock.mockResolvedValue({ data: null, error: null });
   h.signInWithOtpMock.mockReset();
@@ -75,17 +75,31 @@ beforeEach(() => {
     data: { user: { email: 'alice@example.com' } },
     error: null,
   });
+  h.getSessionMock.mockReset().mockResolvedValue({ data: { session: null }, error: null });
   h.updateUserMock.mockReset();
   h.updateUserMock.mockResolvedValue({ data: {}, error: null });
+  h.stopAutoRefreshMock.mockReset().mockResolvedValue(undefined);
   h.rpcMock.mockReset();
   h.rpcMock.mockResolvedValue({ data: null, error: null });
-  h.dbDeleteMock.mockReset();
-  h.dbDeleteMock.mockResolvedValue(undefined);
-  h.dbCloseMock.mockReset();
-  h.clearEncryptionStateMock.mockReset();
-  h.clearEncryptionStateMock.mockResolvedValue(undefined);
+  h.prepareErasureMock.mockReset().mockResolvedValue('delete-1');
+  h.confirmErasureMock.mockReset().mockResolvedValue(undefined);
+  h.cancelErasureMock.mockReset().mockResolvedValue(undefined);
+  h.pendingErasureMock.mockReset().mockResolvedValue(null);
   localStorage.clear();
   sessionStorage.clear();
+});
+
+describe('Device Data Erasure auth revocation', () => {
+  it('drains refresh and clears the durable auth session without network logout', async () => {
+    await durableSet('sb-auth-token', 'SESSION');
+
+    await revokeLocalAuthSessionForDeviceDataErasure();
+
+    expect(h.stopAutoRefreshMock).toHaveBeenCalledOnce();
+    expect(h.getSessionMock).toHaveBeenCalledOnce();
+    expect(await durableGet('sb-auth-token')).toBeNull();
+    expect(h.signOutMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('supabase client', () => {
@@ -241,105 +255,74 @@ describe('changeLoginPassword', () => {
   });
 });
 
-describe('logoutAndClearLocalData', () => {
-  it('signs out locally, wipes IndexedDB inline, and clears local/session storage', async () => {
-    localStorage.setItem('k', 'v');
-    sessionStorage.setItem('k', 'v');
+describe('deleteAccountAndEraseDeviceData', () => {
+  it('deletes the server account and performs Device Data Erasure without signing out an invalid token', async () => {
+    await deleteAccountAndEraseDeviceData();
 
-    await logoutAndClearLocalData();
-
-    // `scope: 'local'` ends this device's session only. A 'global' signout
-    // would invalidate every other device's refresh token and surprise users
-    // who expected the laptop logout to leave the phone PWA alone.
-    expect(h.signOutMock).toHaveBeenCalledWith({ scope: 'local' });
-    // The DB is force-closed (to release liveQuery subscribers) then deleted
-    // inline, so the plaintext local tables are gone before the user can
-    // inspect them — not deferred to the next boot.
-    expect(h.dbCloseMock).toHaveBeenCalled();
-    expect(h.dbDeleteMock).toHaveBeenCalled();
-    expect(h.clearEncryptionStateMock).toHaveBeenCalled();
-    expect(localStorage.getItem('k')).toBeNull();
-    expect(sessionStorage.getItem('k')).toBeNull();
-    // On a successful inline wipe the boot-guard sentinel is cleared again —
-    // there's nothing left for the next boot to do.
-    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
-  });
-
-  it('wipes the durable IndexedDB auth store (Supabase session + DEK)', async () => {
-    // The auth session and E2EE key now live in the separate `evolvtrack-auth`
-    // IndexedDB database, which the health-data `db.delete()` does not touch.
-    // Logout must clear it explicitly, or a logged-out device would reopen
-    // still holding a usable session.
-    await durableSet('sb-auth-token', 'SESSION');
-    await durableSet('et.session.dek', 'DEK');
-
-    await logoutAndClearLocalData();
-
-    expect(await durableGet('sb-auth-token')).toBeNull();
-    expect(await durableGet('et.session.dek')).toBeNull();
-  });
-
-  it('leaves the boot-guard sentinel set when the inline delete is blocked', async () => {
-    // A second PWA tab can hold the connection open and block the delete. The
-    // sentinel must survive so hooks.client.ts retries the wipe on next boot.
-    h.dbDeleteMock.mockRejectedValueOnce(new Error('blocked'));
-
-    await logoutAndClearLocalData();
-
-    expect(h.dbCloseMock).toHaveBeenCalled();
-    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBe('1');
-  });
-
-  it('still wipes local storage and the DB when the server signOut fails', async () => {
-    // Regression: if signOut threw (offline, server down, expired token), the
-    // original implementation aborted local cleanup and the persisted session
-    // key — plus everything else — stayed on disk after the user "logged out".
-    localStorage.setItem('et.session.key', 'PERSISTED_KEY');
-    localStorage.setItem('et.salt', 'SALT');
-    h.signOutMock.mockRejectedValueOnce(new Error('network down'));
-
-    await logoutAndClearLocalData();
-
-    expect(localStorage.getItem('et.session.key')).toBeNull();
-    expect(localStorage.getItem('et.salt')).toBeNull();
-    expect(h.dbDeleteMock).toHaveBeenCalled();
-    expect(localStorage.getItem(WIPE_DB_ON_BOOT_KEY)).toBeNull();
-  });
-
-  it('continues the database wipe when encryption-state cleanup fails', async () => {
-    h.clearEncryptionStateMock.mockRejectedValueOnce(new Error('IndexedDB blocked'));
-
-    await expect(logoutAndClearLocalData()).resolves.toBeUndefined();
-
-    expect(h.dbCloseMock).toHaveBeenCalled();
-    expect(h.dbDeleteMock).toHaveBeenCalled();
-  });
-});
-
-describe('deleteAccountAndClearLocalData', () => {
-  it('deletes the server account and wipes local data without signing out an invalid token', async () => {
-    localStorage.setItem('private-data', 'present');
-
-    await deleteAccountAndClearLocalData();
-
-    expect(h.rpcMock).toHaveBeenCalledWith('delete_self');
+    expect(h.prepareErasureMock).toHaveBeenCalledOnce();
+    expect(h.rpcMock).toHaveBeenCalledWith('delete_self', { p_request_id: 'delete-1' });
     expect(h.signOutMock).not.toHaveBeenCalled();
-    expect(h.dbCloseMock).toHaveBeenCalled();
-    expect(h.dbDeleteMock).toHaveBeenCalled();
-    expect(localStorage.getItem('private-data')).toBeNull();
+    expect(h.confirmErasureMock).toHaveBeenCalledWith('delete-1');
+    expect(h.prepareErasureMock.mock.invocationCallOrder[0]).toBeLessThan(
+      h.rpcMock.mock.invocationCallOrder[0],
+    );
   });
 
   it('preserves local state when server-side account deletion fails', async () => {
-    h.rpcMock.mockResolvedValueOnce({
-      data: null,
-      error: { message: 'Deletion denied' },
-    });
+    h.rpcMock
+      .mockResolvedValueOnce({ data: null, error: { message: 'Deletion denied' } })
+      .mockResolvedValueOnce({ data: false, error: null });
     localStorage.setItem('private-data', 'present');
 
-    await expect(deleteAccountAndClearLocalData()).rejects.toThrow('Deletion denied');
+    await expect(deleteAccountAndEraseDeviceData()).rejects.toThrow('Deletion denied');
 
     expect(h.signOutMock).not.toHaveBeenCalled();
-    expect(h.dbDeleteMock).not.toHaveBeenCalled();
+    expect(h.confirmErasureMock).not.toHaveBeenCalled();
+    expect(h.cancelErasureMock).toHaveBeenCalledWith('delete-1');
     expect(localStorage.getItem('private-data')).toBe('present');
+  });
+
+  it('finishes local erasure from a server receipt after a crash gap', async () => {
+    h.pendingErasureMock.mockResolvedValueOnce({
+      operationId: 'delete-1',
+      phase: 'account-deletion-prepared',
+    });
+    h.rpcMock.mockResolvedValueOnce({ data: true, error: null });
+
+    await resumePreparedAccountDeletion();
+
+    expect(h.rpcMock).toHaveBeenCalledWith('account_deletion_confirmed', {
+      p_request_id: 'delete-1',
+    });
+    expect(h.confirmErasureMock).toHaveBeenCalledWith('delete-1');
+    expect(h.rpcMock).not.toHaveBeenCalledWith('delete_self', expect.anything());
+  });
+
+  it('uses the receipt when the deletion response itself was lost', async () => {
+    h.rpcMock
+      .mockResolvedValueOnce({ data: null, error: { message: 'response lost' } })
+      .mockResolvedValueOnce({ data: true, error: null });
+
+    await deleteAccountAndEraseDeviceData();
+
+    expect(h.confirmErasureMock).toHaveBeenCalledWith('delete-1');
+    expect(h.cancelErasureMock).not.toHaveBeenCalled();
+  });
+
+  it('retries a prepared deletion when no server receipt exists yet', async () => {
+    h.pendingErasureMock.mockResolvedValueOnce({
+      operationId: 'delete-1',
+      phase: 'account-deletion-prepared',
+    });
+    h.rpcMock
+      .mockResolvedValueOnce({ data: false, error: null })
+      .mockResolvedValueOnce({ data: 'delete-1', error: null });
+
+    await resumePreparedAccountDeletion();
+
+    expect(h.rpcMock).toHaveBeenNthCalledWith(2, 'delete_self', {
+      p_request_id: 'delete-1',
+    });
+    expect(h.confirmErasureMock).toHaveBeenCalledWith('delete-1');
   });
 });

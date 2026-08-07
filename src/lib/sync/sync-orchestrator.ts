@@ -42,8 +42,8 @@ export type SyncOrchestrator = {
   scheduleSync(): void;
   /** Run a sync cycle immediately, bypassing the debounce. */
   syncNow(): Promise<void>;
-  /** Stop the orchestrator; pending debounced work is cancelled. */
-  dispose(): void;
+  /** Stop new work and resolve after the active cycle can no longer write locally. */
+  dispose(): Promise<void>;
 };
 
 function browserSaysOffline(): boolean {
@@ -177,6 +177,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
   let running = false;
   let rerunQueued = false;
   let disposed = false;
+  const idleWaiters = new Set<() => void>();
 
   async function runCycle(): Promise<void> {
     if (disposed) return;
@@ -198,6 +199,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // no cached session, so we have no proof of reachability either way.
       // The browser online/offline events drive connectivity in this path.
       const userId = await getAuthenticatedUserId();
+      if (disposed) return;
       if (!userId) {
         syncStatus.set('idle');
         return;
@@ -207,6 +209,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // clock doesn't win (or lose) every cross-device conflict. Best-effort: a
       // failed sample just leaves the last known offset in place.
       const serverMs = await fetchServerTimeMs();
+      if (disposed) return;
       if (serverMs !== null) recordServerTime(serverMs);
 
       // Cloud sync is gated by an active license. If we don't know the state
@@ -216,6 +219,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       if (get(licenseActive) === null) {
         try {
           await refreshLicenseActive();
+          if (disposed) return;
         } catch {
           // License RPC failed (network/auth). Leave state unknown and let
           // the cycle proceed; if push then fails for a different reason it
@@ -235,22 +239,26 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // elsewhere. If reconciliation throws, we surface the failure rather
       // than proceed on stale assumptions.
       await reconcileSyncMode();
+      if (disposed) return;
 
       // Finish (or hand off) an interrupted migration before steady-state sync.
       // A crash/quit mid-migration leaves this device paused in a `migrating_*`
       // mode; this is what un-sticks it.
       if ((await resumeMigrationIfNeeded()) === 'halt') return;
+      if (disposed) return;
 
       syncStatus.set('syncing');
       // Pull first so local LWW-merges remote state (and reconciles the
       // outbox), then push whatever is genuinely newer locally.
       await pullAndApply();
+      if (disposed) return;
       lastPullAt.set(new Date());
       // Setup wizard gates push so a freshly signed-up user can opt into
       // E2EE before any plaintext leaves the device. Pull stays on so the
       // wizard can react to whatever already exists on the account.
       if (!isSetupWizardPending()) {
         const push = await pushOutbox();
+        if (disposed) return;
         if (push.skipped === 'mode-rejected') {
           // The server changed sync mode after this cycle reconciled it. The
           // outbox is intentionally intact; rerun immediately so the next
@@ -283,6 +291,8 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       console.error('Sync cycle failed:', error);
     } finally {
       running = false;
+      for (const resolve of idleWaiters) resolve();
+      idleWaiters.clear();
       if (rerunQueued && !disposed) {
         rerunQueued = false;
         void runCycle();
@@ -307,12 +317,14 @@ export function createSyncOrchestrator(): SyncOrchestrator {
     await runCycle();
   }
 
-  function dispose(): void {
+  async function dispose(): Promise<void> {
     disposed = true;
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
+    if (!running) return;
+    await new Promise<void>((resolve) => idleWaiters.add(resolve));
   }
 
   return { scheduleSync, syncNow, dispose };
@@ -321,6 +333,7 @@ export function createSyncOrchestrator(): SyncOrchestrator {
 // ── App singleton + glue ───────────────────────────────────────────────────
 
 let appOrchestrator: SyncOrchestrator | null = null;
+let appTeardown: (() => void) | null = null;
 
 /**
  * Wire the orchestrator into the running app: window focus/online, the
@@ -329,7 +342,7 @@ let appOrchestrator: SyncOrchestrator | null = null;
  * `onMount` cleanup).
  */
 export function startSyncOrchestrator(): () => void {
-  appOrchestrator?.dispose();
+  appTeardown?.();
   const orchestrator = createSyncOrchestrator();
   appOrchestrator = orchestrator;
 
@@ -377,7 +390,10 @@ export function startSyncOrchestrator(): () => void {
     void booted.then(() => orchestrator.scheduleSync());
   });
 
-  return () => {
+  let tornDown = false;
+  const teardown = () => {
+    if (tornDown) return;
+    tornDown = true;
     if (typeof window !== 'undefined') {
       window.removeEventListener('focus', trigger);
       window.removeEventListener('online', onOnline);
@@ -385,14 +401,29 @@ export function startSyncOrchestrator(): () => void {
     }
     offOutbox();
     stopWatching();
-    orchestrator.dispose();
+    void orchestrator.dispose();
     if (appOrchestrator === orchestrator) appOrchestrator = null;
+    if (appTeardown === teardown) appTeardown = null;
   };
+  appTeardown = teardown;
+  return teardown;
 }
 
 /** Trigger a debounced sync from anywhere in the app (no-op before start). */
 export function requestSync(): void {
   appOrchestrator?.scheduleSync();
+}
+
+/** Stop background work before Device Data Erasure closes its storage. */
+export async function stopSyncOrchestrator(): Promise<void> {
+  if (appTeardown) {
+    const orchestrator = appOrchestrator;
+    appTeardown();
+    await orchestrator?.dispose();
+    return;
+  }
+  await appOrchestrator?.dispose();
+  appOrchestrator = null;
 }
 
 /** Force an immediate sync — used by the manual "Sync now" button. */

@@ -3,6 +3,8 @@ import type { User } from '@supabase/supabase-js';
 import { browser } from '$app/environment';
 import { supabase } from '$lib/auth/supabase';
 
+let publishErasureRevocation: (() => void) | null = null;
+
 export type AuthState =
   | { kind: 'loading' }
   | { kind: 'signed-out' }
@@ -20,6 +22,7 @@ export type AuthState =
  */
 export const authState = browser
   ? readable<AuthState>({ kind: 'loading' }, (set) => {
+      publishErasureRevocation = () => set({ kind: 'signed-out' });
       let wasSignedIn = false;
 
       void supabase.auth
@@ -51,9 +54,17 @@ export const authState = browser
         }
       });
 
-      return () => sub.subscription.unsubscribe();
+      return () => {
+        publishErasureRevocation = null;
+        sub.subscription.unsubscribe();
+      };
     })
   : readable<AuthState>({ kind: 'loading' });
+
+/** Immediately remove the signed-in identity retained by the reactive UI. */
+export function revokeAuthStateForDeviceDataErasure(): void {
+  publishErasureRevocation?.();
+}
 
 /**
  * Resolve the first settled (non-`loading`) auth state. The static SPA reads the

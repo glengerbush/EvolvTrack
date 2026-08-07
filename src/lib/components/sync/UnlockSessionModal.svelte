@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { resolve } from '$app/paths';
   import {
     deviceEncryptionState,
     isDeviceEncryptionStateError,
   } from '$lib/sync/device-encryption-state';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
-  import { logoutAndClearLocalData } from '$lib/auth/supabase';
+  import LogoutFlow from '$lib/components/auth/LogoutFlow.svelte';
   import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
 
@@ -32,16 +31,6 @@
   function handleBackdropClick(event: MouseEvent) {
     if (!dismissible || busy) return;
     if (event.target === event.currentTarget) onClose();
-  }
-
-  async function logOut() {
-    if (busy) return;
-    busy = true;
-    try {
-      await logoutAndClearLocalData();
-    } finally {
-      window.location.href = resolve('/auth');
-    }
   }
 
   function openRecovery() {
@@ -151,7 +140,13 @@
         {#if dismissible}
           <button type="button" class="ghost" onclick={onClose} disabled={busy}>Cancel</button>
         {:else}
-          <button type="button" class="ghost" onclick={logOut} disabled={busy}>Log out</button>
+          <LogoutFlow>
+            {#snippet children(startLogout, logoutBusy)}
+              <button type="button" class="ghost" onclick={startLogout} disabled={busy || logoutBusy}>
+                {logoutBusy ? 'Checking…' : 'Log out'}
+              </button>
+            {/snippet}
+          </LogoutFlow>
         {/if}
         <button type="submit" class="primary" disabled={!passphrase || busy}>
           {busy ? 'Unlocking…' : 'Unlock'}

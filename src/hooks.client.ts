@@ -1,40 +1,57 @@
 import { browser } from '$app/environment';
-import { db } from '$lib/db/schema';
-import { WIPE_DB_ON_BOOT_KEY } from '$lib/auth/supabase';
-import { durableClearOrThrow } from '$lib/db/durableKv';
+import {
+  getPendingDeviceDataErasure,
+  resumePendingDeviceDataErasure,
+} from '$lib/security/device-data-erasure';
 
-/**
- * Runs once during client init, before any route module loads and before any
- * Svelte component (and therefore any Dexie `liveQuery`) subscribes. If the
- * previous session set the wipe sentinel during logout, drop the IndexedDB
- * here — there are no open connections yet, so `db.delete()` actually
- * completes instead of stalling against module-scoped subscribers.
- */
+function renderBlockedErasure(cause: unknown): void {
+  const message = cause instanceof Error ? cause.message : 'Stored app data could not be removed.';
+  const screen = document.createElement('main');
+  screen.setAttribute('role', 'alert');
+  screen.style.cssText = [
+    'min-height:100dvh',
+    'display:grid',
+    'place-items:center',
+    'padding:2rem',
+    'font-family:system-ui,sans-serif',
+    'background:#f7f7f5',
+    'color:#20201e',
+  ].join(';');
+
+  const panel = document.createElement('section');
+  panel.style.cssText = 'max-width:32rem;padding:1.5rem;border:1px solid #ccc;border-radius:1rem;background:white';
+  const title = document.createElement('h1');
+  title.textContent = 'Finishing removal from this app';
+  const guidance = document.createElement('p');
+  guidance.textContent = 'EvolvTrack must finish removing stored data before it can open. Close other EvolvTrack tabs, then retry.';
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.textContent = 'Retry removal';
+  retry.addEventListener('click', () => window.location.reload());
+  panel.append(title, guidance, detail, retry);
+  screen.append(panel);
+  document.body.replaceChildren(screen);
+
+  if (!import.meta.env.VITEST) {
+    window.setTimeout(() => window.location.reload(), 5000);
+  }
+}
+
+/** Resume committed Device Data Erasure before any normal app initialization. */
 export async function init(): Promise<void> {
   if (!browser) return;
-  let shouldWipe = false;
   try {
-    shouldWipe = localStorage.getItem(WIPE_DB_ON_BOOT_KEY) === '1';
-  } catch {
-    // localStorage is unavailable (private mode, quota exceeded). Nothing we
-    // can recover here — proceed with normal boot.
-    return;
-  }
-  if (!shouldWipe) return;
-  try {
-    await durableClearOrThrow();
-    await db.delete();
-    // Dexie 4's `delete()` closes the connection with auto-open disabled — it
-    // does NOT lazily reopen on the next operation the way Dexie 3 did. Reopen
-    // the (now empty) database explicitly so the rest of the session can use
-    // it; otherwise every subsequent read/write throws "Database has been
-    // closed". `open()` re-runs the version definitions, recreating the schema.
-    await db.open();
-    // Only clear the retry sentinel once both operations succeed. If another
-    // tab keeps IndexedDB open or reopening fails, the next boot must retry so
-    // signed-out data is not silently left on the device.
-    localStorage.removeItem(WIPE_DB_ON_BOOT_KEY);
+    const marker = await getPendingDeviceDataErasure();
+    if (marker?.phase === 'account-deletion-prepared') {
+      const { resumePreparedAccountDeletion } = await import('$lib/auth/supabase');
+      await resumePreparedAccountDeletion();
+      return;
+    }
+    await resumePendingDeviceDataErasure();
   } catch (cause) {
-    console.error('Failed to wipe local database after logout:', cause);
+    renderBlockedErasure(cause);
+    throw cause;
   }
 }

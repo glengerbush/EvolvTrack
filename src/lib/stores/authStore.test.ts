@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { get } from 'svelte/store';
 
 const h = vi.hoisted(() => {
   const unsubscribe = vi.fn();
@@ -8,9 +9,7 @@ const h = vi.hoisted(() => {
       data: { session: { user: unknown } | null };
     }>,
     unsubscribe,
-    onAuthStateChange: vi.fn((_event: unknown, _session: unknown) => ({
-      data: { subscription: { unsubscribe } },
-    })),
+    onAuthStateChange: vi.fn((_callback: unknown) => ({ data: { subscription: { unsubscribe } } })),
   };
 });
 
@@ -19,8 +18,7 @@ vi.mock('$lib/auth/supabase', () => ({
   supabase: {
     auth: {
       getSession: () => h.getSessionImpl(),
-      onAuthStateChange: (event: unknown, session: unknown) =>
-        h.onAuthStateChange(event, session),
+      onAuthStateChange: (callback: unknown) => h.onAuthStateChange(callback),
     },
   },
 }));
@@ -58,5 +56,19 @@ describe('authState', () => {
     const { awaitSettledAuth } = await import('./authStore');
 
     await expect(awaitSettledAuth()).resolves.toEqual({ kind: 'signed-in', user });
+  });
+
+  it('immediately revokes a signed-in identity for Device Data Erasure', async () => {
+    const user = { id: 'user-1' };
+    h.getSessionImpl = () => Promise.resolve({ data: { session: { user } } });
+    const { authState, awaitSettledAuth, revokeAuthStateForDeviceDataErasure } =
+      await import('./authStore');
+    const unsubscribe = authState.subscribe(() => undefined);
+    await awaitSettledAuth();
+
+    revokeAuthStateForDeviceDataErasure();
+
+    expect(get(authState)).toEqual({ kind: 'signed-out' });
+    unsubscribe();
   });
 });

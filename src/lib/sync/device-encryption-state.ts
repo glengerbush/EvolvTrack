@@ -4,7 +4,7 @@ import { getProfile, getProfileSyncMode, setLocalProfileSyncState } from '$lib/d
 import { DB_SCHEMA_VERSION, db, type EncryptedRecord } from '$lib/db/schema';
 import { canonicalSyncChange, type PlainSyncChange } from '$lib/sync/canonical-sync-change';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';
-import { getDeviceId, hydrateDeviceId } from '$lib/sync/account-state';
+import { clearDeviceIdForErasure, getDeviceId, hydrateDeviceId } from '$lib/sync/account-state';
 import type { RemoteSyncAccount } from '$lib/sync/account-state';
 import {
   clearLocalWrappedKeys,
@@ -235,15 +235,16 @@ export const deviceEncryptionState = {
     return deleteRemoteWrappedKeys(dekVersion);
   },
 
-  async clearForLogout(): Promise<void> {
+  async revokeForDeviceDataErasure(): Promise<void> {
     // Revoke usable in-memory secrets first. Persistent cleanup can fail when
     // IndexedDB is blocked, but that must never leave this process unlocked.
     clearSession();
     clearPullCursor();
+    clearDeviceIdForErasure();
     try {
       await clearLocalWrappedKeys();
     } catch {
-      // The logout boot sentinel retries durable cleanup on the next launch.
+      // Device Data Erasure deletes the complete health-data database afterward.
     }
   },
 

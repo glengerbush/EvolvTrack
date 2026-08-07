@@ -60,6 +60,7 @@ vi.mock('$lib/sync/pull-cursor', () => ({
 vi.mock('$lib/sync/account-state', () => ({
   getDeviceId: vi.fn(() => 'device-1'),
   hydrateDeviceId: vi.fn(async () => 'device-1'),
+  clearDeviceIdForErasure: vi.fn(),
 }));
 
 vi.mock('$lib/crypto/e2ee', () => ({
@@ -223,7 +224,7 @@ describe('device encryption state', () => {
   });
 
   it('clears every account-scoped encryption value on logout', async () => {
-    await deviceEncryptionState.clearForLogout();
+    await deviceEncryptionState.revokeForDeviceDataErasure();
 
     await expect(deviceEncryptionState.snapshot()).resolves.toMatchObject({
       hasSessionKey: false,
@@ -235,7 +236,7 @@ describe('device encryption state', () => {
   it('revokes memory state even when durable key cleanup fails', async () => {
     vi.mocked(clearLocalWrappedKeys).mockRejectedValueOnce(new Error('blocked'));
 
-    await expect(deviceEncryptionState.clearForLogout()).resolves.toBeUndefined();
+    await expect(deviceEncryptionState.revokeForDeviceDataErasure()).resolves.toBeUndefined();
 
     expect(h.sessionKey).toBeNull();
     expect(h.pullCursor).toBeNull();

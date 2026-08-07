@@ -2,82 +2,77 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
-  deleteDatabase: vi.fn(),
-  openDatabase: vi.fn(),
-  clearDurableAuth: vi.fn(),
+  pending: vi.fn(),
+  resume: vi.fn(),
+  resumeAccountDeletion: vi.fn(),
 }));
-const wipeKey = 'evolvtrack:wipe-db-on-boot';
 
 vi.mock('$app/environment', () => ({ browser: true }));
-vi.mock('$lib/db/schema', () => ({
-  db: {
-    delete: (...args: unknown[]) => h.deleteDatabase(...args),
-    open: (...args: unknown[]) => h.openDatabase(...args),
-  },
+vi.mock('$lib/security/device-data-erasure', () => ({
+  getPendingDeviceDataErasure: h.pending,
+  resumePendingDeviceDataErasure: h.resume,
 }));
 vi.mock('$lib/auth/supabase', () => ({
-  WIPE_DB_ON_BOOT_KEY: 'evolvtrack:wipe-db-on-boot',
-}));
-vi.mock('$lib/db/durableKv', () => ({
-  durableClearOrThrow: (...args: unknown[]) => h.clearDurableAuth(...args),
+  resumePreparedAccountDeletion: h.resumeAccountDeletion,
 }));
 
 import { init } from './hooks.client';
 
 beforeEach(() => {
-  localStorage.clear();
-  h.deleteDatabase.mockReset().mockResolvedValue(undefined);
-  h.openDatabase.mockReset().mockResolvedValue(undefined);
-  h.clearDurableAuth.mockReset().mockResolvedValue(undefined);
-  vi.spyOn(console, 'error').mockImplementation(() => {});
+  h.pending.mockReset().mockResolvedValue(null);
+  h.resume.mockReset().mockResolvedValue('none');
+  h.resumeAccountDeletion.mockReset().mockResolvedValue(undefined);
+  document.body.innerHTML = '';
 });
 
-describe('client boot database wipe', () => {
-  it('does nothing when logout did not request a wipe', async () => {
-    await init();
-
-    expect(h.deleteDatabase).not.toHaveBeenCalled();
-    expect(h.openDatabase).not.toHaveBeenCalled();
+describe('Device Data Erasure at boot', () => {
+  it('checks durable erasure state before normal startup', async () => {
+    await expect(init()).resolves.toBeUndefined();
+    expect(h.resume).toHaveBeenCalledOnce();
   });
 
-  it('deletes and reopens the database before clearing the retry sentinel', async () => {
-    localStorage.setItem(wipeKey, '1');
-
-    await init();
-
-    expect(h.deleteDatabase).toHaveBeenCalledOnce();
-    expect(h.openDatabase).toHaveBeenCalledOnce();
-    expect(h.clearDurableAuth).toHaveBeenCalledOnce();
-    expect(localStorage.getItem(wipeKey)).toBeNull();
+  it('continues only after pending erasure completes', async () => {
+    h.resume.mockResolvedValueOnce('complete');
+    await expect(init()).resolves.toBeUndefined();
+    expect(document.body.textContent).toBe('');
   });
 
-  it('keeps the sentinel when durable auth cleanup fails', async () => {
-    localStorage.setItem(wipeKey, '1');
-    h.clearDurableAuth.mockRejectedValueOnce(new Error('auth DB blocked'));
+  it('verifies a prepared account deletion before local erasure', async () => {
+    h.pending.mockResolvedValueOnce({
+      id: 'pending',
+      operationId: 'delete-1',
+      phase: 'account-deletion-prepared',
+      committedAt: '2026-08-07T12:00:00.000Z',
+    });
 
     await expect(init()).resolves.toBeUndefined();
 
-    expect(h.deleteDatabase).not.toHaveBeenCalled();
-    expect(localStorage.getItem(wipeKey)).toBe('1');
+    expect(h.resumeAccountDeletion).toHaveBeenCalledOnce();
+    expect(h.resume).not.toHaveBeenCalled();
   });
 
-  it('keeps the sentinel when deleting the database fails', async () => {
-    localStorage.setItem(wipeKey, '1');
-    h.deleteDatabase.mockRejectedValueOnce(new Error('blocked by another tab'));
+  it('blocks startup and renders retry guidance when erasure fails', async () => {
+    h.resume.mockRejectedValueOnce(new Error('blocked by another tab'));
 
-    await expect(init()).resolves.toBeUndefined();
+    await expect(init()).rejects.toThrow('blocked by another tab');
 
-    expect(h.openDatabase).not.toHaveBeenCalled();
-    expect(localStorage.getItem(wipeKey)).toBe('1');
+    expect(document.body.textContent).toContain('Finishing removal');
+    expect(document.body.textContent).toContain('Close other EvolvTrack tabs');
+    expect(document.querySelector('button')?.textContent).toContain('Retry');
   });
 
-  it('keeps the sentinel when reopening the empty database fails', async () => {
-    localStorage.setItem(wipeKey, '1');
-    h.openDatabase.mockRejectedValueOnce(new Error('open failed'));
+  it('does not initialize account recovery or sign-in while ordinary erasure is pending', async () => {
+    h.pending.mockResolvedValueOnce({
+      id: 'pending',
+      operationId: 'erase-1',
+      phase: 'erase',
+      committedAt: '2026-08-07T12:00:00.000Z',
+    });
+    h.resume.mockRejectedValueOnce(new Error('erasure still pending'));
 
-    await expect(init()).resolves.toBeUndefined();
+    await expect(init()).rejects.toThrow('erasure still pending');
 
-    expect(h.deleteDatabase).toHaveBeenCalledOnce();
-    expect(localStorage.getItem(wipeKey)).toBe('1');
+    expect(h.resumeAccountDeletion).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('Finishing removal');
   });
 });
