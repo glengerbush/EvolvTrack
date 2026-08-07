@@ -9,7 +9,7 @@ import {
   type TabThemes,
   type ThemeName,
 } from '$lib/theme/dashboardTheme';
-import { getProfile, saveProfile } from '$lib/domain/repo';
+import { getProfile, saveProfile } from '$lib/domain/health-data-storage';
 
 const STORAGE_KEY = 'evolvtrack-theme';
 const COLOR_MODE_STORAGE_KEY = 'evolvtrack-color-mode';

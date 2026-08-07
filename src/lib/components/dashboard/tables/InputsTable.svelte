@@ -39,7 +39,7 @@
     deleteEntry,
     getAllEntries,
     updateEntry,
-  } from '$lib/domain/repo';
+  } from '$lib/domain/health-data-storage';
   import {
     WELLNESS_SCORE_MAX,
     WELLNESS_SCORE_MIN,

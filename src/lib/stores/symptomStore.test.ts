@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
 import '../../test/dexie-setup';
-import { db } from '$lib/db/schema';
-import { getProfile } from '$lib/domain/repo';
+import { clearAllData, getProfile } from '$lib/domain/health-data-storage';
 import {
   DEFAULT_SYMPTOM_COLORS,
   DEFAULT_SYMPTOM_OPTIONS,
@@ -23,7 +22,7 @@ import {
 // see the value immediately. afterEach re-seeds the defaults.
 async function resetStoresToDefaults() {
   // Drop any persisted profile so the next test starts from a clean slate.
-  await db.profile.clear();
+  await clearAllData();
   // Reset the in-memory store via the same mutation helpers consumers use.
   const current = get(symptomOptions);
   for (const symptom of current) {
@@ -35,7 +34,7 @@ async function resetStoresToDefaults() {
   }
   // After re-adding the user-added customizations are scrubbed; clear once
   // more so the profile row doesn't carry them into the next test.
-  await db.profile.clear();
+  await clearAllData();
 }
 
 beforeEach(async () => {
@@ -43,7 +42,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await db.profile.clear();
+  await clearAllData();
 });
 
 describe('symptomStore — re-exports', () => {

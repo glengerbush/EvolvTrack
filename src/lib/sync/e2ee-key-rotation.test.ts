@@ -32,7 +32,7 @@ const state = vi.hoisted(() => ({
   generatedRecoveryCounter: 0,
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getAllWeights: vi.fn(async () => []),
   getAllInjections: vi.fn(async () => []),
   getAllPrescriptions: vi.fn(async () => []),

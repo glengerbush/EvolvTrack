@@ -1,4 +1,4 @@
-import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/health-data-storage';
 import type { HealthEntry, IsoDate, Prescription, ProfileSettings } from '$lib/domain/types';
 import { APP_VERSION } from '$lib/version';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';

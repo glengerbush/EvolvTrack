@@ -1,6 +1,6 @@
 import { derived } from 'svelte/store';
 import { fromLiveQuery } from '$lib/db/liveQuery';
-import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
+import { getAllEntries, getAllPrescriptions } from '$lib/domain/health-data-storage';
 import type { HealthEntry, Medication, Prescription, PrescriptionStatus } from '$lib/domain/types';
 import {
   attributeVials,

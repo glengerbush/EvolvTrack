@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { awaitSettledAuth } from '$lib/stores/authStore';
 import { isDemoMode } from '$lib/stores/demoStore';
-import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
+import { getAllEntries, getAllPrescriptions } from '$lib/domain/health-data-storage';
 import { shouldEnterApp } from './appEntry';
 
 /**

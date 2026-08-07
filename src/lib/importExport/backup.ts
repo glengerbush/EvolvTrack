@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { APP_VERSION } from '$lib/version';
 import { DB_SCHEMA_VERSION } from '$lib/db/schema';
-import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import { getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/health-data-storage';
 import type { HealthEntry, Prescription, ProfileSettings } from '$lib/domain/types';
 import { canonicalDomain } from '$lib/domain/canonical-domain';
 import { dateStamp, downloadText } from '$lib/importExport/download';

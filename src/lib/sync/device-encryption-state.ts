@@ -1,6 +1,6 @@
 import type { RecoveryCodeStatus, WrappedKeyBundle } from '$lib/domain/types';
 import type { E2EEMigrationState, SyncMode } from '$lib/domain/types';
-import { getProfile, getProfileSyncMode, setLocalProfileSyncState } from '$lib/domain/repo';
+import { getProfile, getProfileSyncMode, setLocalProfileSyncState } from '$lib/domain/health-data-storage';
 import { DB_SCHEMA_VERSION, db, type EncryptedRecord } from '$lib/db/schema';
 import { canonicalSyncChange, type PlainSyncChange } from '$lib/sync/canonical-sync-change';
 import { SYNC_PROTOCOL_VERSION } from '$lib/sync/protocol';

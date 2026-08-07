@@ -6,7 +6,7 @@ import {
   addEntry,
   addPrescription,
   saveProfile,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 import { parseTrackingFile } from './importer';
 import {
   SPREADSHEET_APP_ID,

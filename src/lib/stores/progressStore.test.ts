@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get, writable } from 'svelte/store';
 
 // Start/goal weight now live on the synced `profile` row; the store writes them
-// via the real repo against fake-indexeddb. localStorage is just a first-paint
+// via real Health Data Storage against fake-indexeddb. localStorage is just a first-paint
 // cache. `browser` is left at its default (false) so the liveQuery hydrator
 // doesn't fire — the `.set` path updates the in-memory writable synchronously
 // and persists to the profile, which is the behavior these tests assert.
@@ -46,7 +46,7 @@ describe('progressStore — startWeight', () => {
 
   it('set persists to the synced profile and the cache', async () => {
     const { startWeight } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     startWeight.set(190);
     expect(get(startWeight)).toBe(190);
     expect(localStorage.getItem(START_KEY)).toBe('190');
@@ -60,7 +60,7 @@ describe('progressStore — startWeight', () => {
 
   it('setting null clears the profile field and the cache', async () => {
     const { startWeight } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     // Seed through the store, waiting for the (fire-and-forget) write to land.
     startWeight.set(190);
     await vi.waitFor(async () => expect((await getProfile())?.startWeight).toBe(190));
@@ -81,7 +81,7 @@ describe('progressStore — goalWeight', () => {
 
   it('persists to the profile and cache on set', async () => {
     const { goalWeight } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     goalWeight.set(155);
     expect(get(goalWeight)).toBe(155);
     expect(localStorage.getItem(GOAL_KEY)).toBe('155');
@@ -92,7 +92,7 @@ describe('progressStore — goalWeight', () => {
 describe('progressStore — setStartAndGoalWeight', () => {
   it('writes both fields in a single profile save', async () => {
     const { startWeight, goalWeight, setStartAndGoalWeight } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     setStartAndGoalWeight(210, 160);
     expect(get(startWeight)).toBe(210);
     expect(get(goalWeight)).toBe(160);
@@ -107,7 +107,7 @@ describe('progressStore — setStartAndGoalWeight', () => {
 
   it('clears both fields when passed nulls', async () => {
     const { startWeight, goalWeight, setStartAndGoalWeight } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     setStartAndGoalWeight(210, 160);
     await vi.waitFor(async () => expect((await getProfile())?.startWeight).toBe(210));
     setStartAndGoalWeight(null, null);
@@ -142,7 +142,7 @@ describe('progressStore — currentWeight', () => {
 describe('progressStore — setStartWeightIfUnset', () => {
   it('seeds startWeight (and the profile) when none is set', async () => {
     const { startWeight, setStartWeightIfUnset } = await load();
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     await setStartWeightIfUnset(212.4);
     expect(get(startWeight)).toBe(212.4);
     await vi.waitFor(async () => expect((await getProfile())?.startWeight).toBe(212.4));
@@ -150,7 +150,7 @@ describe('progressStore — setStartWeightIfUnset', () => {
 
   it('leaves an existing profile startWeight untouched', async () => {
     const { setStartWeightIfUnset } = await load();
-    const { saveProfile, getProfile } = await import('$lib/domain/repo');
+    const { saveProfile, getProfile } = await import('$lib/domain/health-data-storage');
     await saveProfile({ startWeight: 198 });
     await setStartWeightIfUnset(212.4);
     const profile = await getProfile();

@@ -6,7 +6,7 @@ import {
   getProfile,
   getProfileSyncMode,
   saveProfile,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 import type {
   E2EEMigrationDirection,
   E2EEMigrationState,

@@ -21,7 +21,7 @@ import {
   MigrationSupersededError,
 } from '$lib/sync/account-state';
 import { db } from '$lib/db/schema';
-import { saveProfile } from '$lib/domain/repo';
+import { saveProfile } from '$lib/domain/health-data-storage';
 import type { E2EEMigrationState, E2EETransitionPhase } from '$lib/domain/types';
 
 export type RemotePulledChange = {

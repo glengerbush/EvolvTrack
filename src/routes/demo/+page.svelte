@@ -5,7 +5,7 @@
   import { resolve } from '$app/paths';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { awaitSettledAuth } from '$lib/stores/authStore';
-  import { getAllEntries, getAllPrescriptions } from '$lib/domain/repo';
+  import { getAllEntries, getAllPrescriptions } from '$lib/domain/health-data-storage';
 
   // Dedicated, shareable demo entry point. Enabling demo mode reseeds the local
   // DB (seedDemoData clears it first), so unlike the in-page button this URL can

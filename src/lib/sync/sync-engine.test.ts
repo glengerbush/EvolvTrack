@@ -101,7 +101,7 @@ vi.mock('$lib/sync/account-state', () => ({
   fetchRemoteSyncAccount: () => h.fetchAccountImpl(),
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getProfile: vi.fn(async () => ({ syncMode: h.state.syncMode })),
   getProfileSyncMode: (profile: { syncMode?: string } | undefined) =>
     profile?.syncMode ?? 'plain',

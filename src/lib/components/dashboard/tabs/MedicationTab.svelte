@@ -10,7 +10,7 @@
   import { dismissedReminders } from '$lib/stores/dismissedRemindersStore';
   import { weightUnit, displayWeight } from '$lib/stores/unitStore';
   import { currentWeight, startWeight } from '$lib/stores/progressStore';
-  import { addPrescription, updatePrescription, deletePrescription, getProfile, saveProfile } from '$lib/domain/repo';
+  import { addPrescription, updatePrescription, deletePrescription, getProfile, saveProfile } from '$lib/domain/health-data-storage';
   import DateInput from '$lib/components/dashboard/tables/DateInput.svelte';
   import CustomPicker from '$lib/components/dashboard/tables/CustomPicker.svelte';
   import ConfirmDialog from '$lib/components/dashboard/tables/ConfirmDialog.svelte';

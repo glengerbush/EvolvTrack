@@ -13,7 +13,7 @@ import {
   onHealthDataChange,
   type HealthDataChange,
   updateEntry,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 const TODAY = iso('2026-05-10');
@@ -24,7 +24,7 @@ function captureChanges() {
   return { events, unsubscribe };
 }
 
-describe('repo health-change events', () => {
+describe('Health Data Storage change events', () => {
   it('emits add then patch then delete for a weight lifecycle', async () => {
     const { events, unsubscribe } = captureChanges();
     try {

@@ -36,7 +36,8 @@ const state = vi.hoisted(() => ({
   destinationVerificationError: undefined as Error | undefined,
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
+  hasPlainHealthData: vi.fn(async () => false),
   getAllEntries: vi.fn(async () => [
     { id: 'w1', date: '2026-05-01', weightLbs: 180, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
     { id: 'i1', date: '2026-05-01', amountMg: 5, medication: 'Semaglutide (Ozempic / Wegovy)', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
@@ -283,7 +284,7 @@ import {
   startFreshSync,
   SyncTransitionConflictError,
 } from '$lib/sync/account-state';
-import { getAllEntries } from '$lib/domain/repo';
+import { getAllEntries } from '$lib/domain/health-data-storage';
 import {
   decryptRecord,
   derivePassphraseKek,
@@ -873,7 +874,7 @@ describe('startE2EEDisableMigration — happy path from e2ee', () => {
 
     const changes = pushPlainChangesMock.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
     const ids = changes.map((c) => c.id);
-    // weights(w1) + injections(i1) + profile come from the repo mock.
+    // Health Entries w1/i1 plus profile come from the storage mock.
     expect(ids).toContain('entry:w1');
     expect(ids).toContain('entry:i1');
     expect(ids).toContain('profile:profile');
@@ -1264,7 +1265,7 @@ describe('resetEncryptionToPlain — stuck-migration escape hatch', () => {
 
   it('refuses (and deletes nothing) when this device has no data to keep', async () => {
     vi.mocked(getAllEntries).mockResolvedValueOnce([]);
-    // getAllPrescriptions already returns [] in the repo mock.
+    // getAllPrescriptions already returns [] in the storage mock.
 
     await expect(resetEncryptionToPlain()).rejects.toThrow(/no data on this device/i);
     expect(pushPlainChangesMock).not.toHaveBeenCalled();

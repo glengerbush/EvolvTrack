@@ -1,4 +1,4 @@
-import { addEntry, addPrescription, clearAllData } from '$lib/domain/repo';
+import { addEntry, addPrescription, clearAllData } from '$lib/domain/health-data-storage';
 import type { IsoDate } from '$lib/domain/types';
 import { addDays, asIsoDate, dateKeyFromDate, enumerateDateKeys, localDateKey } from '$lib/utils/dateKeys';
 

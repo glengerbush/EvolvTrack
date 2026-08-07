@@ -1,8 +1,6 @@
 import { browser } from '$app/environment';
-import { liveQuery } from 'dexie';
 import { writable, derived, get } from 'svelte/store';
-import { db } from '$lib/db/schema';
-import { getProfile, saveProfile } from '$lib/domain/repo';
+import { getProfile, observeProfile, saveProfile } from '$lib/domain/health-data-storage';
 import type { ProfileSettings } from '$lib/domain/types';
 import { latestWeightLbs } from '$lib/stores/healthStore';
 
@@ -70,14 +68,13 @@ function hydrateFromProfile(profile: ProfileSettings | undefined): void {
   }
 }
 
-// `liveQuery` re-fires whenever `db.profile` changes — initial load, local
-// edits via `saveProfile`, and remote-pull merges all flow through here, so the
+// Health Data Storage publishes profile changes — initial load, local edits
+// via `saveProfile`, and remote-pull merges all flow through here, so the
 // progress card stays in sync across tabs and across devices on the same
 // account.
 if (browser) {
-  liveQuery(() => db.profile.get('profile')).subscribe({
-    next: hydrateFromProfile,
-    error: (e) => console.error('progressStore liveQuery error:', e),
+  observeProfile(hydrateFromProfile, (error) => {
+    console.error('progressStore profile observation error:', error);
   });
 }
 

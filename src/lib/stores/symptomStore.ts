@@ -1,8 +1,6 @@
 import { browser } from '$app/environment';
-import { liveQuery } from 'dexie';
 import { get, writable, type Readable } from 'svelte/store';
-import { db } from '$lib/db/schema';
-import { saveProfile } from '$lib/domain/repo';
+import { observeProfile, saveProfile } from '$lib/domain/health-data-storage';
 import type { ProfileSettings } from '$lib/domain/types';
 import {
   DEFAULT_SYMPTOM_COLORS,
@@ -26,9 +24,9 @@ const _colors = writable<Record<string, string>>({ ...DEFAULT_SYMPTOM_COLORS });
 /**
  * Apply a profile's symptom fields to the in-memory stores. Exported so
  * callers that just wrote the profile in a transaction can update consumers
- * synchronously, without waiting for the liveQuery subscriber below to
- * re-fire. Also the single source of truth for the "defaults + overrides"
- * shape, used by both the liveQuery hydrator and the importer.
+ * synchronously, without waiting for the storage observer below to re-fire.
+ * Also the single source of truth for the "defaults + overrides"
+ * shape, used by both the storage observer and the importer.
  */
 export function hydrateSymptomStoresFromProfile(profile: ProfileSettings | undefined): void {
   _options.set(
@@ -40,14 +38,12 @@ export function hydrateSymptomStoresFromProfile(profile: ProfileSettings | undef
   });
 }
 
-// Hydrate from the profile in the browser. `liveQuery` re-fires whenever
-// `db.profile` changes — initial load, local edits via `saveProfile`, and
-// remote-pull merges all go through here, so the dropdown stays in sync
+// Hydrate from the profile in the browser. Health Data Storage publishes
+// initial, local, and remote profile changes, so the dropdown stays in sync
 // across tabs and across devices on the same account.
 if (browser) {
-  liveQuery(() => db.profile.get('profile')).subscribe({
-    next: hydrateSymptomStoresFromProfile,
-    error: (e) => console.error('symptomStore liveQuery error:', e),
+  observeProfile(hydrateSymptomStoresFromProfile, (error) => {
+    console.error('symptomStore profile observation error:', error);
   });
 }
 

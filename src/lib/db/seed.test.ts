@@ -8,7 +8,7 @@ import {
   getAllPrescriptions,
   getProfile,
   saveProfile,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 import { addDays, daysBetween, localDateKey } from '$lib/utils/dateKeys';
 import type { HealthEntry, IsoDate } from '$lib/domain/types';
 

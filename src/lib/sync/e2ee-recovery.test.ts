@@ -20,7 +20,7 @@ const state = vi.hoisted(() => ({
   generatedRecoveryCounter: 0,
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getAllWeights: vi.fn(async () => [
     { id: 'w1', date: '2026-05-01', weightLbs: 180, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
   ]),

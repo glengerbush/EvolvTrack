@@ -23,7 +23,7 @@ vi.mock('$lib/db/liveQuery', () => ({
 // The querier inside medicationStore calls getAllPrescriptions; route it to a
 // stub we control per test.
 let prescriptionsForRepo: Prescription[] = [];
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getAllPrescriptions: async () => prescriptionsForRepo,
   getAllEntries: async () => [],
 }));

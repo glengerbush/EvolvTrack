@@ -4,8 +4,8 @@ import type {
   E2EELifecyclePort,
   E2EELifecycleResults,
 } from '$lib/sync/e2ee-lifecycle';
-import { db } from '$lib/db/schema';
 import { get } from 'svelte/store';
+import { hasPlainHealthData } from '$lib/domain/health-data-storage';
 import { fetchRemoteSyncAccount } from '$lib/sync/account-state';
 import { connectivity } from '$lib/stores/syncStore';
 import {
@@ -66,11 +66,8 @@ export function createE2EETransitionExecutor(
 }
 
 async function hasReadableLocalData(): Promise<boolean> {
-  const [entries, vials] = await Promise.all([
-    db.entries.count(),
-    db.prescriptions.count(),
-  ]);
-  return entries + vials > 0 || deviceEncryptionState.hasReadableLocalTreatmentCiphertext();
+  const hasPlainData = await hasPlainHealthData();
+  return hasPlainData || deviceEncryptionState.hasReadableLocalTreatmentCiphertext();
 }
 
 async function readProductionFacts(): Promise<E2EELifecycleFacts> {

@@ -8,7 +8,7 @@ import {
   onHealthDataChange,
   updateEntry,
   type HealthDataChange,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 import { stampAllFields } from '$lib/domain/merge';
 import type { HealthEntry, ProfileSettings, SyncAggregate } from '$lib/domain/types';
 
@@ -47,7 +47,7 @@ function captureChanges() {
   return { events, unsubscribe };
 }
 
-describe('applyRemoteChange — weight upserts', () => {
+describe('Health Data Storage remote Health Entry upserts', () => {
   it('inserts a brand-new entity and emits an add', async () => {
     const { events, unsubscribe } = captureChanges();
     try {

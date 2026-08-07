@@ -1,5 +1,4 @@
-import { db } from '$lib/db/schema';
-import { emitHealthChange, enqueueImportedRows } from '$lib/domain/repo';
+import { applyHealthDataImport } from '$lib/domain/health-data-storage';
 import { setStartWeightIfUnset } from '$lib/stores/progressStore';
 import { hydrateSymptomStoresFromProfile } from '$lib/stores/symptomStore';
 import {
@@ -42,7 +41,6 @@ import {
 import type {
   DosageColKey,
   HealthColKey,
-  HealthEntry,
   Prescription,
   ProfileSettings,
   VialColKey,
@@ -484,128 +482,26 @@ export async function parseTrackingFile(file: File): Promise<ImportParseResult> 
   };
 }
 
-/** Day + recorded weight identify a weight reading. Weight-less rows
- * (wellness/symptom-only) collapse by day alone so re-imports of them also
- * dedupe. Rounded to 0.1 lb so trivial float noise doesn't defeat the match. */
-function entryDedupeKey(
-  e: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>,
-): string {
-  const lbs = e.weightLbs != null ? Math.round(e.weightLbs * 10) / 10 : 'none';
-  const dose = e.amountMg != null ? e.amountMg.toFixed(3) : 'none';
-  return `${e.date}#${lbs}#${dose}#${e.medication ?? ''}`;
-}
-
-export type DedupeResult = {
-  data: ImportData;
-  skipped: number;
-};
-
-/**
- * Drop imported rows that duplicate data already present (in the DB, or earlier
- * in the same import batch) so a merge import doesn't pile on copies.
- *
- *  - Weights: same day + same recorded weight ⇒ duplicate.
- *  - Injections: same day + same dose amount, where the medications match OR
- *    either side has no medication. The "no medication" case implements the
- *    rule "if the dose matches but the drug is blank, assume it's the same drug
- *    logged that day." Two *different* known drugs at the same dose on the same
- *    day are kept (legitimately distinct).
- *
- * Prescriptions are left untouched — they aren't day-scoped, and a backup
- * re-import overwrites them by id anyway.
- */
-export function dedupeAgainstExisting(
-  data: ImportData,
-  existing: { entries: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>[] },
-): DedupeResult {
-  const seen = new Set(existing.entries.map(entryDedupeKey));
-  const entries: HealthEntry[] = [];
-  let skipped = 0;
-  for (const e of data.entries) {
-    const key = entryDedupeKey(e);
-    if (seen.has(key)) {
-      skipped += 1;
-      continue;
-    }
-    seen.add(key);
-    entries.push(e);
-  }
-
-  return { data: { ...data, entries }, skipped };
-}
-
 async function applyParsedImport(parsed: ImportParseResult, mode: ImportMode): Promise<void> {
-  // Merge mode: drop rows that duplicate data already on this device (or earlier
-  // in the same file) so re-importing doesn't create copies. Replace mode wipes
-  // first, so there's nothing to dedupe against.
-  if (mode === 'merge') {
-    const existingEntries = await db.entries.toArray();
-    const deduped = dedupeAgainstExisting(parsed.data, { entries: existingEntries });
-    parsed.data.entries = deduped.data.entries;
-    const skipped = deduped.skipped;
-    if (skipped > 0) {
-      parsed.warnings = [
-        ...parsed.warnings,
-        `Skipped ${skipped} duplicate row${skipped === 1 ? '' : 's'} already present for those days.`,
-      ];
-    }
-  }
-
   const replaceProfile = parsed.source === 'EvolvTrack backup' || parsed.source === 'EvolvTrack spreadsheet' || Boolean(parsed.data.profile);
 
-  // Collect every symptom referenced by the imported rows up-front. Folded
-  // into the profile write below so the import produces exactly one profile
-  // outbox entry (not one for `parsed.data.profile` and a second for the
-  // newly-registered symptoms).
-  const importedSymptoms = new Set<string>();
-  for (const e of parsed.data.entries) {
-    for (const s of e.symptoms ?? []) importedSymptoms.add(s);
-  }
-
-  let mergedProfile: ProfileSettings | undefined;
-  const tables = [db.entries, db.prescriptions, db.profile, db.outbox];
-  await db.transaction('rw', tables, async () => {
-    let deletedIds: { entries: string[]; prescriptions: string[] } | undefined;
-    if (mode === 'replace') {
-      // Capture pre-clear primary keys so the outbox can publish delete
-      // tombstones for them. Without this, replace-mode imports drop local
-      // rows but leave the cloud copies in place, and the next pull
-      // resurrects them.
-      const [entryIds, prescriptionIds] = await Promise.all([
-        db.entries.toCollection().primaryKeys(),
-        db.prescriptions.toCollection().primaryKeys(),
-      ]);
-      deletedIds = {
-        entries: entryIds as string[],
-        prescriptions: prescriptionIds as string[],
-      };
-      await Promise.all([
-        db.entries.clear(),
-        db.prescriptions.clear(),
-        replaceProfile ? db.profile.clear() : Promise.resolve(),
-      ]);
-    }
-
-    await Promise.all([
-      parsed.data.entries.length ? db.entries.bulkPut(parsed.data.entries) : Promise.resolve(),
-      parsed.data.prescriptions.length ? db.prescriptions.bulkPut(parsed.data.prescriptions) : Promise.resolve(),
-    ]);
-
-    // Bulk imports normally bypass the per-row mutate helpers that enqueue
-    // outbox entries. Re-attach the sync trail here; the profile (including
-    // any imported `profile` block and any newly-registered symptoms) is
-    // written and enqueued in one atomic step by `enqueueImportedRows`.
-    mergedProfile = await enqueueImportedRows(parsed.data, { deletedIds, importedSymptoms });
+  const applied = await applyHealthDataImport({
+    mode,
+    replaceProfile,
+    data: parsed.data,
   });
+  parsed.data.entries = applied.appliedEntries;
+  if (applied.skippedDuplicateEntries > 0) {
+    parsed.warnings = [
+      ...parsed.warnings,
+      `Skipped ${applied.skippedDuplicateEntries} duplicate row${applied.skippedDuplicateEntries === 1 ? '' : 's'} already present for those days.`,
+    ];
+  }
 
   // The store's liveQuery will eventually pick this up, but hydrate
   // synchronously so callers awaiting the import see the dropdown updated
   // by the time control returns.
-  if (mergedProfile) hydrateSymptomStoresFromProfile(mergedProfile);
-
-  // Notify the in-memory health cache about the bulk write so it doesn't go stale.
-  if (mode === 'replace') emitHealthChange({ action: 'reset' });
-  for (const e of parsed.data.entries) emitHealthChange({ action: 'add', entity: e });
+  if (applied.persistedProfile) hydrateSymptomStoresFromProfile(applied.persistedProfile);
 
   const earliest = parsed.data.entries
     .filter((e) => e.weightLbs != null)

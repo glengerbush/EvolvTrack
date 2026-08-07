@@ -1,5 +1,5 @@
 import { db } from '$lib/db/schema';
-import { applyRemoteChange, getProfile, getProfileSyncMode } from '$lib/domain/repo';
+import { applyRemoteChange, getProfile, getProfileSyncMode } from '$lib/domain/health-data-storage';
 import type { SyncMode } from '$lib/domain/types';
 import type { PlainSyncChange } from '$lib/sync/canonical-sync-change';
 import { deviceEncryptionState } from '$lib/sync/device-encryption-state';

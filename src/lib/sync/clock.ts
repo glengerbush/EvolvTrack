@@ -1,7 +1,7 @@
 /**
  * Server-anchored, monotonic wall clock for LWW timestamps.
  *
- * Conflict resolution (`merge.ts`, the delete/whole-row LWW in `repo.ts`) compares
+ * Conflict resolution (`merge.ts`, the delete/whole-row LWW in Health Data Storage) compares
  * `updatedAt` / `fieldUpdatedAt` stamps across devices. Those were stamped with
  * each device's *local* `Date.now()`, so a device whose clock runs fast wins every
  * conflict and a slow device's edits can be silently dropped — the classic

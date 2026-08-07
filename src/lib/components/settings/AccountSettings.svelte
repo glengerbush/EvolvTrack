@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { dev } from '$app/environment';
-  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/repo';
+  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/health-data-storage';
   import { errorMessage } from '$lib/utils/errorMessage';
   import type { HealthEntry, Medication, Prescription } from '$lib/domain/types';
   import ImportMedicationModal from '$lib/components/settings/ImportMedicationModal.svelte';
@@ -21,7 +21,7 @@
   import { weightUnit } from '$lib/stores/unitStore';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { authState } from '$lib/stores/authStore';
-  import { clearAllData } from '$lib/domain/repo';
+  import { clearAllData } from '$lib/domain/health-data-storage';
   import {
     changeLoginPassword,
     deleteAccountAndClearLocalData,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
-import { getAllEntries } from '$lib/domain/repo';
+import { getAllEntries } from '$lib/domain/health-data-storage';
 import { saveInputRows, type HealthInputRowSaveInput } from '$lib/domain/healthInputs';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;

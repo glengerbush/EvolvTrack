@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
-import { addEntry, getAllEntries } from '$lib/domain/repo';
+import { addEntry, getAllEntries } from '$lib/domain/health-data-storage';
 import {
   BACKUP_APP_ID,
   BACKUP_FORMAT_VERSION,
@@ -46,7 +46,7 @@ describe('createBackup', () => {
       medication: SEMA,
     });
 
-    // sanity check: repo returns the same rows we serialized
+    // Sanity check: Health Data Storage returns the same rows we serialized.
     expect(await getAllEntries()).toHaveLength(2);
   });
 });

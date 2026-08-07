@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { getProfile, saveProfile } from '$lib/domain/repo';
+import { getProfile, saveProfile } from '$lib/domain/health-data-storage';
 import { KG_PER_LB } from '$lib/utils/pharmacokinetics';
 import type { WeightUnit } from '$lib/domain/types';
 

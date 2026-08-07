@@ -14,12 +14,12 @@ import {
   setLocalProfileSyncState,
   updateEntry,
   updatePrescription,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 const TODAY = iso('2026-05-10');
 
-describe('outbox capture — weights', () => {
+describe('Health Data Storage outgoing Weigh-in changes', () => {
   it('addEntry enqueues an upsert keyed by aggregate:id with the full record', async () => {
     const created = await addEntry({ date: TODAY, weightLbs: 180 });
 

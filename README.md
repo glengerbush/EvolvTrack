@@ -104,7 +104,7 @@ Prerequisite: Docker must be installed and runnable without `sudo`.
   - Sync is optional and pluggable: the SyncMode (plain | e2ee) is stored per-profile and the
   engine branches on it.
   - Tests are colocated and pure-logic-first — heavy stuff (chartModel, PK, healthStore) is
-  unit-tested without Dexie; only repo and healthInputs cross the IDB boundary via
+  unit-tested without Dexie; only Health Data Storage and healthInputs cross the IDB boundary via
   fake-indexeddb.
 
 ## Auth mode and Supabase IaC

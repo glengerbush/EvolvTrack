@@ -1,5 +1,5 @@
 // Drives the derived stores in healthStore by running with `browser=true`,
-// then dispatching repo change events. fake-indexeddb is brought in so the
+// then dispatching Health Data Storage change events. fake-indexeddb is brought in so the
 // initial-load promise resolves cleanly.
 import '../../test/dexie-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,14 +38,14 @@ beforeEach(() => {
 });
 
 async function setup() {
-  // Order matters: import the module under test first, then the repo, so the
+  // Order matters: import the module under test first, then storage, so the
   // store's onHealthDataChange listener is registered before we emit.
   const store = await import('$lib/stores/healthStore');
-  const repo = await import('$lib/domain/repo');
+  const storage = await import('$lib/domain/health-data-storage');
   // Wait for the initial Dexie load to settle so the `loaded` flag flips and
   // subsequent emits hit the reducer instead of being buffered.
   await store.healthStoreReady;
-  return { ...store, ...repo };
+  return { ...store, ...storage };
 }
 
 describe('healthStore — latestWeightLbs', () => {

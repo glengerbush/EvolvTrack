@@ -72,7 +72,7 @@ vi.mock('$lib/sync/e2ee-lifecycle-runtime', () => ({
   e2eeLifecycle: { reconcile: () => h.autoResumeMigrationImpl() },
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   onOutboxChange: (listener: () => void) => {
     h.outboxListeners.add(listener);
     return () => h.outboxListeners.delete(listener);

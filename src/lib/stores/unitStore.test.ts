@@ -11,7 +11,7 @@ const STORAGE_KEY = 'evolvtrack-weight-unit';
 let profileResult: ProfileSettings | undefined;
 const saveProfile = vi.fn(async (_partial: unknown) => {});
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getProfile: async () => profileResult,
   saveProfile: (partial: unknown) => saveProfile(partial),
 }));

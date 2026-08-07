@@ -247,7 +247,7 @@ export const MERGEABLE_AGGREGATES: ReadonlySet<SyncAggregate> = new Set<SyncAggr
 
 /**
  * Profile fields that live only on this device and never appear in the
- * outbox payload (see `toSyncableProfile` in repo.ts). The profile aggregate
+ * outbox payload (see `toSyncableProfile` in health-data-storage.ts). The profile aggregate
  * keeps its own apply path because of this, but the merge itself uses the
  * `reserved` option so a pulled remote can't disturb them.
  */

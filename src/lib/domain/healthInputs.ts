@@ -1,4 +1,4 @@
-import { addEntry, getProfile, saveProfile, updateEntry } from '$lib/domain/repo';
+import { addEntry, getProfile, saveProfile, updateEntry } from '$lib/domain/health-data-storage';
 import type { HealthColKey, IsoDate, IsoDateTime, Medication } from '$lib/domain/types';
 import { localDateKey } from '$lib/utils/dateKeys';
 

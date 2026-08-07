@@ -16,7 +16,7 @@ import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
 import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
 import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
 import { refreshLicenseActive } from '$lib/sync/license';
-import { onOutboxChange } from '$lib/domain/repo';
+import { onOutboxChange } from '$lib/domain/health-data-storage';
 import { fetchServerTimeMs, supabaseUrl } from '$lib/auth/supabase';
 import { recordServerTime } from '$lib/sync/clock';
 import { isSetupWizardPending } from '$lib/stores/setupWizardStore';

@@ -18,7 +18,7 @@ import {
   setLocalProfileSyncState,
   sortPrescriptionsByDisplayOrder,
   updatePrescription,
-} from '$lib/domain/repo';
+} from '$lib/domain/health-data-storage';
 import type { Prescription, ProfileSettings } from '$lib/domain/types';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
@@ -34,7 +34,7 @@ function prescriptionFixture(overrides: Partial<Prescription>): Prescription {
   };
 }
 
-describe('addPrescription', () => {
+describe('Health Data Storage add Vial', () => {
   it('persists a new prescription with generated id, createdAt/updatedAt, and assigns sortOrder 0 when none exist', async () => {
     const created = await addPrescription({
       type: SEMA,

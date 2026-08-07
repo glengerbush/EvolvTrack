@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid';
-import type { Table } from 'dexie';
+import { liveQuery, type Table } from 'dexie';
 import { db } from '$lib/db/schema';
 import type {
   HealthEntry,
@@ -40,20 +40,11 @@ export const DEFAULT_SYNC_MODE: SyncMode = 'plain';
 // matching hole at the *write* side so a user edit can't slip in before this
 // device's UI has even shown the blocking migration modal.
 //
-// Enforced at the single seam every interactive mutation passes through
-// (`enqueueOutbox`, plus the bulk-import builder). Sync-apply writes don't go
-// through it, and `profile` rows are exempt — the migration itself records its
-// progress as profile writes, and profile carries no PHI.
+// Enforced inside every Health Entry, Vial, and import transaction before its
+// first treatment-data write. Incoming sync changes do not pass through this
+// guard, and profile settings are exempt because transition progress is stored
+// there and the profile carries no treatment observations.
 //
-// We can't read `db.profile` inside the entity transactions that call
-// `enqueueOutbox` (it isn't in their scope), so the current mode is cached and
-// refreshed wherever the profile's sync state is written or read.
-let cachedSyncMode: SyncMode = DEFAULT_SYNC_MODE;
-
-function rememberSyncMode(mode: SyncMode | undefined): void {
-  cachedSyncMode = mode ?? DEFAULT_SYNC_MODE;
-}
-
 function isE2EEChangeInProgress(mode: SyncMode): boolean {
   return (
     mode === 'migrating_to_e2ee' ||
@@ -62,7 +53,7 @@ function isE2EEChangeInProgress(mode: SyncMode): boolean {
   );
 }
 
-/** Thrown by a data mutation attempted while an E2EE migration is in flight. */
+/** Thrown by a data mutation attempted during an Encryption Transition. */
 export class MigrationInProgressError extends Error {
   constructor() {
     super('An encryption change is in progress on your account. Finish it before editing your data.');
@@ -70,9 +61,12 @@ export class MigrationInProgressError extends Error {
   }
 }
 
-/** Guard a data (non-profile) edit against an in-flight E2EE migration. */
-function assertDataEditAllowed(aggregate: SyncAggregate): void {
-  if (aggregate !== 'profile' && isE2EEChangeInProgress(cachedSyncMode)) {
+/** Guard a data (non-profile) edit against the persisted Encryption Transition state. */
+async function assertDataEditAllowed(aggregate: SyncAggregate): Promise<void> {
+  if (
+    aggregate !== 'profile'
+    && isE2EEChangeInProgress(getProfileSyncMode(await db.profile.get('profile')))
+  ) {
     throw new MigrationInProgressError();
   }
 }
@@ -133,14 +127,13 @@ function toSyncableProfile(profile: ProfileSettings): unknown {
   return canonicalDomain.serializeSyncableProfile(profile);
 }
 
-async function enqueueOutbox(
+async function writeOutboxChange(
   aggregate: SyncAggregate,
   entityId: string,
   op: 'upsert' | 'delete',
   updatedAt: IsoDateTime,
   payload: unknown,
 ): Promise<void> {
-  assertDataEditAllowed(aggregate);
   await db.outbox.put({
     id: `${aggregate}:${entityId}`,
     aggregate,
@@ -157,7 +150,7 @@ async function enqueueOutbox(
   emitOutboxChange();
 }
 
-export type ApplyImportOptions = {
+type ImportChangeOptions = {
   /** Pre-existing row ids that the caller cleared (replace-mode only) — they
    *  get delete tombstones on the wire so the cloud actually drops them. Ids
    *  also present in `data` are coalesced into the upsert instead. */
@@ -169,10 +162,121 @@ export type ApplyImportOptions = {
   importedSymptoms?: Iterable<string>;
 };
 
+export type HealthDataImportData = {
+  entries: HealthEntry[];
+  prescriptions: Prescription[];
+  profile?: ProfileSettings;
+};
+
+export type ApplyHealthDataImportInput = {
+  mode: 'merge' | 'replace';
+  replaceProfile: boolean;
+  data: HealthDataImportData;
+};
+
+export type ApplyHealthDataImportResult = {
+  appliedEntries: HealthEntry[];
+  persistedProfile?: ProfileSettings;
+  skippedDuplicateEntries: number;
+};
+
+function importEntryKey(
+  entry: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>,
+): string {
+  const weight = entry.weightLbs != null ? Math.round(entry.weightLbs * 10) / 10 : 'none';
+  const dose = entry.amountMg != null ? entry.amountMg.toFixed(3) : 'none';
+  return `${entry.date}#${weight}#${dose}#${entry.medication ?? ''}`;
+}
+
+function deduplicateImportedEntries(
+  entries: HealthEntry[],
+  existing: Pick<HealthEntry, 'date' | 'weightLbs' | 'amountMg' | 'medication'>[],
+): { entries: HealthEntry[]; skippedDuplicateEntries: number } {
+  const seen = new Set(existing.map(importEntryKey));
+  const unique: HealthEntry[] = [];
+  let skippedDuplicateEntries = 0;
+  for (const entry of entries) {
+    const key = importEntryKey(entry);
+    if (seen.has(key)) {
+      skippedDuplicateEntries += 1;
+      continue;
+    }
+    seen.add(key);
+    unique.push(entry);
+  }
+  return { entries: unique, skippedDuplicateEntries };
+}
+
+export async function applyHealthDataImport(
+  input: ApplyHealthDataImportInput,
+): Promise<ApplyHealthDataImportResult> {
+  let appliedEntries = input.data.entries;
+  let skippedDuplicateEntries = 0;
+  let persistedProfile: ProfileSettings | undefined;
+  let hasOutgoingChanges = false;
+  await db.transaction(
+    'rw',
+    [db.entries, db.prescriptions, db.profile, db.outbox],
+    async () => {
+      await assertDataEditAllowed('entry');
+      if (input.mode === 'merge') {
+        const deduplicated = deduplicateImportedEntries(
+          input.data.entries,
+          await db.entries.toArray(),
+        );
+        appliedEntries = deduplicated.entries;
+        skippedDuplicateEntries = deduplicated.skippedDuplicateEntries;
+      }
+      const importedSymptoms = new Set(
+        appliedEntries.flatMap((entry) => entry.symptoms ?? []),
+      );
+
+      let deletedIds: ImportChangeOptions['deletedIds'];
+      if (input.mode === 'replace') {
+        const [entryIds, prescriptionIds] = await Promise.all([
+          db.entries.toCollection().primaryKeys(),
+          db.prescriptions.toCollection().primaryKeys(),
+        ]);
+        deletedIds = {
+          entries: entryIds as string[],
+          prescriptions: prescriptionIds as string[],
+        };
+        await Promise.all([
+          db.entries.clear(),
+          db.prescriptions.clear(),
+          input.replaceProfile ? db.profile.clear() : Promise.resolve(),
+        ]);
+      }
+
+      await Promise.all([
+        appliedEntries.length ? db.entries.bulkPut(appliedEntries) : Promise.resolve(),
+        input.data.prescriptions.length
+          ? db.prescriptions.bulkPut(input.data.prescriptions)
+          : Promise.resolve(),
+      ]);
+      const changes = await enqueueImportChanges(
+        { ...input.data, entries: appliedEntries },
+        { deletedIds, importedSymptoms },
+      );
+      persistedProfile = changes.persistedProfile;
+      hasOutgoingChanges = changes.hasOutgoingChanges;
+    },
+  );
+
+  if (hasOutgoingChanges) emitOutboxChange();
+  if (input.mode === 'replace') emitHealthChange({ action: 'reset' });
+  for (const entry of appliedEntries) emitHealthChange({ action: 'add', entity: entry });
+
+  return {
+    appliedEntries,
+    persistedProfile,
+    skippedDuplicateEntries,
+  };
+}
+
 /**
  * Apply a bulk import's profile-side work and enqueue every matching outbox
- * row in one atomic step. The caller is responsible for the entity-table
- * bulkPuts (weights/injections/prescriptions); this function:
+ * row inside the storage-owned transaction:
  *
  *   1. Decides which profile to persist: the imported profile (if any),
  *      otherwise the existing one patched with new symptoms, otherwise a
@@ -182,23 +286,13 @@ export type ApplyImportOptions = {
  *   3. Builds outbox entries: delete tombstones for `deletedIds`, upserts
  *      for every row in `data`, and a single upsert for the merged profile.
  *
- * Must be called inside a transaction that already includes `db.profile`,
- * `db.outbox`, and the entity tables. Single profile write per import is the
- * point — keeps push order deterministic and avoids the brief window where
+ * A single profile write per import keeps push order deterministic and avoids the brief window where
  * the cloud could see a profile that lacks the symptoms its rows reference.
  */
-export async function enqueueImportedRows(
-  data: {
-    entries: HealthEntry[];
-    prescriptions: Prescription[];
-    profile?: ProfileSettings;
-  },
-  options: ApplyImportOptions = {},
-): Promise<ProfileSettings | undefined> {
-  // A bulk import is a large data edit — block it too while an E2EE migration is
-  // converting the account (same rule as the per-entity mutations).
-  if (isE2EEChangeInProgress(cachedSyncMode)) throw new MigrationInProgressError();
-
+async function enqueueImportChanges(
+  data: HealthDataImportData,
+  options: ImportChangeOptions = {},
+): Promise<{ persistedProfile?: ProfileSettings; hasOutgoingChanges: boolean }> {
   const { deletedIds, importedSymptoms } = options;
   const profileToPersist = await mergeImportedProfile(data.profile, importedSymptoms);
   if (profileToPersist) {
@@ -252,10 +346,12 @@ export async function enqueueImportedRows(
 
   if (entries.length > 0) {
     await db.outbox.bulkPut(entries);
-    emitOutboxChange();
   }
 
-  return profileToPersist;
+  return {
+    persistedProfile: profileToPersist,
+    hasOutgoingChanges: entries.length > 0,
+  };
 }
 
 /**
@@ -651,9 +747,10 @@ export async function addEntry(
     },
     ts,
   );
-  await db.transaction('rw', db.entries, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('entry');
     await db.entries.put(item);
-    await enqueueOutbox('entry', item.id, 'upsert', item.updatedAt, item);
+    await writeOutboxChange('entry', item.id, 'upsert', item.updatedAt, item);
   });
   emitHealthChange({ action: 'add', entity: item });
   return item;
@@ -665,14 +762,15 @@ export async function updateEntry(
 ): Promise<void> {
   const ts = now();
   let patchForEvent: Partial<HealthEntry> | null = null;
-  await db.transaction('rw', db.entries, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('entry');
     const before = await db.entries.get(id);
     if (!before) return;
     const merged = applyPatchWithClears(before, data);
     const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
     const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
     await db.entries.put(updated);
-    await enqueueOutbox('entry', id, 'upsert', updated.updatedAt, updated);
+    await writeOutboxChange('entry', id, 'upsert', updated.updatedAt, updated);
     patchForEvent = { ...data, updatedAt };
   });
   if (patchForEvent) emitHealthChange({ action: 'patch', id, patch: patchForEvent });
@@ -688,7 +786,8 @@ export async function bulkUpdateEntries(
 ): Promise<void> {
   if (ids.length === 0) return;
   const ts = now();
-  await db.transaction('rw', db.entries, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('entry');
     for (const id of ids) {
       const before = await db.entries.get(id);
       if (!before) continue;
@@ -696,7 +795,7 @@ export async function bulkUpdateEntries(
       const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
       const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
       await db.entries.put(updated);
-      await enqueueOutbox('entry', id, 'upsert', updated.updatedAt, updated);
+      await writeOutboxChange('entry', id, 'upsert', updated.updatedAt, updated);
     }
   });
   emitHealthChange({ action: 'bulkPatch', ids, patch: { ...data, updatedAt: ts } });
@@ -704,16 +803,25 @@ export async function bulkUpdateEntries(
 
 export async function deleteEntry(id: string): Promise<void> {
   const deletedAt = now();
-  await db.transaction('rw', db.entries, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('entry');
     const existing = await db.entries.get(id);
     await db.entries.delete(id);
-    if (existing) await enqueueOutbox('entry', id, 'delete', deletedAt, null);
+    if (existing) await writeOutboxChange('entry', id, 'delete', deletedAt, null);
   });
   emitHealthChange({ action: 'delete', id });
 }
 
 export async function getAllEntries(): Promise<HealthEntry[]> {
   return db.entries.orderBy('date').toArray();
+}
+
+export async function hasPlainHealthData(): Promise<boolean> {
+  const [entries, vials] = await Promise.all([
+    db.entries.count(),
+    db.prescriptions.count(),
+  ]);
+  return entries + vials > 0;
 }
 
 // ── Prescriptions ──────────────────────────────────────────────────────────
@@ -723,7 +831,8 @@ export async function addPrescription(
 ): Promise<Prescription> {
   const ts = now();
   let item!: Prescription;
-  await db.transaction('rw', db.prescriptions, db.outbox, async () => {
+  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('prescription');
     const prescriptions = await db.prescriptions.toArray();
     const maxSortOrder = prescriptions
       .map((prescription) => prescription.sortOrder)
@@ -735,7 +844,7 @@ export async function addPrescription(
       ts,
     );
     await db.prescriptions.put(item);
-    await enqueueOutbox('prescription', item.id, 'upsert', item.updatedAt, item);
+    await writeOutboxChange('prescription', item.id, 'upsert', item.updatedAt, item);
   });
   return item;
 }
@@ -745,14 +854,15 @@ export async function updatePrescription(
   data: Partial<Omit<Prescription, 'id' | 'createdAt'>>,
 ): Promise<void> {
   const ts = now();
-  await db.transaction('rw', db.prescriptions, db.outbox, async () => {
+  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('prescription');
     const before = await db.prescriptions.get(id);
     if (!before) return;
     const merged = applyPatchWithClears(before, data);
     const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
     const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
     await db.prescriptions.put(updated);
-    await enqueueOutbox('prescription', id, 'upsert', updated.updatedAt, updated);
+    await writeOutboxChange('prescription', id, 'upsert', updated.updatedAt, updated);
   });
 }
 
@@ -766,7 +876,8 @@ export async function bulkUpdatePrescriptions(
 ): Promise<void> {
   if (ids.length === 0) return;
   const ts = now();
-  await db.transaction('rw', db.prescriptions, db.outbox, async () => {
+  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('prescription');
     for (const id of ids) {
       const before = await db.prescriptions.get(id);
       if (!before) continue;
@@ -774,17 +885,18 @@ export async function bulkUpdatePrescriptions(
       const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
       const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
       await db.prescriptions.put(updated);
-      await enqueueOutbox('prescription', id, 'upsert', updated.updatedAt, updated);
+      await writeOutboxChange('prescription', id, 'upsert', updated.updatedAt, updated);
     }
   });
 }
 
 export async function deletePrescription(id: string): Promise<void> {
   const deletedAt = now();
-  await db.transaction('rw', db.prescriptions, db.outbox, async () => {
+  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, async () => {
+    await assertDataEditAllowed('prescription');
     const existing = await db.prescriptions.get(id);
     await db.prescriptions.delete(id);
-    if (existing) await enqueueOutbox('prescription', id, 'delete', deletedAt, null);
+    if (existing) await writeOutboxChange('prescription', id, 'delete', deletedAt, null);
   });
 }
 
@@ -795,9 +907,17 @@ export async function getAllPrescriptions(): Promise<Prescription[]> {
 // ── Profile ────────────────────────────────────────────────────────────────
 
 export async function getProfile(): Promise<ProfileSettings | undefined> {
-  const profile = await db.profile.get('profile');
-  rememberSyncMode(profile?.syncMode);
-  return profile;
+  return db.profile.get('profile');
+}
+
+export function observeProfile(
+  run: (profile: ProfileSettings | undefined) => void,
+  onError: (error: unknown) => void = (error) => {
+    console.error('Health Data Storage profile observation failed:', error);
+  },
+): () => void {
+  const subscription = liveQuery(getProfile).subscribe({ next: run, error: onError });
+  return () => subscription.unsubscribe();
 }
 
 /**
@@ -820,7 +940,6 @@ export async function setLocalProfileSyncState(state: {
     if (existing) {
       const updated = { ...existing, ...state, updatedAt: ts };
       await db.profile.put(updated);
-      rememberSyncMode(updated.syncMode);
       return;
     }
     const seed: ProfileSettings = {
@@ -832,7 +951,6 @@ export async function setLocalProfileSyncState(state: {
       updatedAt: ts,
     };
     await db.profile.put(stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL }));
-    rememberSyncMode(seed.syncMode);
   });
 }
 
@@ -862,22 +980,20 @@ export async function saveProfile(
       saved = stampAllFields(seed, ts, { reserved: PROFILE_DEVICE_LOCAL });
       await db.profile.put(saved);
     }
-    rememberSyncMode(saved.syncMode);
-    await enqueueOutbox('profile', 'profile', 'upsert', saved.updatedAt, toSyncableProfile(saved));
+    await writeOutboxChange('profile', 'profile', 'upsert', saved.updatedAt, toSyncableProfile(saved));
   });
 }
 
 // ── Bulk ───────────────────────────────────────────────────────────────────
 
 export async function clearAllData(): Promise<void> {
-  // Deliberately bypasses the outbox: this is a local reset, not a set of
-  // user edits to propagate. Bulk import (applyParsedImport) likewise writes
-  // straight to the tables. Reconciling these with sync is a later concern.
+  // Deliberately bypasses the outbox: this is a local-only reset, not a set of
+  // user edits to propagate. Verified erasure and logout coordination remain
+  // separate from ordinary Health Data Storage operations.
   await Promise.all([
     db.entries.clear(),
     db.prescriptions.clear(),
     db.profile.clear(),
   ]);
-  rememberSyncMode(DEFAULT_SYNC_MODE);
   emitHealthChange({ action: 'reset' });
 }

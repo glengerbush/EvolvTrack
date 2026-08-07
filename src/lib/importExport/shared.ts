@@ -1,16 +1,13 @@
 import { nanoid } from 'nanoid';
-import type { HealthEntry, IsoDate, Medication, Prescription, ProfileSettings } from '$lib/domain/types';
+import type { HealthEntry, IsoDate, Medication, Prescription } from '$lib/domain/types';
+import type { HealthDataImportData } from '$lib/domain/health-data-storage';
 import { isMedication } from '$lib/domain/types';
 import { asIsoDate } from '$lib/utils/dateKeys';
 import { KG_PER_LB } from '$lib/utils/pharmacokinetics';
 
 export type ImportMode = 'merge' | 'replace';
 
-export type ImportData = {
-  entries: HealthEntry[];
-  prescriptions: Prescription[];
-  profile?: ProfileSettings;
-};
+export type ImportData = HealthDataImportData;
 
 export type ImportSource =
   | 'EvolvTrack backup'

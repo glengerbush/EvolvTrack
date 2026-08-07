@@ -1,8 +1,6 @@
 import { browser } from '$app/environment';
-import { liveQuery } from 'dexie';
 import { get, writable, type Readable } from 'svelte/store';
-import { db } from '$lib/db/schema';
-import { saveProfile } from '$lib/domain/repo';
+import { observeProfile, saveProfile } from '$lib/domain/health-data-storage';
 
 export const DEFAULT_SHOT_LOCATION_OPTIONS = [
   'Abdomen (Left)',
@@ -14,18 +12,18 @@ export const DEFAULT_SHOT_LOCATION_OPTIONS = [
 const _options = writable<string[]>([...DEFAULT_SHOT_LOCATION_OPTIONS]);
 
 // See symptomStore.ts for the rationale — keep this list in sync with the
-// profile and with other tabs/devices via the same liveQuery pattern.
+// profile and with other tabs/devices through Health Data Storage observation.
 if (browser) {
-  liveQuery(() => db.profile.get('profile')).subscribe({
-    next: (profile) => {
+  observeProfile(
+    (profile) => {
       _options.set(
         profile?.shotLocationOptions
           ? [...profile.shotLocationOptions]
           : [...DEFAULT_SHOT_LOCATION_OPTIONS],
       );
     },
-    error: (e) => console.error('shotLocationStore liveQuery error:', e),
-  });
+    (error) => console.error('shotLocationStore profile observation error:', error),
+  );
 }
 
 export const shotLocationOptions: Readable<string[]> = { subscribe: _options.subscribe };

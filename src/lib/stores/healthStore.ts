@@ -1,7 +1,10 @@
 import { browser } from '$app/environment';
 import { derived, writable } from 'svelte/store';
-import { db } from '$lib/db/schema';
-import { onHealthDataChange, type HealthDataChange } from '$lib/domain/repo';
+import {
+  getAllEntries,
+  onHealthDataChange,
+  type HealthDataChange,
+} from '$lib/domain/health-data-storage';
 import type { HealthEntry } from '$lib/domain/types';
 import type { HealthInputRow, HealthSystemAmount } from '$lib/stores/healthTypes';
 import { calculateSystemMgByDrug, KG_PER_LB, type WeighIn } from '$lib/utils/pharmacokinetics';
@@ -64,8 +67,7 @@ if (browser) {
     rawHealthData.update((s) => applyHealthChange(s, change));
   });
 
-  healthStoreReady = db.entries
-    .toArray()
+  healthStoreReady = getAllEntries()
     .then((entries) => {
       let next: RawHealthData = { entries };
       for (const change of pendingChanges) next = applyHealthChange(next, change);

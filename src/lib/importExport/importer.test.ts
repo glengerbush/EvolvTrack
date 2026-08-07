@@ -2,17 +2,21 @@ import { describe, expect, it } from 'vitest';
 import '../../test/dexie-setup';
 import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
-import { addEntry, getAllEntries, getAllPrescriptions, getProfile } from '$lib/domain/repo';
+import {
+  addEntry,
+  applyHealthDataImport,
+  getAllEntries,
+  getAllPrescriptions,
+  getProfile,
+} from '$lib/domain/health-data-storage';
 import { BACKUP_APP_ID, BACKUP_FORMAT_VERSION, BACKUP_KIND } from './backup';
 import {
-  dedupeAgainstExisting,
   emptyImportData,
   importResultSummary,
   importTrackingFile,
   parseTrackingFile,
 } from './importer';
 import type { ImportData } from './shared';
-import type { HealthEntry } from '$lib/domain/types';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)' as const;
 
@@ -229,51 +233,6 @@ describe('importTrackingFile — merge mode', () => {
   });
 });
 
-describe('dedupeAgainstExisting', () => {
-  const weighIn = (date: string, weightLbs?: number): HealthEntry =>
-    ({ id: `w-${date}-${weightLbs ?? 'x'}`, date: iso(date), weightLbs, symptoms: [], createdAt: 'c', updatedAt: 'u' });
-  const dose = (date: string, amountMg: number, medication: string): HealthEntry =>
-    ({ id: `i-${date}-${amountMg}-${medication}`, date: iso(date), amountMg, medication: medication as HealthEntry['medication'], site: '', symptoms: [], createdAt: 'c', updatedAt: 'u' });
-  const data = (over: Partial<ImportData>): ImportData => ({ entries: [], prescriptions: [], ...over });
-
-  it('drops an entry matching an existing day + value, keeps a different value', () => {
-    const result = dedupeAgainstExisting(
-      data({ entries: [weighIn('2026-05-10', 180), weighIn('2026-05-10', 190)] }),
-      { entries: [weighIn('2026-05-10', 180)] },
-    );
-    expect(result.skipped).toBe(1);
-    expect(result.data.entries.map((e) => e.weightLbs)).toEqual([190]);
-  });
-
-  it('drops an exact dose duplicate (day + amount + drug)', () => {
-    const result = dedupeAgainstExisting(
-      data({ entries: [dose('2026-05-10', 5, SEMA)] }),
-      { entries: [dose('2026-05-10', 5, SEMA)] },
-    );
-    expect(result.skipped).toBe(1);
-    expect(result.data.entries).toHaveLength(0);
-  });
-
-  it('keeps a dose with a different medication on the same day at the same amount', () => {
-    const TIRZ = 'Tirzepatide (Mounjaro / Zepbound)';
-    const result = dedupeAgainstExisting(
-      data({ entries: [dose('2026-05-10', 5, TIRZ)] }),
-      { entries: [dose('2026-05-10', 5, SEMA)] },
-    );
-    expect(result.skipped).toBe(0);
-    expect(result.data.entries).toHaveLength(1);
-  });
-
-  it('dedupes identical entries within the same import batch', () => {
-    const result = dedupeAgainstExisting(
-      data({ entries: [weighIn('2026-05-10', 180), weighIn('2026-05-10', 180)] }),
-      { entries: [] },
-    );
-    expect(result.data.entries).toHaveLength(1);
-    expect(result.skipped).toBe(1);
-  });
-});
-
 describe('importTrackingFile — replace mode', () => {
   it('clears existing rows before applying the import', async () => {
     await addEntry({ date: iso('2026-05-01'), weightLbs: 200 });
@@ -366,7 +325,7 @@ describe('importTrackingFile — outbox enqueue', () => {
   it('registers symptoms not in the default palette so imported rows show in the dropdown and persist to the profile', async () => {
     const { DEFAULT_SYMPTOM_COLORS, symptomColors, symptomOptions } =
       await import('$lib/stores/symptomStore');
-    const { getProfile } = await import('$lib/domain/repo');
+    const { getProfile } = await import('$lib/domain/health-data-storage');
     const { get } = await import('svelte/store');
 
     const payload = backupPayload({
@@ -430,13 +389,17 @@ describe('importTrackingFile — outbox enqueue', () => {
   });
 
   it('replace mode does not tombstone an id the import is re-inserting (the upsert wins)', async () => {
-    await db.entries.put({
-      id: 'w-1',
-      date: iso('2026-04-01'),
-      weightLbs: 999,
-      symptoms: [],
-      createdAt: '2026-04-01T00:00:00.000Z',
-      updatedAt: '2026-04-01T00:00:00.000Z',
+    await applyHealthDataImport({
+      mode: 'merge',
+      replaceProfile: false,
+      data: {
+        entries: [{
+          id: 'w-1', date: iso('2026-04-01'), weightLbs: 999, symptoms: [],
+          createdAt: '2026-04-01T00:00:00.000Z',
+          updatedAt: '2026-04-01T00:00:00.000Z',
+        }],
+        prescriptions: [],
+      },
     });
 
     await importTrackingFile(jsonFile('b.json', backupPayload()), 'replace');

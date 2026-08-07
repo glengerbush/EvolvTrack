@@ -12,7 +12,7 @@ const h = vi.hoisted(() => ({
   pullCursor: 'cursor-1' as string | null,
 }));
 
-vi.mock('$lib/domain/repo', () => ({
+vi.mock('$lib/domain/health-data-storage', () => ({
   getProfile: vi.fn(async () => h.profile),
   getProfileSyncMode: vi.fn((profile: { syncMode?: string }) => profile.syncMode ?? 'plain'),
   setLocalProfileSyncState: vi.fn(async (state: Record<string, unknown>) => {

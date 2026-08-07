@@ -6,7 +6,7 @@
   import { importTrackingFile, importResultSummary } from '$lib/importExport/importer';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { claimLicense, fetchLicenseStatus, type LicenseStatusRow } from '$lib/sync/license';
-  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/repo';
+  import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/health-data-storage';
   import { MEDICATIONS, type Medication, type HealthEntry, type Prescription } from '$lib/domain/types';
 
   type Step = 'license' | 'e2ee' | 'import' | 'medication' | 'done';
