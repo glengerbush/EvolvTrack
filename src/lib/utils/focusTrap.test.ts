@@ -48,6 +48,12 @@ describe('focusTrap', () => {
     expect(document.activeElement).toBe(last);
   });
 
+  it('prefers a designated safe initial-focus target', () => {
+    last.setAttribute('data-initial-focus', '');
+    handle = focusTrap(modal);
+    expect(document.activeElement).toBe(last);
+  });
+
   it('wraps Tab from the last element back to the first', () => {
     handle = focusTrap(modal);
     last.focus();
@@ -91,5 +97,27 @@ describe('focusTrap', () => {
     outside.focus();
     tab();
     expect(document.activeElement).toBe(outside);
+  });
+
+  it('lets only the top-most nested modal trap focus', () => {
+    handle = focusTrap(modal);
+
+    const nested = document.createElement('div');
+    nested.setAttribute('tabindex', '-1');
+    const nestedFirst = document.createElement('button');
+    nestedFirst.textContent = 'nested first';
+    const nestedLast = document.createElement('button');
+    nestedLast.textContent = 'nested last';
+    nested.append(nestedFirst, nestedLast);
+    document.body.appendChild(nested);
+
+    const nestedHandle = focusTrap(nested);
+    nestedLast.focus();
+    tab();
+    expect(document.activeElement).toBe(nestedFirst);
+
+    nestedHandle?.destroy();
+    expect(document.activeElement).toBe(first);
+    nested.remove();
   });
 });

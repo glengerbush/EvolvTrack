@@ -8,6 +8,7 @@
   import LogoutFlow from '$lib/components/auth/LogoutFlow.svelte';
   import RecoveryUnlockModal from '$lib/components/sync/RecoveryUnlockModal.svelte';
   import RecoveryCodesModal from '$lib/components/settings/RecoveryCodesModal.svelte';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   // `dismissible` is false when the modal is the app's lock gate: there's no
   // Cancel / Escape / backdrop-close, because the only way past a locked
@@ -105,6 +106,7 @@
     aria-modal="true"
     aria-labelledby="unlock-session-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="unlock-session-title">Unlock encrypted data</h3>
     <p>
@@ -291,7 +293,7 @@
     background: transparent;
     border: none;
     padding: 0;
-    color: var(--brand);
+    color: var(--brand-text);
     font-weight: 500;
     text-decoration: underline;
     cursor: pointer;

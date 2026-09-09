@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
   import InputsTable from '$lib/components/dashboard/tables/InputsTable.svelte';
   import { GridSelection } from '$lib/grid/gridSelection.svelte';
@@ -20,10 +20,11 @@
     CHART,
     GRAPH_SERIES,
     PLOT,
+    type ChartDataRow,
     type ChartXRange,
     type GraphSeriesKey,
   } from '$lib/utils/chartModel';
-  import { localDateKey } from '$lib/utils/dateKeys';
+  import { formatLocaleDate, localDateKey } from '$lib/utils/dateKeys';
   import { buildEfficacyRows } from '$lib/utils/efficacy';
   import { lbsToDisplayNum } from '$lib/utils/format';
   import type { DrugShape } from '$lib/utils/pharmacokinetics';
@@ -75,17 +76,35 @@
   // Viewport width of the scrollable plot area in CSS pixels. Tracked so the
   // chart can compute pixels-per-day from the selected x-range preset.
   let viewportPlotWidth = $state(0);
+  let visibleRangeLabel = $state('');
 
-  function attachViewportObserver(el: HTMLDivElement) {
+  function refreshVisibleRange() {
+    if (!dataScrollEl || !chartModel.hasAnyData) {
+      visibleRangeLabel = '';
+      return;
+    }
+    const start = chartModel.dateForCssX(dataScrollEl.scrollLeft);
+    const end = chartModel.dateForCssX(dataScrollEl.scrollLeft + dataScrollEl.clientWidth);
+    visibleRangeLabel = start === end
+      ? formatLocaleDate(start)
+      : `${formatLocaleDate(start)} – ${formatLocaleDate(end)}`;
+  }
+
+  function attachViewportObserver(el: HTMLButtonElement) {
     dataScrollEl = el;
     viewportPlotWidth = el.clientWidth;
+    const onScroll = () => refreshVisibleRange();
+    el.addEventListener('scroll', onScroll, { passive: true });
     const observer = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 0;
       if (Math.abs(w - viewportPlotWidth) > 0.5) viewportPlotWidth = w;
+      refreshVisibleRange();
     });
     observer.observe(el);
+    queueMicrotask(refreshVisibleRange);
     return {
       destroy() {
+        el.removeEventListener('scroll', onScroll);
         observer.disconnect();
         if (dataScrollEl === el) dataScrollEl = null;
       },
@@ -102,7 +121,29 @@
     onUnsavedChange?: (hasUnsavedChanges: boolean) => void;
   } = $props();
 
+  const GRAPH_INSPECTION_DISMISS_KEY = 'evolvtrack:graphInspectionDismissed';
+
   let isEditingLegend = $state(false);
+  let graphInspectionVisible = $state(false);
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      graphInspectionVisible = localStorage.getItem(GRAPH_INSPECTION_DISMISS_KEY) !== '1';
+    } catch {
+      graphInspectionVisible = true;
+    }
+  });
+
+  function dismissGraphInspection() {
+    graphInspectionVisible = false;
+    try {
+      localStorage.setItem(GRAPH_INSPECTION_DISMISS_KEY, '1');
+    } catch {
+      // Storage unavailable: keep the dismissal for this mounted session.
+    }
+  }
+
   // The inputs table is a single always-editable spreadsheet now (auto-save);
   // the gear toggles its settings (column manager + option managers + the
   // per-row trash gutter), independent of any edit mode.
@@ -114,7 +155,6 @@
   let progressBaseGoalWeightLbs = $state<number | null>($goalWeight);
   let progressDraftUnit = $state<WeightUnit>($weightUnit);
   let progressCardRegion: HTMLElement | null = null;
-  let legendRegion: HTMLElement | null = null;
 
   // Progress card editable cells modelled as a one-column grid: Start Weight is
   // row 0, Goal Weight row 2 of the key/value table; the computed rows between
@@ -157,7 +197,7 @@
     },
     stickyTopSelector: '.tabbar',
   });
-  let dataScrollEl: HTMLDivElement | null = null;
+  let dataScrollEl: HTMLButtonElement | null = null;
   let hasAutoScrolled = false;
   let lastNotifiedUnsavedChanges = false;
   let lastDiscardSignal = getInitialDiscardSignal();
@@ -209,6 +249,12 @@
       viewportPlotWidth > 0 ? viewportPlotWidth : undefined,
     ),
   );
+
+  $effect(() => {
+    chartModel.plotWidth;
+    xRangeChoice;
+    void tick().then(refreshVisibleRange);
+  });
   type LegendItem = {
     key: GraphSeriesKey;
     label: string;
@@ -234,23 +280,64 @@
       }));
     }),
   );
+  const visibleLegendItems = $derived(
+    legendItems.filter(
+      (item) =>
+        !item.hidden &&
+        item.key !== 'weightPrediction',
+    ),
+  );
+  const measurementLegendItems = $derived(
+    legendItems.filter((item) => item.key === 'weight' || item.key === 'wellness' || item.key === 'symptoms'),
+  );
+  const modelLegendItems = $derived(
+    legendItems.filter((item) => item.key === 'weightPrediction' || item.key.startsWith('systemMg')),
+  );
   const showLeftAxis = $derived(!hiddenGraphSeries.has('weight'));
   const hasVisibleSystemSeries = $derived(
     chartModel.systemSeries.some((series) => !hiddenGraphSeries.has(series.key)),
   );
-  const showRightAxis = $derived(
-    hasVisibleSystemSeries || !hiddenGraphSeries.has('wellness'),
-  );
-  const showAnyAxis = $derived(showLeftAxis || showRightAxis);
-  const effectiveLeftTicks = $derived(showLeftAxis ? chartModel.leftTicks : chartModel.rightTicks);
-  const effectiveRightTicks = $derived(showRightAxis ? chartModel.rightTicks : chartModel.leftTicks);
-  const effectiveLeftLabel = $derived(showLeftAxis ? chartModel.leftAxisLabel : chartModel.rightAxisLabel);
-  const effectiveRightLabel = $derived(showRightAxis ? chartModel.rightAxisLabel : chartModel.leftAxisLabel);
+  const showRightAxis = $derived(hasVisibleSystemSeries);
+  const showWellnessBars = $derived(!hiddenGraphSeries.has('wellness'));
+  const mainGridTicks = $derived(showLeftAxis ? chartModel.leftTicks : chartModel.rightTicks);
+
+  type DoseChangeMarker = {
+    key: string;
+    date: string;
+    x: number;
+    label: string;
+    color: string;
+    planned: boolean;
+  };
+  const doseChangeMarkers = $derived.by<DoseChangeMarker[]>(() => {
+    const markers: DoseChangeMarker[] = [];
+    for (const series of chartModel.systemSeries) {
+      if (hiddenGraphSeries.has(series.key)) continue;
+      const points = [
+        ...series.dosePoints.map((point) => ({ ...point, planned: false })),
+        ...series.plannedDosePoints.map((point) => ({ ...point, planned: true })),
+      ].sort((a, b) => a.date.localeCompare(b.date));
+      let previousAmount: number | null = null;
+      for (const point of points) {
+        if (previousAmount === null || Math.abs(point.amountMg - previousAmount) > 0.001) {
+          const drug = chartModel.systemSeries.length > 1 ? ` ${series.label.replace(/ in system$/i, '')}` : '';
+          markers.push({
+            key: `${series.key}:${point.date}`,
+            date: point.date,
+            x: point.x,
+            label: `${point.amountMg} mg${drug}`,
+            color: series.color,
+            planned: point.planned,
+          });
+        }
+        previousAmount = point.amountMg;
+      }
+    }
+    return markers;
+  });
 
   // ---- Crosshair tracking ------------------------------------------------
-  // hoverY is in viewBox / CSS-pixel space (the data-svg's CSS height equals
-  // its viewBox height, so the two are 1:1). hoverDate is snapped to the
-  // nearest day column under the cursor.
+  // hoverY is converted into viewBox space. hoverDate snaps to the nearest day.
   let hoverY = $state<number | null>(null);
   let hoverDate = $state<import('$lib/domain/types').IsoDate | null>(null);
   // Anchored at the hovered marker; `entries` is every dose marker overlapping
@@ -265,7 +352,7 @@
   const crosshairActive = $derived(hoverY !== null && hoverDate !== null);
   // The crosshair arms snap to the hovered day's actual data instead of floating
   // at the cursor's y: the left arm to that day's weight, the right arm to its
-  // total mg-in-system (or wellness). The cursor only chooses the day (nearest
+  // total mg-in-system. The cursor only chooses the day (nearest
   // column) and gates whether we're over the plot. Each side is null when its
   // series/axis is hidden or the day has no value there, so an arm simply
   // disappears rather than dangling at the cursor.
@@ -273,15 +360,54 @@
     crosshairActive && hoverDate ? chartModel.crosshairSnap(hoverDate) : null,
   );
   const snapLeft = $derived(showLeftAxis ? crosshairData?.left ?? null : null);
-  // One arm per visible drug (or wellness) on the right axis.
+  // One arm per visible drug on the right axis.
   const snapRightArms = $derived(showRightAxis ? crosshairData?.right ?? [] : []);
   const showMedicationInTooltip = $derived(chartModel.systemSeries.length > 1);
+
+  const selectedGraphRow = $derived(
+    hoverDate ? chartModel.dataRows.find((row) => row.date === hoverDate) ?? null : null,
+  );
+
+  function formatDoseValues(row: ChartDataRow): string {
+    return row.doses.length
+      ? row.doses.map((dose) => `${dose.amountMg} mg ${dose.medication}${dose.planned ? ' (planned)' : ''}`).join(', ')
+      : '—';
+  }
+
+  function formatSystemValues(row: ChartDataRow): string {
+    const values = row.system
+      .filter((value) => value.value >= 0.05)
+      .map((value) => `${value.label}: ${value.value.toFixed(1)} mg`);
+    return values.length ? values.join(', ') : '—';
+  }
+
+  function formatGraphDaySummary(row: ChartDataRow): string {
+    const parts = [formatLocaleDate(row.date)];
+    if (row.weight !== null && !hiddenGraphSeries.has('weight')) {
+      parts.push(`Weight ${row.weight.toFixed(1)} ${$weightUnit}`);
+    }
+    const doses = formatDoseValues(row);
+    if (doses !== '—') parts.push(`Dose ${doses}`);
+    const system = formatSystemValues(row);
+    if (system !== '—' && hasVisibleSystemSeries) parts.push(system);
+    if (row.wellness !== null && showWellnessBars) {
+      parts.push(`Wellness ${row.wellness.toFixed(1)} of 10${row.wellnessPlanned ? ' planned' : ''}`);
+    }
+    if (row.symptoms.length && !hiddenGraphSeries.has('symptoms')) {
+      parts.push(`Symptoms ${row.symptoms.join(', ')}`);
+    }
+    return parts.join(' · ');
+  }
+
+  const graphDaySummary = $derived(
+    selectedGraphRow ? formatGraphDaySummary(selectedGraphRow) : 'Focus the graph and use Left or Right Arrow to inspect each day.',
+  );
 
   function setCrosshairFromClient(clientX: number, clientY: number) {
     if (!dataScrollEl || !chartModel.hasAnyData) return;
     const rect = dataScrollEl.getBoundingClientRect();
     const cssX = clientX - rect.left + dataScrollEl.scrollLeft;
-    const cssY = clientY - rect.top;
+    const cssY = ((clientY - rect.top) * CHART.height) / rect.height;
     if (cssY < PLOT.top || cssY > PLOT.bottom) {
       hoverY = null;
       hoverDate = null;
@@ -293,12 +419,53 @@
 
   function onPlotMouseMove(event: MouseEvent) {
     setCrosshairFromClient(event.clientX, event.clientY);
+    setHoverDoseFromClient(event.clientX, event.clientY);
   }
 
   function clearCrosshair() {
     hoverY = null;
     hoverDate = null;
     hoverDose = null;
+  }
+
+  function onPlotMouseLeave() {
+    hoverDose = null;
+    if (document.activeElement !== dataScrollEl) clearCrosshair();
+  }
+
+  function selectGraphDate(date: import('$lib/domain/types').IsoDate) {
+    hoverDate = date;
+    hoverY = PLOT.top + PLOT.height / 2;
+    if (!dataScrollEl) return;
+    const x = chartModel.cssXForDate(date);
+    const left = dataScrollEl.scrollLeft;
+    const right = left + dataScrollEl.clientWidth;
+    const edgePad = 28;
+    if (x < left + edgePad) dataScrollEl.scrollLeft = Math.max(0, x - edgePad);
+    else if (x > right - edgePad) dataScrollEl.scrollLeft = x - dataScrollEl.clientWidth + edgePad;
+  }
+
+  function focusGraph() {
+    if (hoverDate || !chartModel.dataRows.length) return;
+    selectGraphDate(chartModel.dataRows.at(-1)!.date);
+  }
+
+  function onPlotKeydown(event: KeyboardEvent) {
+    if (!chartModel.dataRows.length) return;
+    const currentIndex = hoverDate
+      ? Math.max(0, chartModel.dataRows.findIndex((row) => row.date === hoverDate))
+      : chartModel.dataRows.length - 1;
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowLeft') nextIndex = Math.max(0, currentIndex - 1);
+    else if (event.key === 'ArrowRight') nextIndex = Math.min(chartModel.dataRows.length - 1, currentIndex + 1);
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = chartModel.dataRows.length - 1;
+    else if (event.key === 'Escape') {
+      clearCrosshair();
+      return;
+    } else return;
+    event.preventDefault();
+    selectGraphDate(chartModel.dataRows[nextIndex].date);
   }
 
   // ── Touch ────────────────────────────────────────────────────────────────
@@ -318,13 +485,8 @@
     const heldMs = performance.now() - touchTapStart.t;
     touchTapStart = null;
     if (moved > 10 || heldMs > 500) return; // it was a scroll/drag, not a tap
-    hoverDose = null; // tapping the plot background dismisses a dot tooltip
     setCrosshairFromClient(event.clientX, event.clientY);
-  }
-  function showDoseTooltipOnTouch(event: PointerEvent, x: number, y: number) {
-    if (event.pointerType === 'mouse') return; // mouse uses hover (enter/leave)
-    event.stopPropagation(); // don't let the plot's tap handler clear it
-    setHoverDoseCluster(x, y);
+    setHoverDoseFromClient(event.clientX, event.clientY);
   }
 
   // Markers within this many px of each other count as overlapping — hovering any
@@ -335,6 +497,20 @@
       .filter((m) => Math.hypot(m.x - x, m.y - y) <= DOSE_OVERLAP_PX)
       .map((m) => ({ label: m.label, color: m.color }));
     hoverDose = entries.length ? { x, y, entries } : null;
+  }
+
+  function setHoverDoseFromClient(clientX: number, clientY: number) {
+    if (!dataScrollEl) return;
+    const rect = dataScrollEl.getBoundingClientRect();
+    const x = clientX - rect.left + dataScrollEl.scrollLeft + PLOT.left;
+    const y = ((clientY - rect.top) * CHART.height) / rect.height;
+    const nearest = doseMarkers.reduce<(typeof doseMarkers)[number] | null>((best, marker) => {
+      if (Math.hypot(marker.x - x, marker.y - y) > DOSE_OVERLAP_PX) return best;
+      if (!best) return marker;
+      return Math.hypot(marker.x - x, marker.y - y) < Math.hypot(best.x - x, best.y - y) ? marker : best;
+    }, null);
+    if (nearest) setHoverDoseCluster(nearest.x, nearest.y);
+    else hoverDose = null;
   }
 
   // Dismiss a touch-opened crosshair / dose tooltip when tapping outside the plot.
@@ -550,27 +726,6 @@
     progressGrid.editing = false;
   }
 
-  function handleProgressCommitKeydown(event: KeyboardEvent) {
-    if (
-      event.key !== 'Enter' ||
-      event.isComposing ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey
-    ) {
-      return;
-    }
-
-    if (!(event.target instanceof Node)) return;
-
-    // Legend toggles save live, so Enter just closes edit mode.
-    if (isEditingLegend && legendRegion?.contains(event.target)) {
-      event.preventDefault();
-      isEditingLegend = false;
-    }
-  }
-
   function requestInputRow() {
     addInputRowSignal += 1;
   }
@@ -585,18 +740,32 @@
   }
 </script>
 
-<svelte:document onkeydown={handleProgressCommitKeydown} />
+{#snippet legendVisual(item: LegendItem)}
+  <span class={['legend-visual', { muted: item.hidden }]}>
+    {#if item.shape}
+      <svg class="swatch-system-svg" viewBox="-14 -5 28 10" aria-hidden="true">
+        <line x1="-14" x2="14" y1="0" y2="0" style:stroke={item.color} stroke-width="3" stroke-linecap="round" />
+        <path d={shapePath(item.shape)} style:fill={item.color} style:stroke="var(--surface)" stroke-width="1.2" />
+      </svg>
+    {:else}
+      <span class={item.className} style:--swatch-color={item.color}></span>
+    {/if}
+    <span>{item.label}</span>
+  </span>
+{/snippet}
 
 <main class="content">
   <section class="panel-grid">
     <article class="card chart-card">
       <div class="chip-row">
-        <h2 class="section-chip">Overview</h2>
-        <EditPencil
-          ariaLabel="Edit graph legend"
-          active={isEditingLegend}
+        <h2 class="section-chip">Health trends</h2>
+        <button
+          type="button"
+          class={['series-button', { active: isEditingLegend }]}
+          aria-expanded={isEditingLegend}
+          aria-controls="graph-series-controls"
           onclick={() => (isEditingLegend = !isEditingLegend)}
-        />
+        >{isEditingLegend ? 'Done' : 'Series'}</button>
         <div class="x-range-selector" role="group" aria-label="Graph time range">
           {#each X_RANGE_PRESETS as preset (preset.key)}
             <button
@@ -611,61 +780,68 @@
           {/each}
         </div>
       </div>
-      <div class="graph-legend" aria-label="Graph legend" bind:this={legendRegion}>
-        {#each legendItems as item (item.key)}
-          {#if (isEditingLegend || !item.hidden) && (item.key !== 'weightPrediction' || !hiddenGraphSeries.has('weight'))}
-            <label class={['legend-item', { editing: isEditingLegend }]}>
-              <span class={['legend-visual', { muted: item.hidden }]}>
-                {#if item.shape}
-                  <svg
-                    class="swatch-system-svg"
-                    viewBox="-14 -5 28 10"
-                    aria-hidden="true"
-                  >
-                    <line x1="-14" x2="14" y1="0" y2="0" style:stroke={item.color} stroke-width="3" stroke-linecap="round"/>
-                    <path d={shapePath(item.shape)} style:fill={item.color} style:stroke="var(--surface)" stroke-width="1.2"/>
-                  </svg>
-                {:else}
-                  <span class={item.className} style:--swatch-color={item.color}></span>
-                {/if}
-                <span>{item.label}</span>
-              </span>
-              {#if isEditingLegend}
-                <input
-                  type="checkbox"
-                  checked={!item.hidden}
-                  onchange={() => toggleGraphSeries(item.key)}
-                />
-              {/if}
-            </label>
-          {/if}
+      <div class="graph-legend" aria-label="Graph legend">
+        {#each visibleLegendItems as item (item.key)}
+          <span class="legend-item">{@render legendVisual(item)}</span>
         {/each}
       </div>
+      <div class="graph-meta">
+        <div class="state-key" aria-label="Graph data states">
+          <span><i class="state-line recorded"></i>Recorded</span>
+          <span><i class="state-line planned"></i>Planned</span>
+          <span><i class="state-line forecast"></i>Forecast</span>
+        </div>
+        {#if visibleRangeLabel}<output class="visible-range">{visibleRangeLabel}</output>{/if}
+      </div>
+      {#if isEditingLegend}
+        <div class="series-controls" id="graph-series-controls">
+          <fieldset>
+            <legend>Measurements</legend>
+            {#each measurementLegendItems as item (item.key)}
+              <label class="series-option">
+                <input type="checkbox" checked={!item.hidden} onchange={() => toggleGraphSeries(item.key)} />
+                {@render legendVisual(item)}
+              </label>
+            {/each}
+          </fieldset>
+          <fieldset>
+            <legend>Medication models</legend>
+            {#each modelLegendItems as item (item.key)}
+              <label class="series-option">
+                <input type="checkbox" checked={!item.hidden} onchange={() => toggleGraphSeries(item.key)} />
+                {@render legendVisual(item)}
+              </label>
+            {/each}
+          </fieldset>
+        </div>
+      {/if}
       <div class="plot-wrap">
         <!-- Fixed left axis -->
-        {#if showAnyAxis}
+        {#if showLeftAxis}
         <svg
           class="axis-svg"
           viewBox={`0 0 ${CHART.margin.left} ${CHART.height}`}
           aria-hidden="true"
         >
-          <g class="axes">
-            <line x1={CHART.margin.left - 1} x2={CHART.margin.left - 1} y1={PLOT.top} y2={PLOT.bottom} />
-          </g>
-          <g class="axis-labels">
-            {#each effectiveLeftTicks as tick (tick.value)}
-              <text x={CHART.margin.left - 6} y={tick.y + 4} text-anchor="end">{tick.label}</text>
-            {/each}
-            <text
-              class="axis-title left-title"
-              x={16}
-              y={(PLOT.top + PLOT.bottom) / 2}
-              transform={`rotate(-90 16 ${(PLOT.top + PLOT.bottom) / 2})`}
-              text-anchor="middle"
-            >
-              {effectiveLeftLabel}
-            </text>
-          </g>
+          {#if showLeftAxis}
+            <g class="axes">
+              <line x1={CHART.margin.left} x2={CHART.margin.left} y1={PLOT.top} y2={PLOT.bottom} />
+            </g>
+            <g class="axis-labels">
+              {#each chartModel.leftTicks as tick (tick.value)}
+                <text x={CHART.margin.left - 6} y={tick.y + 4} text-anchor="end">{tick.label}</text>
+              {/each}
+              <text
+                class="axis-title left-title"
+                x={16}
+                y={(PLOT.top + PLOT.bottom) / 2}
+                transform={`rotate(-90 16 ${(PLOT.top + PLOT.bottom) / 2})`}
+                text-anchor="middle"
+              >
+                {chartModel.leftAxisLabel}
+              </text>
+            </g>
+          {/if}
 
           {#if crosshairActive && snapLeft}
             <line
@@ -698,13 +874,18 @@
         </svg>
         {/if}
 
-        <!-- Scrollable data area -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
+        <!-- Scrollable, keyboard-explorable data area. -->
+        <button
+          type="button"
           class="data-scroll"
           use:attachViewportObserver
+          aria-label="Interactive health trends graph"
+          aria-describedby="graph-instructions graph-day-summary"
+          tabindex="0"
+          onfocus={focusGraph}
+          onkeydown={onPlotKeydown}
           onmousemove={onPlotMouseMove}
-          onmouseleave={clearCrosshair}
+          onmouseleave={onPlotMouseLeave}
           onpointerdown={onPlotPointerDown}
           onpointerup={onPlotPointerUp}
         >
@@ -712,8 +893,8 @@
             class="data-svg"
             viewBox={`${CHART.margin.left} 0 ${chartModel.plotWidth} ${CHART.height}`}
             style:width={`${chartModel.plotWidth}px`}
-            role="img"
-            aria-label="Health graph with weight, medication in system, wellness, and symptoms over time"
+            aria-hidden="true"
+            focusable="false"
           >
             <defs>
               <clipPath id="health-chart-clip">
@@ -725,9 +906,36 @@
 
             <rect class="plot-bg" x={PLOT.left} y={PLOT.top} width={chartModel.plotWidth} height={PLOT.height} />
 
-            {#if showAnyAxis}
+            {#if showWellnessBars}
+              <g class="wellness-bars" clip-path="url(#health-chart-clip)">
+                {#each chartModel.wellnessStacks as stack (stack.date)}
+                  <g class={['wellness-stack', { planned: stack.planned, active: hoverDate === stack.date }]}>
+                    {#each stack.segments as segment (segment.index)}
+                      <rect
+                        class="wellness-slot"
+                        x={segment.x}
+                        y={segment.y}
+                        width={segment.width}
+                        height={segment.height}
+                      />
+                      {#if segment.fillHeight > 0}
+                        <rect
+                          class="wellness-fill"
+                          x={segment.x}
+                          y={segment.y + segment.height - segment.fillHeight}
+                          width={segment.width}
+                          height={segment.fillHeight}
+                        />
+                      {/if}
+                    {/each}
+                  </g>
+                {/each}
+              </g>
+            {/if}
+
+            {#if showLeftAxis || showRightAxis}
               <g class="grid-lines">
-                {#each effectiveLeftTicks as tick (tick.value)}
+                {#each mainGridTicks as tick (tick.value)}
                   <line
                     x1={PLOT.left}
                     x2={chartModel.plotRight}
@@ -746,62 +954,45 @@
                 y1={PLOT.top}
                 y2={PLOT.bottom}
               />
+              <text
+                class="today-label"
+                x={chartModel.todayX > chartModel.plotRight - 40 ? chartModel.todayX - 5 : chartModel.todayX + 5}
+                y={PLOT.top + 12}
+                text-anchor={chartModel.todayX > chartModel.plotRight - 40 ? 'end' : 'start'}
+              >Today</text>
             {/if}
 
-            <!-- x-axis baseline drawn before the data so markers (especially
-                 0mg dose dots on the axis) paint on top of it, not behind. -->
+            {#each doseChangeMarkers as marker (marker.key)}
+              <g class:planned={marker.planned} class="dose-change" style:--system-color={marker.color}>
+                <line x1={marker.x} x2={marker.x} y1={PLOT.top} y2={PLOT.bottom} />
+                <text x={marker.x + 4} y={PLOT.top + 25}>{marker.label}</text>
+              </g>
+            {/each}
+
             <g class="axes">
+              <line x1={PLOT.left} x2={chartModel.plotRight} y1={PLOT.top} y2={PLOT.top} />
               <line x1={PLOT.left} x2={chartModel.plotRight} y1={PLOT.bottom} y2={PLOT.bottom} />
             </g>
 
             <g clip-path="url(#health-chart-clip)">
-              {#if !hiddenGraphSeries.has('wellness')}
-                {#each chartModel.wellnessStacks as stack (stack.date)}
-                  {#if stack.blocks.length}
-                    <g role="img" aria-label={`Wellness ${stack.value} on ${stack.date}${stack.planned ? ' (planned)' : ''}`}>
-                      {#each stack.blocks as block (block.index)}
-                        <rect
-                          class="wellness-bar"
-                          class:planned={stack.planned}
-                          x={block.x}
-                          y={block.y}
-                          width={block.width}
-                          height={block.height}
-                        />
-                      {/each}
-                    </g>
-                  {/if}
-                {/each}
-              {/if}
-
               {#each chartModel.systemSeries as series (series.key)}
                 {#if !hiddenGraphSeries.has(series.key)}
                   <path d={series.actualPath} class="system-line" style:--system-color={series.color} />
-                  <path d={series.predictionPath} class="system-line dashed" style:--system-color={series.color} />
+                  <path d={series.predictionPath} class="system-line forecast" style:--system-color={series.color} />
                   {#each series.dosePoints as dot (dot.date)}
                     <path
                       class="dose-point"
-                      role="img"
-                      aria-label={doseTooltipText(dot)}
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
-                      onmouseenter={() => setHoverDoseCluster(dot.x, dot.y)}
-                      onmouseleave={() => (hoverDose = null)}
-                      onpointerdown={(e) => showDoseTooltipOnTouch(e, dot.x, dot.y)}
                     />
                   {/each}
                   {#each series.plannedDosePoints as dot (dot.date)}
                     <path
                       class="dose-point planned"
-                      role="img"
-                      aria-label={`${doseTooltipText(dot)} (planned)`}
                       d={shapePath(series.shape)}
                       transform={`translate(${dot.x} ${dot.y})`}
                       style:--system-color={series.color}
-                      onmouseenter={() => setHoverDoseCluster(dot.x, dot.y)}
-                      onmouseleave={() => (hoverDose = null)}
-                      onpointerdown={(e) => showDoseTooltipOnTouch(e, dot.x, dot.y)}
                     />
                   {/each}
                 {/if}
@@ -809,14 +1000,14 @@
 
               {#if !hiddenGraphSeries.has('weight')}
                 <polyline points={chartModel.weightActualPath} class="weightline" />
-                <polyline points={chartModel.weightFuturePath} class="weightline dashed" />
+                <polyline points={chartModel.weightFuturePath} class="weightline planned" />
                 {#each chartModel.weightPoints as point (point.date)}
                   <circle class="weight-point" class:planned={point.planned} cx={point.x} cy={point.y} r="3.2" />
                 {/each}
               {/if}
 
               {#if !hiddenGraphSeries.has('weightPrediction') && !hiddenGraphSeries.has('weight')}
-                <polyline points={chartModel.weightPredictionPath} class="weightline dashed" />
+                <polyline points={chartModel.weightPredictionPath} class="weightline forecast" />
               {/if}
             </g>
 
@@ -863,11 +1054,7 @@
               {/each}
             </g>
 
-            <!-- Crosshair: vertical line snapped to the nearest day. Each
-                 horizontal arm snaps to that day's data — the left arm to weight,
-                 the right arm to mg-in-system — meeting the vertical line at the
-                 actual data points (marked with a dot). The vertical line gets an
-                 extra date label below the axis when it lands between ticks. -->
+            <!-- One date cursor spans every synchronized track. -->
             {#if crosshairActive && hoverDate}
               {@const xhX = chartModel.cssXForDate(hoverDate) + CHART.margin.left}
               <line
@@ -943,20 +1130,20 @@
               </text>
             {/if}
           </svg>
-        </div>
+        </button>
 
         <!-- Fixed right axis -->
-        {#if showAnyAxis}
+        {#if showRightAxis}
           <svg
             class="axis-svg"
             viewBox={`0 0 ${CHART.margin.right} ${CHART.height}`}
             aria-hidden="true"
           >
             <g class="axes">
-              <line x1={1} x2={1} y1={PLOT.top} y2={PLOT.bottom} />
+              <line x1={0} x2={0} y1={PLOT.top} y2={PLOT.bottom} />
             </g>
             <g class="axis-labels">
-              {#each effectiveRightTicks as tick (tick.value)}
+              {#each chartModel.rightTicks as tick (tick.value)}
                 <text x={5} y={tick.y + 4}>{tick.label}</text>
               {/each}
               <text
@@ -966,7 +1153,7 @@
                 transform={`rotate(90 ${CHART.margin.right - 16} ${(PLOT.top + PLOT.bottom) / 2})`}
                 text-anchor="middle"
               >
-                {effectiveRightLabel}
+                {chartModel.rightAxisLabel}
               </text>
             </g>
 
@@ -1016,6 +1203,20 @@
           </svg>
         {/if}
       </div>
+      {#if graphInspectionVisible}
+        <div class="graph-inspection" role="region" aria-label="Graph inspection">
+          <span class="graph-inspection-dismiss">
+            <DismissButton ariaLabel="Dismiss graph inspection" onclick={dismissGraphInspection} />
+          </span>
+          <p id="graph-instructions">Point, tap, or focus the graph. Use Left and Right Arrow to move by day.</p>
+          <output id="graph-day-summary" aria-live="polite">{graphDaySummary}</output>
+        </div>
+      {:else}
+        <div class="graph-inspection-sr">
+          <p id="graph-instructions">Point, tap, or focus the graph. Use Left and Right Arrow to move by day.</p>
+          <output id="graph-day-summary" aria-live="polite">{graphDaySummary}</output>
+        </div>
+      {/if}
     </article>
 
     <div class="right-col">
@@ -1254,7 +1455,7 @@
     margin-bottom: 0.35rem;
   }
 
-  /* Keep the Overview range selector on the same line as the chip/pencil even
+  /* Keep the title, series disclosure, and range selector on one desktop line
    * at narrow desktop widths, rather than wrapping it below. */
   .chart-card .chip-row {
     flex-wrap: nowrap;
@@ -1281,6 +1482,7 @@
     border-radius: 6px;
     cursor: pointer;
     line-height: 1;
+    min-height: 2rem;
     color: color-mix(in oklab, var(--text) 65%, transparent);
   }
 
@@ -1336,10 +1538,22 @@
     background: color-mix(in oklab, var(--headerBg) 96%, #f2ca67 4%);
   }
 
-  /* The EditPencil child component is a pill by default; in every health-tab
-   * chip row it takes the same flat-bottom tab shape as the section chip. */
-  .chip-row :global(.edit-pencil) {
+  .series-button {
+    min-height: 2rem;
+    border: 0;
     border-radius: 10px 10px 0 0;
+    padding: 0.35rem 0.7rem;
+    background: color-mix(in oklab, var(--headerBg) 88%, white 12%);
+    color: var(--headerText);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 750;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 16%, transparent 84%);
+  }
+
+  .series-button.active {
+    background: color-mix(in oklab, var(--headerBg) 96%, #f2ca67 4%);
   }
 
 
@@ -1380,10 +1594,55 @@
   .graph-legend {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     flex-wrap: wrap;
-    gap: 0.35rem 0.65rem;
-    margin-bottom: 0.35rem;
+    gap: 0.55rem 1rem;
+    padding: 0.5rem 0.15rem 0.55rem;
+  }
+
+  .graph-meta {
+    min-height: 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin: 0 0 0.35rem;
+    padding: 0.45rem 0.15rem 0;
+    border-top: 1px solid color-mix(in oklab, var(--cardBorder) 48%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 650;
+  }
+
+  .state-key,
+  .state-key span {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .state-key {
+    gap: 0.65rem;
+  }
+
+  .state-key span {
+    gap: 0.25rem;
+  }
+
+  .state-line {
+    width: 1.15rem;
+    border-top: 2px solid currentColor;
+  }
+
+  .state-line.planned {
+    border-top-style: dashed;
+  }
+
+  .state-line.forecast {
+    border-top-style: dotted;
+  }
+
+  .visible-range {
+    text-align: right;
   }
 
   .legend-item {
@@ -1398,13 +1657,6 @@
     border-radius: 7px;
   }
 
-  .legend-item.editing {
-    cursor: pointer;
-    padding: 0.22rem 0.4rem 0.22rem 0.38rem;
-    border: 1.5px solid color-mix(in oklab, var(--cardBorder) 50%, transparent 50%);
-    background: color-mix(in oklab, var(--surface) 55%, transparent);
-  }
-
   .legend-visual {
     display: inline-flex;
     align-items: center;
@@ -1415,13 +1667,54 @@
     opacity: 0.38;
   }
 
-  .legend-item input[type='checkbox'] {
+  .series-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin: 0.35rem 0 0.5rem;
+    padding: 0.6rem;
+    border-radius: 10px;
+    background: color-mix(in oklab, var(--surface) 82%, var(--headerBg) 18%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 40%, transparent);
+  }
+
+  .series-controls fieldset {
+    min-width: 0;
     margin: 0;
-    flex-shrink: 0;
-    accent-color: var(--accent);
+    padding: 0;
+    border: 0;
+  }
+
+  .series-controls legend {
+    margin-bottom: 0.3rem;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .series-option {
+    min-height: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.2rem 0.3rem;
+    border-radius: 7px;
+    color: var(--text);
     cursor: pointer;
-    width: 0.9rem;
-    height: 0.9rem;
+  }
+
+  .series-option:hover {
+    background: color-mix(in oklab, var(--headerBg) 10%, transparent);
+  }
+
+  .series-option input {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
   }
 
   .swatch-line {
@@ -1431,13 +1724,28 @@
     display: inline-block;
   }
 
+  .swatch-bar {
+    display: inline-block;
+    width: 0.72rem;
+    height: 0.82rem;
+    border: 1px solid color-mix(in oklab, var(--wellnessBar) 54%, transparent);
+  }
+
   .swatch-weight,
   .swatch-weight-prediction {
     border-top-color: var(--weight-color);
   }
 
   .swatch-weight-prediction {
-    border-top-style: dashed;
+    border-top-style: dotted;
+  }
+
+  .swatch-wellness {
+    background: linear-gradient(
+      to top,
+      color-mix(in oklab, var(--wellnessBar) 72%, var(--surface) 28%) 0 54%,
+      transparent 54%
+    );
   }
 
   .swatch-system {
@@ -1450,14 +1758,6 @@
     overflow: visible;
     display: inline-block;
     flex-shrink: 0;
-  }
-
-  .swatch-bar {
-    width: 0.62rem;
-    height: 0.9rem;
-    border-radius: 3px 3px 0 0;
-    background: var(--wellnessBar);
-    display: inline-block;
   }
 
   .swatch-dot {
@@ -1485,7 +1785,7 @@
   .axis-svg {
     flex-shrink: 0;
     display: block;
-    height: 440px;
+    height: 400px;
     max-width: none;
     /* Let the crosshair chip render outside the gutter's width. */
     overflow: visible;
@@ -1494,13 +1794,58 @@
   .data-scroll {
     flex: 1;
     min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: initial;
     overflow-x: auto;
     overflow-y: hidden;
+    overscroll-behavior-x: none;
+    overscroll-behavior-inline: none;
+    outline: none;
+    scrollbar-width: thin;
+    scrollbar-color:
+      color-mix(in oklab, var(--headerBg) 66%, var(--surface) 34%)
+      color-mix(in oklab, var(--cardBorder) 18%, transparent);
+  }
+
+  .data-scroll::-webkit-scrollbar {
+    height: 0.55rem;
+  }
+
+  .data-scroll::-webkit-scrollbar-track {
+    margin-inline: 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--cardBorder) 18%, transparent);
+  }
+
+  .data-scroll::-webkit-scrollbar-thumb {
+    min-width: 2.5rem;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--headerBg) 66%, var(--surface) 34%);
+    background-clip: padding-box;
+  }
+
+  .data-scroll::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--headerBg) 82%, var(--surface) 18%);
+    background-clip: padding-box;
+  }
+
+  .data-scroll::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  .data-scroll:focus-visible {
+    box-shadow: inset 0 0 0 3px var(--accent);
   }
 
   .data-svg {
     display: block;
-    height: 440px;
+    height: 400px;
     max-width: none;
   }
 
@@ -1535,8 +1880,13 @@
     stroke-linejoin: round;
   }
 
-  .dashed {
+  .weightline.planned {
     stroke-dasharray: 8 7;
+  }
+
+  .weightline.forecast,
+  .system-line.forecast {
+    stroke-dasharray: 2 7;
   }
 
   .weight-point {
@@ -1563,17 +1913,58 @@
     stroke-width: 1.5;
   }
 
-  .wellness-bar {
-    fill: color-mix(in oklab, var(--wellnessBar) 78%, white 22%);
-    opacity: 0.72;
+  .wellness-stack {
+    opacity: 0.62;
+    pointer-events: none;
   }
 
-  .wellness-bar.planned {
-    fill: none;
-    stroke: color-mix(in oklab, var(--wellnessBar) 78%, white 22%);
-    stroke-width: 1.5;
-    stroke-dasharray: 3 2;
-    opacity: 0.85;
+  .wellness-slot {
+    fill: color-mix(in oklab, var(--wellnessBar) 3%, transparent);
+    stroke: color-mix(in oklab, var(--wellnessBar) 22%, transparent);
+    stroke-width: 0.7;
+  }
+
+  .wellness-fill {
+    fill: color-mix(in oklab, var(--wellnessBar) 70%, var(--surface) 30%);
+    stroke: color-mix(in oklab, var(--wellnessBar) 78%, var(--surface) 22%);
+    stroke-width: 0.65;
+  }
+
+  .wellness-stack.active {
+    opacity: 0.92;
+  }
+
+  .wellness-stack.active .wellness-slot {
+    stroke: color-mix(in oklab, var(--wellnessBar) 58%, transparent);
+  }
+
+  .wellness-stack.planned .wellness-fill {
+    fill: transparent;
+    stroke: var(--wellnessBar);
+    stroke-width: 1.2;
+    stroke-dasharray: 2 2;
+  }
+
+  .dose-change line {
+    stroke: color-mix(in oklab, var(--system-color) 34%, transparent);
+    stroke-width: 1;
+    pointer-events: none;
+  }
+
+  .dose-change text {
+    fill: var(--system-color);
+    font-size: 0.66rem;
+    font-weight: 800;
+  }
+
+  .dose-change.planned line {
+    stroke-dasharray: 5 5;
+  }
+
+  .today-label {
+    fill: var(--text);
+    font-size: 0.66rem;
+    font-weight: 800;
   }
 
   .today-line {
@@ -1687,6 +2078,53 @@
     fill: color-mix(in oklab, var(--text) 65%, transparent 35%);
     font-size: 0.9rem;
     font-weight: 700;
+  }
+
+  .graph-inspection {
+    position: relative;
+    display: grid;
+    gap: 0.25rem;
+    margin-top: 0.3rem;
+    padding: 0.45rem 3rem 0.45rem 0.55rem;
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--surface) 78%, var(--headerBg) 22%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cardBorder) 34%, transparent);
+  }
+
+  .graph-inspection p,
+  .graph-inspection output {
+    margin: 0;
+  }
+
+  .graph-inspection p {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+  }
+
+  .graph-inspection output {
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 750;
+    line-height: 1.35;
+  }
+
+  .graph-inspection-dismiss {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.55rem;
+    color: var(--text-secondary);
+  }
+
+  .graph-inspection-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .right-col {
@@ -1824,6 +2262,69 @@
    * the chips fall back to the same spaced-above look as the Overview/Progress
    * chips. */
   @media (max-width: 640px) {
+    .chart-card .chip-row {
+      flex-wrap: wrap;
+    }
+
+    .x-range-selector {
+      order: 3;
+      width: 100%;
+      margin-left: 0;
+    }
+
+    .x-range-btn {
+      flex: 1;
+      min-height: 44px;
+    }
+
+    .series-button {
+      min-height: 44px;
+    }
+
+    .graph-legend {
+      gap: 0.6rem 0.9rem;
+      padding-block: 0.6rem 0.65rem;
+    }
+
+    .graph-meta {
+      flex-wrap: wrap;
+    }
+
+    .visible-range {
+      width: 100%;
+      text-align: left;
+    }
+
+    .series-controls {
+      grid-template-columns: 1fr;
+    }
+
+    .plot-wrap {
+      margin-inline: -0.25rem;
+    }
+
+    .axis-svg,
+    .data-svg {
+      height: 340px;
+    }
+
+    .axis-labels text {
+      font-size: 0.86rem;
+    }
+
+    .axis-labels .axis-title {
+      font-size: 0.88rem;
+    }
+
+    .today-label,
+    .dose-change text {
+      font-size: 0.76rem;
+    }
+
+    .symptom-letter {
+      font-size: 0.7rem;
+    }
+
     .inputs-card .chip-row {
       --tab-skirt: 1rem;
       align-items: stretch;
@@ -1852,6 +2353,19 @@
       padding: 0 0 var(--tab-skirt);
       margin-bottom: calc(-1 * var(--tab-skirt));
       box-shadow: none;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .series-button,
+    .x-range-btn,
+    .series-option {
+      min-height: 44px;
+    }
+
+    .series-option input {
+      width: 1.15rem;
+      height: 1.15rem;
     }
   }
 

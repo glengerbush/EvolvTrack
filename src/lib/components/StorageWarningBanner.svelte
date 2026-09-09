@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import {
     storageHealth,
     storageWarningDismissed,
@@ -33,13 +34,7 @@
         </span>
       {/if}
     </div>
-    <button
-      class="dismiss"
-      type="button"
-      aria-label="Dismiss storage warning"
-      title="Dismiss"
-      onclick={dismissStorageWarning}
-    >×</button>
+    <DismissButton ariaLabel="Dismiss storage warning" onclick={dismissStorageWarning} />
   </div>
 {/if}
 
@@ -62,22 +57,4 @@
   .text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
   .text strong { font-weight: 700; }
   .text span { color: color-mix(in oklab, currentColor 78%, transparent); }
-  .dismiss {
-    flex-shrink: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    display: grid;
-    place-items: center;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: inherit;
-    font-size: 1.2rem;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .dismiss:hover,
-  .dismiss:focus-visible {
-    background: color-mix(in oklab, currentColor 12%, transparent);
-  }
 </style>

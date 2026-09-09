@@ -33,7 +33,7 @@ function addCalendarMonths(dateKey: IsoDate, months: number): IsoDate {
 const doses = (entries: HealthEntry[]) => entries.filter((e) => e.amountMg != null);
 
 describe('seedDemoData', () => {
-  it('populates one entry per day in the rolling one-month window, each with a weigh-in', async () => {
+  it('populates one entry per day while leaving the planned dose without a weigh-in', async () => {
     await seedDemoData();
     const today = localDateKey();
     const startDate = addCalendarMonths(today, -1);
@@ -46,9 +46,10 @@ describe('seedDemoData', () => {
     expect(dates).toContain(today);
     expect(dates).toContain(startDate);
 
-    // Every day entry should have a weight in lbs and a wellness value.
+    // Recorded days carry a weigh-in; today's planned dose does not imply one.
     for (const e of entries) {
-      expect(typeof e.weightLbs).toBe('number');
+      if (e.planned) expect(e.weightLbs).toBeUndefined();
+      else expect(typeof e.weightLbs).toBe('number');
       expect(typeof e.wellness).toBe('number');
     }
   });
@@ -82,6 +83,7 @@ describe('seedDemoData', () => {
     expect(todaysDose).toBeDefined();
     expect(todaysDose!.planned).toBe(true);
     expect(todaysDose!.confirmedAt).toBeUndefined();
+    expect(todaysDose!.weightLbs).toBeUndefined();
 
     for (const e of doseEntries) {
       if (e.date === today) continue;

@@ -23,7 +23,10 @@
     if (!el) return;
     const details = el.closest('details');
     if (details) details.open = true;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 'auto'
+      : 'smooth';
+    el.scrollIntoView({ behavior, block: 'start' });
   }
 
   let root: HTMLElement;
@@ -47,20 +50,7 @@
 </script>
 
 <main class="content" bind:this={root}>
-  <header class="faq-header">
-    <h1 class="faq-title">Frequently Asked Questions</h1>
-    <p class="faq-intro">
-      Short answers to common questions about how EvolvTrack works. Jump to a
-      topic below, or open any question to read more.
-    </p>
-    <nav class="faq-nav" aria-label="FAQ topics">
-      <a href="#faq-getting-started">Getting Started</a>
-      <a href="#faq-calculators">Dosing &amp; Calculators</a>
-      <a href="#faq-charts">Charts &amp; Tracking</a>
-      <a href="#faq-sync">Sync &amp; Privacy</a>
-      <a href="#faq-troubleshooting">Troubleshooting</a>
-    </nav>
-  </header>
+  <h1 class="faq-title">Frequently Asked Questions</h1>
 
   <section id="faq-getting-started" class="faq-section">
     <h2 class="faq-section-title">Getting Started</h2>
@@ -740,45 +730,11 @@ This number is best used as a trend line: a way to compare your levels day to da
     align-content: start;
   }
 
-  .faq-header {
-    display: grid;
-    gap: 0.5rem;
-  }
-
   .faq-title {
     margin: 0;
     font-size: 1.9rem;
     font-weight: 800;
     color: var(--headerText);
-  }
-
-  .faq-intro {
-    margin: 0;
-    max-width: 60ch;
-    color: var(--muted);
-    line-height: 1.5;
-  }
-
-  .faq-nav {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    margin-top: 0.25rem;
-  }
-
-  .faq-nav a {
-    border: 1px solid var(--cardBorder);
-    border-radius: 999px;
-    padding: 0.28rem 0.7rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    text-decoration: none;
-    color: var(--text);
-    background: color-mix(in oklab, var(--surface) 70%, transparent);
-  }
-
-  .faq-nav a:hover {
-    background: color-mix(in oklab, var(--headerBg) 22%, var(--surface) 78%);
   }
 
   .faq-section {

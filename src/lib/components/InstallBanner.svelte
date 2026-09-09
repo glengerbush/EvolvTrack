@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import { canInstall, installDismissed, promptInstall, dismissInstallBanner } from '$lib/stores/pwaInstallStore';
 
   // Shown app-wide only where the browser offers a native install prompt
@@ -14,13 +15,7 @@
       <span>Add it to your device for offline access and an app-like experience.</span>
     </div>
     <button class="cta" type="button" onclick={() => promptInstall()}>Install</button>
-    <button
-      class="dismiss"
-      type="button"
-      aria-label="Dismiss install banner"
-      title="Dismiss"
-      onclick={dismissInstallBanner}
-    >×</button>
+    <DismissButton ariaLabel="Dismiss install banner" onclick={dismissInstallBanner} />
   </div>
 {/if}
 
@@ -51,22 +46,4 @@
     cursor: pointer;
   }
   .cta:hover { opacity: 0.92; }
-  .dismiss {
-    flex-shrink: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    display: grid;
-    place-items: center;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: inherit;
-    font-size: 1.2rem;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .dismiss:hover,
-  .dismiss:focus-visible {
-    background: color-mix(in oklab, currentColor 12%, transparent);
-  }
 </style>

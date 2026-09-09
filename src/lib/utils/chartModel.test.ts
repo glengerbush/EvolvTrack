@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SvelteSet } from 'svelte/reactivity';
 import { iso } from '../../test/iso';
 import type { IsoDate } from '$lib/domain/types';
-import { buildChartModel, type ChartHealthRow, type GraphSeriesKey } from './chartModel';
+import { buildChartModel, PLOT, type ChartHealthRow, type GraphSeriesKey } from './chartModel';
 
 const SEMA = 'Semaglutide (Ozempic / Wegovy)';
 
@@ -57,9 +57,8 @@ describe('buildChartModel — skipped row contributes nothing', () => {
     expect(model.weightPoints.find((p) => p.date === '2026-05-10')).toBeUndefined();
   });
 
-  it('omits the skipped row from wellnessStacks (no blocks on that date)', () => {
-    const stack = model.wellnessStacks.find((s) => s.date === '2026-05-10');
-    expect(stack?.blocks ?? []).toHaveLength(0);
+  it('omits the skipped row from wellnessStacks', () => {
+    expect(model.wellnessStacks.find((stack) => stack.date === '2026-05-10')).toBeUndefined();
   });
 
   it("does not pull the chart's right edge forward to the skipped date", () => {
@@ -200,6 +199,52 @@ describe('buildChartModel — crosshairSnap (data-snapped crosshair)', () => {
   it('returns a null left arm when the weight series is hidden', () => {
     const model = buildChartModel(rows, 'lbs', {}, 180, TODAY, new SvelteSet<GraphSeriesKey>(['weight']));
     expect(model.crosshairSnap(iso('2026-05-08')).left).toBeNull();
+  });
+});
+
+describe('buildChartModel — segmented wellness bars', () => {
+  it('uses ten self-scaling segments and exposes wellness in the daily summary', () => {
+    const model = build([
+      row({ date: iso('2026-05-01'), weight: '180', dose: '5', medication: SEMA, wellness: '8' }),
+      row({ date: iso('2026-05-08'), weight: '178', wellness: '4', symptoms: ['Nausea', 'Headache'] }),
+    ]);
+
+    const stack = model.wellnessStacks.find((entry) => entry.date === '2026-05-08');
+    expect(stack?.segments).toHaveLength(10);
+    expect(stack?.segments.filter((segment) => segment.fillHeight > 0)).toHaveLength(4);
+    expect(stack?.segments[4].fillHeight).toBe(0);
+    expect(model.crosshairSnap(iso('2026-05-08')).wellness?.value).toBe(4);
+    expect(model.crosshairSnap(iso('2026-05-08')).symptoms).toEqual(['Nausea', 'Headache']);
+    const symptoms = model.symptomStacks.find((entry) => entry.date === '2026-05-08');
+    expect(symptoms?.items).toHaveLength(2);
+    expect(symptoms?.x).toBeCloseTo(stack!.segments[0].x + stack!.segments[0].width / 2);
+    symptoms?.items.forEach((item, index) => {
+      const segment = stack!.segments[index];
+      expect(item.y).toBeCloseTo(segment.y + segment.height / 2);
+    });
+    expect(model.dataRows.find((entry) => entry.date === '2026-05-08')).toMatchObject({
+      weight: 178,
+      wellness: 4,
+      symptoms: ['Nausea', 'Headache'],
+    });
+  });
+
+  it('does not use planned weights to calculate the forecast', () => {
+    const recordedRows = [
+      row({ date: iso('2026-05-01'), weight: '180' }),
+      row({ date: iso('2026-05-08'), weight: '178' }),
+      row({ date: iso('2026-05-15'), dose: '5', medication: SEMA, dosePlanned: true }),
+    ];
+    const baseline = build(recordedRows);
+    const model = build([
+      ...recordedRows,
+      row({ date: iso('2026-05-12'), weight: '220', dosePlanned: true }),
+    ]);
+
+    expect(model.weightPredictionPoints.map(({ date, value }) => ({ date, value }))).toEqual(
+      baseline.weightPredictionPoints.map(({ date, value }) => ({ date, value })),
+    );
+    expect(model.weightFuturePath).not.toBe('');
   });
 });
 

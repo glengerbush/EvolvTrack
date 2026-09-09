@@ -2,6 +2,10 @@
 
 EvolvTrack records a person's GLP-1 treatment, inventory, and observed outcomes. Its language distinguishes facts the person records from estimates derived from those facts.
 
+**Health Data**:
+Information EvolvTrack stores about a person's treatment and outcomes, including Health Entries, Doses, Vials, and derived records.
+_Avoid_: Treatment data
+
 ## Treatment log
 
 **Health Entry**:
@@ -91,7 +95,7 @@ A person's account-wide choice to use the current active encryption key without 
 _Avoid_: Recovery failure, missing acknowledgment
 
 **Recoverable Copy**:
-Synchronized treatment data that remains available as readable local Health Entries and Vials, unlockable ciphertext, or a restorable backup.
+Synchronized health data that remains available as readable local Health Entries and Vials, unlockable ciphertext, or a restorable backup.
 _Avoid_: Usable local data, surviving rows
 
 **Device Data Erasure**:
@@ -99,5 +103,5 @@ The non-cancellable process that removes the account session, encryption keys, h
 _Avoid_: Local cleanup, clear local data, wipe
 
 **Start Fresh**:
-The destructive recovery action that abandons synchronized treatment data after the person confirms no Recoverable Copy exists. It returns sync to plain mode only after cloud changes and wrapped keys are verified deleted.
+The destructive recovery action that abandons synchronized health data after the person confirms no Recoverable Copy exists. It returns sync to plain mode only after cloud changes and wrapped keys are verified deleted.
 _Avoid_: Hard reset, start over

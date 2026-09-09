@@ -220,6 +220,15 @@
     50%      { box-shadow: 0 0 0 6px color-mix(in oklab, var(--dot-color) 0%, transparent); }
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .pill[data-tone='progress'] .dot {
+      animation: none;
+      box-shadow: none;
+      outline: 2px solid color-mix(in oklab, var(--dot-color) 58%, transparent);
+      outline-offset: 2px;
+    }
+  }
+
   .label { white-space: nowrap; }
 
   .popover {

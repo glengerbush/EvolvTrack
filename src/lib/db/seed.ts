@@ -70,9 +70,10 @@ export async function seedDemoData(): Promise<void> {
   await Promise.all(dates.map((date, index) => {
     const symptoms = symptomsByDate.get(date) ?? [];
     const dose = doseByDate.get(date);
+    const isPlannedDose = date === today && dose !== undefined;
     return addEntry({
       date,
-      weightLbs: weightForDay(index, symptoms.length > 0),
+      ...(isPlannedDose ? {} : { weightLbs: weightForDay(index, symptoms.length > 0) }),
       wellness: symptoms.length > 0 ? 2 : index % 6 === 0 ? 4 : 5,
       symptoms,
       ...(dose

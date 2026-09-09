@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import GearIcon from '$lib/components/icons/GearIcon.svelte';
   import { columnDecimals, fmtNum } from '$lib/utils/format';
   import type { MedicationInputRow } from '$lib/stores/medicationStore';
@@ -1813,13 +1814,12 @@
                 ({shortDrugName(reminder.type)}) approaches its BUD on
                 <strong>{formatShortDate(reminder.bud)}</strong>
                 ({reminder.daysUntilBud} day{reminder.daysUntilBud === 1 ? '' : 's'}) — use it next.
-                <button
-                  type="button"
-                  class="reminder-dismiss"
-                  aria-label="Dismiss reminder"
-                  title="Dismiss"
-                  onclick={() => dismissedReminders.dismissBud(reminder.dbId, reminder.bud)}
-                >×</button>
+                <span class="reminder-dismiss">
+                  <DismissButton
+                    ariaLabel="Dismiss reminder"
+                    onclick={() => dismissedReminders.dismissBud(reminder.dbId, reminder.bud)}
+                  />
+                </span>
               </p>
             {/each}
             {#each visibleRefillReminders as reminder (reminder.type)}
@@ -1827,13 +1827,12 @@
                 Less than 1 month of <strong>{shortDrugName(reminder.type)}</strong>
                 left ({formatDoses(reminder.dosesLeft)} dose{reminder.dosesLeft === 1 ? '' : 's'})
                 — schedule a refill.
-                <button
-                  type="button"
-                  class="reminder-dismiss"
-                  aria-label="Dismiss reminder"
-                  title="Dismiss"
-                  onclick={() => dismissedReminders.dismissRefill(reminder.type, reminder.dosesLeft)}
-                >×</button>
+                <span class="reminder-dismiss">
+                  <DismissButton
+                    ariaLabel="Dismiss reminder"
+                    onclick={() => dismissedReminders.dismissRefill(reminder.type, reminder.dosesLeft)}
+                  />
+                </span>
               </p>
             {/each}
           {/if}
@@ -2318,8 +2317,9 @@
 
   .reminders-list p {
     position: relative;
+    min-height: 2.25rem;
     margin: 0 0 0.55rem;
-    padding-right: 1.4rem;
+    padding-right: 2.5rem;
     font-size: 1.02rem;
   }
 
@@ -2331,22 +2331,7 @@
     position: absolute;
     top: 0;
     right: 0;
-    background: none;
-    border: none;
-    padding: 0 0.25rem;
-    font: inherit;
-    font-size: 1.05rem;
-    line-height: 1;
     color: color-mix(in oklab, var(--cardBorder) 55%, #888 45%);
-    opacity: 0.5;
-    cursor: pointer;
-    transition: opacity 0.15s ease, color 0.15s ease;
-  }
-
-  .reminder-dismiss:hover,
-  .reminder-dismiss:focus-visible {
-    opacity: 1;
-    color: inherit;
   }
 
   .reminders-restore {

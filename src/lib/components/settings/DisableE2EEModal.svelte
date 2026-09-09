@@ -1,5 +1,6 @@
 <script lang="ts">
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let {
     busy = false,
@@ -42,6 +43,7 @@
     aria-modal="true"
     aria-labelledby="disable-e2ee-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="disable-e2ee-title">Turn off end-to-end encryption?</h3>
     <p>

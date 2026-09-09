@@ -1,6 +1,7 @@
 <script lang="ts">
   import { DRUG_PK } from '$lib/utils/pharmacokinetics';
   import type { Medication } from '$lib/domain/types';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let {
     doseCount = 0,
@@ -49,6 +50,7 @@
     aria-modal="true"
     aria-labelledby="import-med-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="import-med-title">Which medication is this?</h3>
     <p>

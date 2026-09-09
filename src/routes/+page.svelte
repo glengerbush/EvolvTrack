@@ -4,6 +4,7 @@
   import { resolve } from '$app/paths';
   import { isDemoMode } from '$lib/stores/demoStore';
   import { resolveAppEntry } from '$lib/auth/resolveAppEntry';
+  import GraphPaperBackground from '$lib/components/GraphPaperBackground.svelte';
 
   async function continueOffline() {
     // Make sure demo data isn't lingering from a previous visit before
@@ -41,6 +42,7 @@
 </script>
 
 <div class="page">
+  <GraphPaperBackground patternId="landing-graph-paper" />
   <div class="container">
     <header class="topbar">
       <a href={resolve('/')} class="brand">
@@ -175,19 +177,16 @@
   .page {
     /* Light graphite base with a graph-paper grid overlay, matching the
      * Dashboard's bgTint + gridLine treatment. */
+    --graph-paper-line-color: rgba(60, 70, 80, 0.12);
+    position: relative;
+    isolation: isolate;
     background-color: #e8ebee;
-    background-image:
-      linear-gradient(to right, rgba(60, 70, 80, 0.12) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(60, 70, 80, 0.12) 1px, transparent 1px);
-    background-size: 30px 30px;
     min-height: 100dvh;
     padding-bottom: 3rem;
   }
   :global(html[data-color-mode='dark']) .page {
+    --graph-paper-line-color: rgba(220, 230, 240, 0.08);
     background-color: #1d2024;
-    background-image:
-      linear-gradient(to right, rgba(220, 230, 240, 0.08) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(220, 230, 240, 0.08) 1px, transparent 1px);
   }
 
   .topbar {
@@ -311,7 +310,7 @@
   .promise h3 {
     margin: 0 0 0.5rem;
     font-size: 1.1rem;
-    color: var(--brand);
+    color: var(--brand-text);
   }
   .promise p {
     margin: 0;
@@ -319,7 +318,7 @@
     line-height: 1.5;
   }
   .promise a {
-    color: var(--brand);
+    color: var(--brand-text);
     text-decoration: underline;
   }
 
@@ -344,7 +343,7 @@
   .way-tag {
     align-self: flex-start;
     background: color-mix(in oklab, var(--brand) 12%, transparent);
-    color: var(--brand);
+    color: var(--brand-text);
     font-size: 0.8rem;
     font-weight: 600;
     padding: 0.2rem 0.6rem;
@@ -390,7 +389,7 @@
     text-align: center;
   }
   .footer a {
-    color: var(--brand);
+    color: var(--brand-text);
     text-decoration: underline;
   }
 

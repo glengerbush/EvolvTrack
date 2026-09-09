@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { focusTrap } from '$lib/utils/focusTrap';
+
   let {
     code,
     onDone,
@@ -44,6 +46,7 @@
     aria-modal="true"
     aria-labelledby="recovery-code-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="recovery-code-title">Recovery code</h3>
     <p>
@@ -57,7 +60,7 @@
       <button type="button" class="ghost" disabled={busy} onclick={() => choose(onContinueWithout)}>
         Continue without recovery code
       </button>
-      <button type="button" class="ghost" disabled={busy} onclick={copyCode}>{copyLabel}</button>
+      <button type="button" class="ghost" disabled={busy} data-initial-focus onclick={copyCode}>{copyLabel}</button>
       <button type="button" class="primary" disabled={busy} onclick={() => choose(onDone)}>
         {busy ? 'Saving…' : 'Done'}
       </button>

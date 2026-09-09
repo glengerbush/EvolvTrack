@@ -22,6 +22,11 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
+// Modal flows can stack (unlock -> recovery -> new recovery code). Only the
+// top-most trap should handle Tab; otherwise every mounted dialog tries to
+// redirect focus on the same keypress.
+const trapStack: HTMLElement[] = [];
+
 export function focusTrap(node: HTMLElement) {
   // SSR / non-DOM guard — actions don't run on the server, but keep this safe
   // for any test or environment without a document.
@@ -29,19 +34,22 @@ export function focusTrap(node: HTMLElement) {
 
   const previouslyFocused = document.activeElement as HTMLElement | null;
 
+  trapStack.push(node);
+
   function focusable(): HTMLElement[] {
     return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
   }
 
-  // Move focus into the modal on mount. Respect an explicit autofocus target
-  // (the passphrase field declares one) so we don't fight it; otherwise the
-  // first focusable, falling back to the dialog itself.
+  // Move focus into the modal on mount. A modal can mark a safe default without
+  // using HTML autofocus (which can move focus before the trap is installed).
   function focusInitial() {
-    const autofocus = node.querySelector<HTMLElement>('[autofocus]');
-    (autofocus ?? focusable()[0] ?? node).focus();
+    const preferred = node.querySelector<HTMLElement>('[data-initial-focus]:not([disabled])');
+    const autofocus = node.querySelector<HTMLElement>('[autofocus]:not([disabled])');
+    (preferred ?? autofocus ?? focusable()[0] ?? node).focus();
   }
 
   function onKeydown(event: KeyboardEvent) {
+    if (trapStack.at(-1) !== node) return;
     if (event.key !== 'Tab') return;
     const items = focusable();
     if (items.length === 0) {
@@ -76,7 +84,17 @@ export function focusTrap(node: HTMLElement) {
   return {
     destroy() {
       document.removeEventListener('keydown', onKeydown, true);
-      previouslyFocused?.focus?.();
+      const index = trapStack.lastIndexOf(node);
+      if (index !== -1) trapStack.splice(index, 1);
+
+      const activeTrap = trapStack.at(-1);
+      if (!activeTrap) {
+        previouslyFocused?.focus?.();
+      } else if (previouslyFocused && activeTrap.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      } else {
+        activeTrap.focus();
+      }
     },
   };
 }

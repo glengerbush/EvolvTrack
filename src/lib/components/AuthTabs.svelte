@@ -552,7 +552,7 @@
   }
 
   .offline-note a {
-    color: var(--brand);
+    color: var(--brand-text);
     text-decoration: underline;
   }
 </style>

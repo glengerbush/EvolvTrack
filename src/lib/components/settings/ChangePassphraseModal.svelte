@@ -1,5 +1,6 @@
 <script lang="ts">
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let {
     busy = false,
@@ -49,6 +50,7 @@
     aria-modal="true"
     aria-labelledby="change-passphrase-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="change-passphrase-title">Change encryption passphrase</h3>
     <p>

@@ -2,6 +2,7 @@
   import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import { requestSync } from '$lib/sync/sync-orchestrator';
   import { SyncTransitionConflictError } from '$lib/sync/account-state';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let {
     onClose,
@@ -78,6 +79,7 @@
     aria-modal="true"
     aria-labelledby="recovery-unlock-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="recovery-unlock-title">Recover with recovery code</h3>
     <p>

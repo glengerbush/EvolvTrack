@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PendingOutgoingChanges } from '$lib/sync/pending-outgoing-changes';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let {
     pending,
@@ -41,7 +42,14 @@
     if (!busy && event.target === event.currentTarget) onCancel();
   }}
 >
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="logout-pending-title">
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="logout-pending-title"
+    tabindex="-1"
+    use:focusTrap
+  >
     <h2 id="logout-pending-title">
       {pending.total} {pending.total === 1 ? 'change hasn’t' : 'changes haven’t'} synced
     </h2>
@@ -59,7 +67,7 @@
       <button class="danger" type="button" disabled={busy} onclick={() => void onDiscard()}>
         Log out and lose changes
       </button>
-      <button type="button" disabled={busy} onclick={onCancel}>Cancel</button>
+      <button type="button" disabled={busy} data-initial-focus onclick={onCancel}>Cancel</button>
     </div>
   </div>
 </div>

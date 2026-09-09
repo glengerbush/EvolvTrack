@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import { setupWizardPending } from '$lib/stores/setupWizardStore';
   import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
   import BackupButton from '$lib/components/settings/BackupButton.svelte';
@@ -8,6 +9,7 @@
   import { claimLicense, fetchLicenseStatus, type LicenseStatusRow } from '$lib/sync/license';
   import { bulkUpdateEntries, bulkUpdatePrescriptions } from '$lib/domain/health-data-storage';
   import { MEDICATIONS, type Medication, type HealthEntry, type Prescription } from '$lib/domain/types';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   type Step = 'license' | 'e2ee' | 'import' | 'medication' | 'done';
 
@@ -254,10 +256,12 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="setup-wizard-title"
+    tabindex="-1"
+    use:focusTrap
   >
     <header class="wizard-header">
       <h2 id="setup-wizard-title">Welcome to EvolvTrack</h2>
-      <button class="close-btn" type="button" aria-label="Close setup wizard" onclick={close}>×</button>
+      <DismissButton ariaLabel="Close setup wizard" title="Close" onclick={close} />
     </header>
 
     <p class="wizard-note">Everything in this wizard is also available later within Settings.</p>
@@ -504,17 +508,6 @@
     color: var(--muted, #666);
     background: color-mix(in oklab, var(--text) 5%, transparent);
     border-bottom: 1px solid color-mix(in oklab, var(--text) 10%, transparent);
-  }
-
-  .close-btn {
-    appearance: none;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: 1.6rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 0.3rem;
   }
 
   .wizard-body {

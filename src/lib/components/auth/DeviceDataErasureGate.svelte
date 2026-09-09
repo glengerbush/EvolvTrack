@@ -3,6 +3,7 @@
     deviceDataErasureState,
     retryDeviceDataErasure,
   } from '$lib/security/device-data-erasure';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   let retrying = $state(false);
 
@@ -22,7 +23,14 @@
 
 {#if $deviceDataErasureState.status === 'erasing' || $deviceDataErasureState.status === 'blocked'}
   <div class="backdrop">
-    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="erasure-title">
+    <div
+      class="dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="erasure-title"
+      tabindex="-1"
+      use:focusTrap
+    >
       <h2 id="erasure-title">Finishing removal from this app</h2>
       <p>EvolvTrack must finish removing stored data before it can be used again.</p>
       {#if $deviceDataErasureState.status === 'blocked'}

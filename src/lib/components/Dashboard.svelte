@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
   import { goto, replaceState as replaceNavigationState } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { activeColorMode, activeTabThemes, activeTheme } from "$lib/stores/themeStore";
@@ -15,6 +16,7 @@
   import CalculatorsTab from "$lib/components/dashboard/tabs/CalculatorsTab.svelte";
   import InfoTab from "$lib/components/dashboard/tabs/InfoTab.svelte";
   import SettingsTab from "$lib/components/dashboard/tabs/SettingsTab.svelte";
+  import GraphPaperBackground from '$lib/components/GraphPaperBackground.svelte';
 
   type ActiveTab = "health" | "medication" | "calculators" | "info" | "settings";
   type TopTab = { key: ActiveTab; label: string; iconOnly?: boolean };
@@ -111,6 +113,7 @@
       }
       discardTabChanges(activeTab);
       activeTab = rawHash;
+      revealTab(rawHash, false);
     }
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -157,12 +160,53 @@
     return confirm(UNSAVED_NAVIGATION_MESSAGE);
   }
 
-  function navigateToTab(tab: ActiveTab) {
-    if (tab === activeTab) return;
+  function tabId(tab: ActiveTab) {
+    return `dashboard-tab-${tab}`;
+  }
+
+  function panelId(tab: ActiveTab) {
+    return `dashboard-panel-${tab}`;
+  }
+
+  function revealTab(tab: ActiveTab, moveFocus: boolean) {
+    void tick().then(() => {
+      const element = document.getElementById(tabId(tab));
+      if (!(element instanceof HTMLButtonElement)) return;
+      if (moveFocus) element.focus({ preventScroll: true });
+      element.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'nearest',
+        inline: 'nearest',
+      });
+    });
+  }
+
+  function navigateToTab(tab: ActiveTab, moveFocus = false) {
+    if (tab === activeTab) {
+      if (moveFocus) revealTab(tab, true);
+      return;
+    }
     if (!confirmActiveTabNavigation()) return;
     discardTabChanges(activeTab);
     activeTab = tab;
+    revealTab(tab, moveFocus);
   }
+
+  function handleTabKeydown(event: KeyboardEvent, tab: ActiveTab) {
+    const currentIndex = topTabs.findIndex((item) => item.key === tab);
+    let nextIndex: number | null = null;
+
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % topTabs.length;
+    if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + topTabs.length) % topTabs.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = topTabs.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    navigateToTab(topTabs[nextIndex].key, true);
+  }
+
+  onMount(() => revealTab(activeTab, false));
 
   function handleBeforeUnload(event: BeforeUnloadEvent) {
     if ($deviceDataErasureState.status !== 'idle') return;
@@ -208,6 +252,7 @@
   class="dashboard"
   style={`--bgTint:${theme.bgTint}; --gridLine:${theme.gridLine}; --cardBorder:${theme.cardBorder}; --headerBg:${theme.headerBg}; --headerText:${theme.headerText}; --accent:${theme.accent}; --warning:${theme.warning}; --success:${theme.success}; --danger:${theme.danger}; --stripe:${theme.stripe}; --rowAlt:${theme.rowAlt}; --vialActive:${theme.vialActive}; --vialWarning:${theme.vialWarning}; --weightLine:${theme.weightLine}; --wellnessBar:${theme.wellnessBar}; --symptomMarker:${theme.symptomMarker}; ${drugVars};`}
 >
+  <GraphPaperBackground patternId="dashboard-graph-paper" />
   <header class="app-topbar">
     <div class="brand-lockup" aria-label="EvolvTrack">
       <span class="brand-icon" role="img" aria-label="EvolvTrack logo"></span>
@@ -241,15 +286,22 @@
   {/if}
 
   <header class="tabbar">
-    <nav class="top-tabs" aria-label="Dashboard tabs">
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tablist pattern) -->
+    <nav class="top-tabs" role="tablist" aria-label="Dashboard tabs" aria-orientation="horizontal">
       {#each topTabs as tab (tab.key)}
         <button
+          id={tabId(tab.key)}
+          role="tab"
           class="top-tab"
           class:active={activeTab === tab.key}
           class:icon-only={tab.iconOnly}
           style={`--tabBase:${$activeTabThemes[tab.key].tabBase}; --tabText:${$activeTabThemes[tab.key].tabText};`}
           onclick={() => navigateToTab(tab.key)}
+          onkeydown={(event) => handleTabKeydown(event, tab.key)}
           aria-label={tab.iconOnly ? tab.label : undefined}
+          aria-selected={activeTab === tab.key}
+          aria-controls={panelId(tab.key)}
+          tabindex={activeTab === tab.key ? 0 : -1}
         >
           {#if tab.iconOnly}
             <span class="top-tab-icon-box">
@@ -265,42 +317,49 @@
     </nav>
   </header>
 
-  <section class="tab-panel" hidden={activeTab !== 'health'} aria-hidden={activeTab !== 'health'}>
-    <HealthTab
-      active={activeTab === 'health'}
-      discardSignal={discardSignals.health}
-      onUnsavedChange={(hasUnsavedChanges) => setTabUnsavedChanges('health', hasUnsavedChanges)}
-    />
-  </section>
-  <section class="tab-panel" hidden={activeTab !== 'medication'} aria-hidden={activeTab !== 'medication'}>
-    <MedicationTab
-      active={activeTab === 'medication'}
-      discardSignal={discardSignals.medication}
-      onUnsavedChange={(hasUnsavedChanges) => setTabUnsavedChanges('medication', hasUnsavedChanges)}
-    />
-  </section>
-  <section class="tab-panel" hidden={activeTab !== 'calculators'} aria-hidden={activeTab !== 'calculators'}>
-    <CalculatorsTab />
-  </section>
-  <section class="tab-panel" hidden={activeTab !== 'info'} aria-hidden={activeTab !== 'info'}>
-    <InfoTab />
-  </section>
-  <section class="tab-panel" hidden={activeTab !== 'settings'} aria-hidden={activeTab !== 'settings'}>
-    <SettingsTab />
-  </section>
+  {#if activeTab === 'health'}
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tabpanel pattern) -->
+    <section id={panelId('health')} class="tab-panel" role="tabpanel" aria-labelledby={tabId('health')} tabindex="0">
+      <HealthTab
+        active
+        discardSignal={discardSignals.health}
+        onUnsavedChange={(hasUnsavedChanges) => setTabUnsavedChanges('health', hasUnsavedChanges)}
+      />
+    </section>
+  {:else if activeTab === 'medication'}
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tabpanel pattern) -->
+    <section id={panelId('medication')} class="tab-panel" role="tabpanel" aria-labelledby={tabId('medication')} tabindex="0">
+      <MedicationTab
+        active
+        discardSignal={discardSignals.medication}
+        onUnsavedChange={(hasUnsavedChanges) => setTabUnsavedChanges('medication', hasUnsavedChanges)}
+      />
+    </section>
+  {:else if activeTab === 'calculators'}
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tabpanel pattern) -->
+    <section id={panelId('calculators')} class="tab-panel" role="tabpanel" aria-labelledby={tabId('calculators')} tabindex="0">
+      <CalculatorsTab />
+    </section>
+  {:else if activeTab === 'info'}
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tabpanel pattern) -->
+    <section id={panelId('info')} class="tab-panel" role="tabpanel" aria-labelledby={tabId('info')} tabindex="0">
+      <InfoTab />
+    </section>
+  {:else}
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role (ARIA tabpanel pattern) -->
+    <section id={panelId('settings')} class="tab-panel" role="tabpanel" aria-labelledby={tabId('settings')} tabindex="0">
+      <SettingsTab />
+    </section>
+  {/if}
 </div>
 
 <style>
   .dashboard {
+    --graph-paper-line-color: var(--gridLine);
+    position: relative;
+    isolation: isolate;
     min-height: 100dvh;
     background-color: var(--bgTint);
-    background-image: linear-gradient(
-        to right,
-        var(--gridLine) 1px,
-        transparent 1px
-      ),
-      linear-gradient(to bottom, var(--gridLine) 1px, transparent 1px);
-    background-size: 30px 30px;
   }
 
   .app-topbar {
@@ -445,10 +504,6 @@
     text-decoration: none;
     flex: 0 0 auto;
     white-space: nowrap;
-  }
-
-  .tab-panel[hidden] {
-    display: none !important;
   }
 
   .top-tab.icon-only {

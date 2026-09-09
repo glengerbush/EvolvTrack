@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { focusTrap } from '$lib/utils/focusTrap';
+
   // Small reusable confirmation modal. Markup + styles were lifted from the
   // inline option-delete dialog in InputsTable so the per-card row/vial delete
   // confirmations (and any future ones) share one styled dialog instead of the
@@ -19,13 +21,6 @@
     onCancel: () => void;
   } = $props();
 
-  let dialogEl: HTMLDivElement | undefined = $state();
-
-  $effect(() => {
-    // Focus the dialog on open so Escape works and focus isn't stranded behind it.
-    dialogEl?.querySelector<HTMLButtonElement>('.confirm-cancel')?.focus();
-  });
-
   function onKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -38,18 +33,19 @@
 
 <div class="confirm-backdrop" role="presentation">
   <div
-    bind:this={dialogEl}
     class="confirm-dialog"
     role="dialog"
     aria-modal="true"
     aria-labelledby="confirm-dialog-title"
     aria-describedby="confirm-dialog-description"
+    tabindex="-1"
+    use:focusTrap
   >
     <h3 id="confirm-dialog-title">{title}</h3>
     <p id="confirm-dialog-description">{message}</p>
     <div class="confirm-actions">
       <button type="button" class="confirm-yes" onclick={onConfirm}>{confirmLabel}</button>
-      <button type="button" class="confirm-cancel" onclick={onCancel}>{cancelLabel}</button>
+      <button type="button" class="confirm-cancel" data-initial-focus onclick={onCancel}>{cancelLabel}</button>
     </div>
   </div>
 </div>

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { focusTrap } from '$lib/utils/focusTrap';
+
   let {
     busy = false,
     error = null,
@@ -43,6 +45,7 @@
     aria-modal="true"
     aria-labelledby="change-password-title"
     tabindex="-1"
+    use:focusTrap
   >
     <h3 id="change-password-title">Change login password</h3>
     <form

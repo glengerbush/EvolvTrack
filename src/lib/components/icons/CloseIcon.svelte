@@ -1,5 +1,5 @@
 <script lang="ts">
-  // "X" / close icon — used for the per-card Cancel button.
+  // Shared "X" icon for close, cancel, and dismiss controls.
   let { size = '1em', color = 'currentColor' }: { size?: string; color?: string } = $props();
 </script>
 

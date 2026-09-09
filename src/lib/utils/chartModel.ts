@@ -55,12 +55,13 @@ type NumberPoint = {
   planned?: boolean;
 };
 
-type WellnessBlock = {
+type WellnessSegment = {
   index: number;
   x: number;
   y: number;
   width: number;
   height: number;
+  fillHeight: number;
 };
 
 type SystemDailySeries = {
@@ -92,6 +93,16 @@ export type ChartSystemSeries = {
   plannedDosePoints: ChartDoseMarker[];
 };
 
+export type ChartDataRow = {
+  date: IsoDate;
+  weight: number | null;
+  wellness: number | null;
+  wellnessPlanned: boolean;
+  symptoms: string[];
+  doses: { amountMg: number; medication: string; planned: boolean }[];
+  system: { label: string; value: number }[];
+};
+
 export type ChartModel = {
   hasAnyData: boolean;
   widthPx: number;
@@ -100,7 +111,12 @@ export type ChartModel = {
   leftTicks: { value: number; label: string; y: number }[];
   rightTicks: { value: number; label: string; y: number }[];
   dateTicks: { date: IsoDate; label: string; x: number }[];
-  wellnessStacks: { date: IsoDate; value: number; planned: boolean; blocks: WellnessBlock[] }[];
+  wellnessStacks: {
+    date: IsoDate;
+    value: number;
+    planned: boolean;
+    segments: WellnessSegment[];
+  }[];
   symptomStacks: {
     date: IsoDate;
     x: number;
@@ -109,11 +125,13 @@ export type ChartModel = {
   weightActualPath: string;
   weightFuturePath: string;
   weightPredictionPath: string;
+  weightPredictionPoints: { date: IsoDate; value: number }[];
   systemSeries: ChartSystemSeries[];
   weightPoints: NumberPoint[];
   todayX: number | null;
   leftAxisLabel: string;
   rightAxisLabel: string;
+  dataRows: ChartDataRow[];
   /**
    * Map a CSS-pixel x within the scrollable data-svg (i.e. element.scrollLeft
    * units) to the date drawn at that column. Clamps to the data range.
@@ -126,25 +144,28 @@ export type ChartModel = {
   cssXForDate: (date: IsoDate) => number;
   /** Invert yLeft: pixel y → weight value (returns null if outside the plot area). */
   valueLeftForY: (y: number) => number | null;
-  /** Invert yRight: pixel y → mg/wellness value (returns null if outside plot area). */
+  /** Invert yRight: pixel y → medication level (returns null outside the plot). */
   valueRightForY: (y: number) => number | null;
   /**
    * For a hovered date, the data each crosshair arm snaps to: weight on the left
-   * axis, total mg-in-system (or wellness when mg is hidden) on the right. Each
+   * axis and medication levels on the right. Wellness remains available as an
+   * exact daily value while its segmented bars use their own implicit 0–10 scale.
    * side is null when its series is hidden or the day has no value there, so the
    * caller can fall back. `y` is in viewBox/CSS-pixel space, ready to draw.
    */
   crosshairSnap: (date: IsoDate) => {
     left: { value: number; y: number } | null;
-    /** One entry per visible drug curve (or wellness): the day's value, its y,
+    /** One entry per visible drug curve: the day's value, its y,
      *  and the series colour — drawn as a separate crosshair arm + chip each. */
     right: { value: number; y: number; color: string; key: string }[];
+    wellness: { value: number; y: number; planned: boolean } | null;
+    symptoms: string[];
   };
 };
 
 export const CHART = {
   width: 920,
-  height: 440,
+  height: 400,
   // Left and right gutters are kept equal so the plot sits symmetrically in the
   // card (matters most on mobile, where wide asymmetric gutters waste space).
   margin: { top: 30, right: 50, bottom: 50, left: 50 },
@@ -154,24 +175,25 @@ export const PLOT = {
   left: CHART.margin.left,
   top: CHART.margin.top,
   right: CHART.width - CHART.margin.right,
-  bottom: CHART.height - CHART.margin.bottom,
+  bottom: 308,
   width: CHART.width - CHART.margin.left - CHART.margin.right,
-  height: CHART.height - CHART.margin.top - CHART.margin.bottom,
+  height: 278,
 };
 
 export const GRAPH_SERIES: { key: GraphSeriesKey; label: string; className: string }[] = [
   { key: 'weight', label: 'Weight', className: 'swatch-line swatch-weight' },
-  { key: 'weightPrediction', label: 'Weight prediction', className: 'swatch-line swatch-weight-prediction' },
+  { key: 'weightPrediction', label: 'Weight forecast', className: 'swatch-line swatch-weight-prediction' },
   { key: 'systemMg', label: 'mg in system', className: 'swatch-line swatch-system' },
-  { key: 'wellness', label: 'Wellness score', className: 'swatch-bar swatch-wellness' },
+  { key: 'wellness', label: 'Wellness score (0–10)', className: 'swatch-bar swatch-wellness' },
   { key: 'symptoms', label: 'Symptoms', className: 'swatch-dot swatch-symptoms' },
 ];
 
 const X_AXIS_PADDING = 18;
 const DAY_PIXEL_WIDTH = 30;
-const WELLNESS_BLOCK_GAP = 3;
+const WELLNESS_SEGMENT_GAP = 3;
+const WELLNESS_SLOT_HEIGHT = PLOT.height / WELLNESS_SCORE_MAX;
 /** Minimum horizontal space (px) per date label so rotated "M/D" text doesn't collide. */
-const MIN_DATE_TICK_SPACING = 14;
+const MIN_DATE_TICK_SPACING = 24;
 
 type HiddenGraphSeries = {
   has(key: GraphSeriesKey): boolean;
@@ -241,7 +263,7 @@ export function buildChartModel(
 
   const systemDailySeries = buildSystemDailySeries(doses, dateKeys, weighIns);
 
-  const weightPrediction = buildWeightPrediction(weights, dateKeys);
+  const weightPrediction = buildWeightPrediction(weights.filter((point) => !point.planned), dateKeys);
   const weightValues = [...weights.map((point) => point.value), ...weightPrediction.map((point) => point.value)];
   const [rawLeftMin, leftMax] = paddedDomain(
     weightValues.length ? weightValues : [fallbackWeight],
@@ -250,42 +272,30 @@ export function buildChartModel(
   const leftMin = Math.max(rawLeftMin, 0);
   const visibleSystemSeries = systemDailySeries.filter((series) => !hiddenSeries.has(series.key));
   const showSysMg = visibleSystemSeries.length > 0;
-  const showWellness = !hiddenSeries.has('wellness');
   const rightAxisValues: number[] = [];
   if (showSysMg) {
     rightAxisValues.push(
       ...visibleSystemSeries.flatMap((series) => series.values.map((point) => point.value)),
     );
   }
-  // Right axis scaling:
-  // - When mg-in-system is visible, scale to the min/max of the concentration
-  //   curve (with padding) so fine variation reads cleanly instead of being
-  //   crammed against a 0-baseline that's far below the data.
-  // - When only wellness is visible, keep the fixed 0..MAX wellness scale so
-  //   the bar stack stays legible.
-  // Wellness bars (`buildWellnessBlocks`) are always sized against
-  // WELLNESS_SCORE_MAX and the full plot height, so they remain visually
-  // intact regardless of axis label range.
+  // The right axis belongs only to medication concentration. Wellness has its
+  // own fixed 0–10 lane, so spatial alignment can never imply equivalent units.
   let rightMin: number;
   let rightMax: number;
   if (showSysMg && rightAxisValues.length > 0) {
     const [rawMin, rawMax] = paddedDomain(rightAxisValues, 0.1);
     rightMin = Math.max(rawMin, 0);
     rightMax = rawMax;
-  } else if (showWellness) {
-    rightMin = 0;
-    rightMax = WELLNESS_SCORE_MAX;
   } else {
     rightMin = 0;
     rightMax = rightAxisMax(rightAxisValues, 5);
   }
-  const rightAxisLabel =
-    showSysMg ? 'mg in system' :
-    showWellness ? 'Wellness score' :
-    'mg in system / wellness';
+  const rightAxisLabel = 'mg in system';
   const yLeft = (value: number) => PLOT.bottom - ((value - leftMin) / (leftMax - leftMin)) * PLOT.height;
   const yRight = (value: number) =>
     PLOT.bottom - ((value - rightMin) / (rightMax - rightMin)) * PLOT.height;
+  const yWellness = (value: number) =>
+    PLOT.bottom - (clampWellnessScore(value) / WELLNESS_SCORE_MAX) * PLOT.height;
   const projectionStartDate = getProjectionStartDate(today, projectedDoseDates, confirmedDoseDates, endDate);
 
   const takenDoses = doses.filter((dose) => !dose.planned);
@@ -358,11 +368,22 @@ export function buildChartModel(
     y: yLeft(point.value),
   }));
   const daySpacing = usablePlotWidth / daySpan;
-  const barWidth = Math.max(5, Math.min(20, daySpacing * 0.72));
+  const wellnessBarWidth = Math.max(5, Math.min(18, daySpacing * 0.64));
+  const wellnessStacks = [...wellnessByDate]
+    .map(([date, entry]) => ({
+      date,
+      value: entry.value,
+      planned: entry.planned,
+      segments: buildWellnessSegments(
+        entry.value,
+        xForDate(date) - wellnessBarWidth / 2,
+        wellnessBarWidth,
+      ),
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 
-  // Crosshair snapping: the left arm tracks that day's weight, the right arm that
-  // day's total mg-in-system (summed across visible drug curves) — or wellness
-  // when mg is hidden — so the crosshair lands on the data, not the cursor.
+  // Crosshair snapping: weight and medication arms land on the day's data. The
+  // wellness value accompanies them for the daily summary and bar highlight.
   const weightVisible = !hiddenSeries.has('weight');
   const weightValueByDate = new Map(weights.map((point) => [point.date, point.value]));
   // Each visible drug curve keeps its own per-date lookup so the crosshair draws
@@ -386,14 +407,40 @@ export function buildChartModel(
           right.push({ value, y: yRight(value), color: series.color, key: series.key });
         }
       }
-    } else if (showWellness) {
-      const wellness = wellnessByDate.get(date)?.value;
-      if (wellness !== undefined) {
-        right.push({ value: wellness, y: yRight(wellness), color: 'var(--wellnessBar)', key: 'wellness' });
-      }
     }
-    return { left, right };
+    const wellnessEntry = wellnessByDate.get(date);
+    const wellness = wellnessEntry
+      ? { value: wellnessEntry.value, y: yWellness(wellnessEntry.value), planned: wellnessEntry.planned }
+      : null;
+    return { left, right, wellness, symptoms: symptomsByDate.get(date) ?? [] };
   };
+
+  const weightValueByDateForRows = new Map(weights.map((point) => [point.date, point.value]));
+  const dosesByDate = new Map<IsoDate, ChartDataRow['doses']>();
+  for (const dose of doses) {
+    const existing = dosesByDate.get(dose.date) ?? [];
+    existing.push({ amountMg: dose.amountMg, medication: dose.medication, planned: dose.planned });
+    dosesByDate.set(dose.date, existing);
+  }
+  const systemValuesBySeries = systemDailySeries.map((series) => ({
+    label: series.label,
+    byDate: new Map(series.values.map((point) => [point.date, point.value] as const)),
+  }));
+  const dataRows: ChartDataRow[] = dateKeys.map((date) => {
+    const wellnessEntry = wellnessByDate.get(date);
+    return {
+      date,
+      weight: weightValueByDateForRows.get(date) ?? null,
+      wellness: wellnessEntry?.value ?? null,
+      wellnessPlanned: wellnessEntry?.planned ?? false,
+      symptoms: symptomsByDate.get(date) ?? [],
+      doses: dosesByDate.get(date) ?? [],
+      system: systemValuesBySeries.map((series) => ({
+        label: series.label,
+        value: series.byDate.get(date) ?? 0,
+      })),
+    };
+  });
 
   return {
     hasAnyData: datedRows.length > 0,
@@ -419,16 +466,7 @@ export function buildChartModel(
       }));
     })(),
     dateTicks: buildDateTicks(dateKeys, xForDate, dayPixelWidth),
-    wellnessStacks: dateKeys.map((date) => {
-      const entry = wellnessByDate.get(date);
-      const value = entry?.value ?? 0;
-      return {
-        date,
-        value,
-        planned: entry?.planned ?? false,
-        blocks: buildWellnessBlocks(value, xForDate(date) - barWidth / 2, barWidth),
-      };
-    }),
+    wellnessStacks,
     symptomStacks: dateKeys
       .map((date) => ({
         date,
@@ -437,18 +475,22 @@ export function buildChartModel(
           symptom: item,
           letter: symptomInitial(item),
           color: symptomColor(item, colors),
-          y: PLOT.bottom - 11 - index * 18,
+          // Share the wellness grid: each symptom sits in the visual center of
+          // one segment, starting at the graph baseline and stacking upward.
+          y: PLOT.bottom - (index + 0.5) * WELLNESS_SLOT_HEIGHT,
         })),
       }))
       .filter((stack) => stack.items.length > 0),
     weightActualPath: toPolyline(weightSplit.actual),
     weightFuturePath: toPolyline(weightSplit.projected),
     weightPredictionPath: toPolyline(weightPredictionPoints),
+    weightPredictionPoints,
     systemSeries,
     weightPoints,
     todayX: today >= startDate && today <= endDate ? xForDate(today) : null,
     leftAxisLabel: `Weight (${unit})`,
     rightAxisLabel,
+    dataRows,
     // CSS-x within the data-svg is the same as viewBox-x minus PLOT.left, since
     // the data-svg's CSS width equals its viewBox width (plotWidth).
     dateForCssX: (cssX: number) => {
@@ -619,26 +661,21 @@ function collectWellness(rows: ChartHealthRow[], today: IsoDate) {
   return byDate;
 }
 
-function buildWellnessBlocks(value: number, x: number, width: number): WellnessBlock[] {
+function buildWellnessSegments(value: number, x: number, width: number): WellnessSegment[] {
   const clamped = clampWellnessScore(value);
-  const fullBlocks = Math.floor(clamped);
-  const partialBlock = clamped - fullBlocks;
-  const blockCount = fullBlocks + (partialBlock > 0 ? 1 : 0);
-  const slotHeight = PLOT.height / WELLNESS_SCORE_MAX;
-  const blockGap = Math.min(WELLNESS_BLOCK_GAP, slotHeight * 0.25);
-  const blockHeight = Math.max(slotHeight - blockGap, 1);
+  const slotHeight = WELLNESS_SLOT_HEIGHT;
+  const gap = Math.min(WELLNESS_SEGMENT_GAP, slotHeight * 0.2);
+  const height = Math.max(slotHeight - gap, 1);
 
-  return Array.from({ length: blockCount }, (_, index) => {
-    const fillRatio = index < fullBlocks ? 1 : partialBlock;
-    const height = blockHeight * fillRatio;
-    const slotTop = PLOT.bottom - (index + 1) * slotHeight + blockGap / 2;
-
+  return Array.from({ length: WELLNESS_SCORE_MAX }, (_, index) => {
+    const fillRatio = Math.max(0, Math.min(1, clamped - index));
     return {
       index,
       x,
-      y: slotTop + blockHeight - height,
+      y: PLOT.bottom - (index + 1) * slotHeight + gap / 2,
       width,
       height,
+      fillHeight: height * fillRatio,
     };
   });
 }

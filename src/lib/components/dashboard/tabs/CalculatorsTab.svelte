@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DismissButton from '$lib/components/DismissButton.svelte';
   import DosageCalculator from '$lib/components/dashboard/calculators/DosageCalculator.svelte';
   import ReverseDoseCalculator from '$lib/components/dashboard/calculators/ReverseDoseCalculator.svelte';
   import VialTransitionCalculator from '$lib/components/dashboard/calculators/VialTransitionCalculator.svelte';
@@ -33,12 +34,7 @@
         (100 units = 1 mL). If your syringe uses a different scale, convert the
         result before drawing.
       </p>
-      <button
-        type="button"
-        class="syringe-banner-close"
-        aria-label="Dismiss this notice"
-        onclick={dismissBanner}
-      >×</button>
+      <DismissButton ariaLabel="Dismiss this notice" onclick={dismissBanner} />
     </aside>
   {/if}
 
@@ -60,7 +56,7 @@
   .syringe-banner {
     display: grid;
     grid-template-columns: auto 1fr auto;
-    align-items: start;
+    align-items: center;
     gap: 0.6rem;
     padding: 0.7rem 0.9rem;
     background: color-mix(in oklab, var(--accent, var(--headerBg)) 18%, var(--surface) 82%);
@@ -77,25 +73,5 @@
     font-size: 1.1rem;
     line-height: 1.4;
     color: var(--muted);
-  }
-  .syringe-banner-close {
-    appearance: none;
-    -webkit-appearance: none;
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    font-size: 1.25rem;
-    line-height: 1;
-    padding: 0.1rem 0.4rem;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .syringe-banner-close:hover {
-    background: color-mix(in oklab, var(--text) 8%, transparent);
-    color: var(--text);
-  }
-  .syringe-banner-close:focus-visible {
-    outline: 2px solid color-mix(in oklab, var(--text) 45%, transparent);
-    outline-offset: 1px;
   }
 </style>

@@ -68,6 +68,7 @@
     computeVisibleRange,
     indexAtOffset as indexAtOffsetShared,
   } from '$lib/grid/virtualize';
+  import { focusTrap } from '$lib/utils/focusTrap';
 
   type ColumnKey = HealthColKey;
   type ManagedOptionKind = 'symptom' | 'shotLocation';
@@ -97,7 +98,7 @@
     addRowSignal = 0,
   }: {
     rows?: HealthInputRow[];
-    /** Gear toggle: opens the column/option managers and the trash-can gutter. */
+    /** Gear toggle: opens column/option managers and desktop row controls. */
     isSettingsOpen?: boolean;
     addRowSignal?: number;
   } = $props();
@@ -123,7 +124,7 @@
   let colKbIndex = $state<number | null>(null);
   let announcement = $state('');
   // Single-mode: the gear opens settings (column reorder/hide + option managers)
-  // and reveals the per-row trash-can gutter. No longer tied to an edit mode.
+  // and reveals per-row delete controls in the Week rail on desktop.
   const columnSettingsOpen = $derived(isSettingsOpen);
 
   const colIndicator = $derived.by(() =>
@@ -291,8 +292,8 @@
   // Left-most "week" rail: one entry per displayed row, with same-week rows
   // grouped into a visually-merged block (see computeWeekCells / the .week CSS).
   const weekCells = $derived(computeWeekCells(displayedRows.map((r) => r.date)));
-  // Indices (into displayedRows) of rows that currently show a due-action badge.
-  // Used to step the selector up/down between badges, skipping rows without one.
+  // Indices (into displayedRows) of rows that currently show a dose-due action.
+  // Used to step the selector between actions, skipping rows without one.
   const dueRowIndices = $derived(
     displayedRows.reduce<number[]>((acc, row, i) => {
       if (isDueConfirmation(row)) acc.push(i);
@@ -373,7 +374,7 @@
   // <td> still holds keyboard focus, but its edit ring is suppressed and the
   // chip is highlighted instead.
   let selVial = $state(false);
-  // The due-action badge sits left of the leftmost cell, on rows that have one.
+  // The due-action control is the first actionable cell on rows that have one.
   // `selDue` puts the selection on it; `duePanelNav` tracks which panel button
   // (Taken/Skip) is highlighted while the confirm panel is open via keyboard.
   let selDue = $state(false);
@@ -419,7 +420,7 @@
   // Keep the DOM focus in step with the selection/edit state. The selected row
   // is, by construction, within the rendered virtualization window.
   $effect(() => {
-    // The due-action badge manages its own focus (it lives outside the cell grid).
+    // The due-action control manages its own focus.
     if (selDue) return;
     if (selRow === null || selCol === null) return;
     const r = selRow;
@@ -533,7 +534,7 @@
       return;
     }
 
-    // ── On the due-action badge ──────────────────────────────────────────────
+    // ── On the due-action control ────────────────────────────────────────────
     if (selDue) {
       if (dr !== 0) {
         // Up/down jumps to the prev/next row that has a badge (skipping the
@@ -1073,27 +1074,6 @@
     if (selRow !== null) focusDueButton(selRow);
   }
 
-  // Vertically center each (desktop) due badge on its row. The badge is absolute
-  // against `.inputs-table-region` to escape the scroll clip, so it can't use a
-  // cell-relative top:50% — we measure the row box and set top in px instead.
-  function positionDueBadges() {
-    if (!inputsTableRegion) return;
-    const wraps = inputsTableRegion.querySelectorAll<HTMLElement>('.due-action-wrap');
-    const desktop =
-      typeof window !== 'undefined' && window.matchMedia('(min-width: 641px)').matches;
-    if (!desktop) {
-      for (const wrap of wraps) wrap.style.top = '';
-      return;
-    }
-    const regionTop = inputsTableRegion.getBoundingClientRect().top;
-    for (const wrap of wraps) {
-      const cell = wrap.closest('td');
-      if (!cell) continue;
-      const rect = cell.getBoundingClientRect();
-      wrap.style.top = `${rect.top - regionTop + rect.height / 2}px`;
-    }
-  }
-
   function handleDocumentClickForDuePanel(event: MouseEvent) {
     if (expandedDueId === null) return;
     const target = event.target;
@@ -1382,7 +1362,6 @@
       window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
     }
     recomputeVisibleRange();
-    positionDueBadges();
   }
 
   // Freeze vial attribution permanently. The moment a consuming dose has a
@@ -1412,13 +1391,6 @@
     if (!tableEl) return;
     ensureLen(displayedRowsLength);
     recomputeVisibleRange();
-  });
-
-  // Re-center the due badges whenever the rendered slice or its geometry shifts.
-  $effect(() => {
-    visibleRows;
-    topSpacerHeight;
-    void tick().then(positionDueBadges);
   });
 
   $effect(() => {
@@ -1463,7 +1435,6 @@
         }
         measureRenderedRows();
         recomputeVisibleRange();
-        positionDueBadges();
       });
     };
     // Also fires when the table goes 0 → real size (hidden tab becomes active).
@@ -2084,6 +2055,8 @@ function markRowsAsBaseline() {
         aria-modal="true"
         aria-labelledby="delete-option-title"
         aria-describedby="delete-option-description"
+        tabindex="-1"
+        use:focusTrap
       >
         <h3 id="delete-option-title">Delete {optionLabel} option?</h3>
         <p id="delete-option-description">
@@ -2093,7 +2066,7 @@ function markRowsAsBaseline() {
         </p>
         <div class="confirm-actions">
           <button type="button" class="confirm-yes" onclick={() => void confirmOptionDelete()}>Yes</button>
-          <button type="button" class="confirm-cancel" onclick={cancelOptionDelete}>Cancel</button>
+          <button type="button" class="confirm-cancel" data-initial-focus onclick={cancelOptionDelete}>Cancel</button>
         </div>
       </div>
     </div>
@@ -2139,7 +2112,6 @@ function markRowsAsBaseline() {
   <div class="table-scroll">
     <table bind:this={tableEl} class="inputs-table inputs-table--editing">
       <colgroup>
-        <col class="col-due-action" />
         <col class="col-week" />
         {#each activeColumns as column (column.key)}
           <col class={`col-${column.key}`} class:stretch-column={column.key === stretchColumnKey} />
@@ -2147,8 +2119,7 @@ function markRowsAsBaseline() {
       </colgroup>
       <thead>
         <tr>
-          <th class="due-action-header" aria-hidden="true"></th>
-          <th class="week-num-header" title="Week number" aria-label="Week number">W#</th>
+          <th class="week-num-header">Week</th>
           {#each activeColumns as column, colIndex (column.key)}
             <th
               class={column.key}
@@ -2190,9 +2161,8 @@ function markRowsAsBaseline() {
         </tr>
       </thead>
       <tbody>
-        <!-- The due-confirm `!` badge + its Taken/Skip panel. Shared so it can
-             render in the card gutter on desktop and inline next to the date on
-             mobile, with identical behaviour. -->
+        <!-- Planned doses use a named status control instead of an ambiguous
+             gutter icon. Its Taken/Skip actions stay anchored to the row. -->
         {#snippet dueBadge(rowIndex: number, row: EditableInputRow, isExpanded: boolean)}
           <div class="due-action-wrap">
             <button
@@ -2202,12 +2172,14 @@ function markRowsAsBaseline() {
               class:selected={isDueSelected(rowIndex)}
               data-due-row={rowIndex}
               tabindex={$isMobile ? undefined : (isDueSelected(rowIndex) ? 0 : -1)}
-              aria-label="Confirm whether this dose was taken"
+              aria-label={`Planned dose due ${formatLocaleDate(row.date)}. Confirm whether it was taken.`}
               aria-expanded={isExpanded}
-              title="Confirm whether this dose was taken"
+              title="Confirm planned dose"
               onclick={() => activateDueFromClick(rowIndex, row)}
               onkeydown={$isMobile ? undefined : dueButtonKeydown}
-            >!</button>
+            >
+              <span class="due-action-label">Dose due</span>
+            </button>
             {#if isExpanded}
               <div class="due-action-panel" role="group" aria-label="Confirm planned dose" data-due-row={rowIndex}>
                 <button
@@ -2230,7 +2202,7 @@ function markRowsAsBaseline() {
         {/snippet}
         {#if topSpacerHeight > 0}
           <tr aria-hidden="true" class="virtual-spacer">
-            <td colspan={activeColumns.length + 2} style={`height:${topSpacerHeight}px`}></td>
+            <td colspan={activeColumns.length + 1} style={`height:${topSpacerHeight}px`}></td>
           </tr>
         {/if}
         {#each visibleRows as row, sliceIndex (rowKey(row, firstVisibleIndex + sliceIndex))}
@@ -2245,8 +2217,18 @@ function markRowsAsBaseline() {
             class:row-needs-medication={rowMissingMedication(row)}
             class:mobile-card-editing={isRowMobileEditing(row)}
           >
-            <td class="due-action-cell">
-              {#if columnSettingsOpen}
+            <td
+              class="week"
+              class:week-label={weekCell?.isLabelRow}
+              class:week-top={weekCell?.isFirstOfWeek}
+              class:week-bottom={weekCell?.isLastOfWeek}
+              class:week-has-due={!columnSettingsOpen && dueConfirm && !isRowMobileEditing(row)}
+              data-label="Week"
+            >
+              {#if weekCell?.week !== null && weekCell?.week !== undefined}
+                <span class="week-rail-label">W{weekCell.week}</span>
+              {/if}
+              {#if columnSettingsOpen && !$isMobile}
                 <button
                   type="button"
                   class="row-delete-btn"
@@ -2265,19 +2247,8 @@ function markRowsAsBaseline() {
                     />
                   </svg>
                 </button>
-              {:else if dueConfirm && !$isMobile}
+              {:else if dueConfirm && !isRowMobileEditing(row)}
                 {@render dueBadge(rowIndex, row, isExpanded)}
-              {/if}
-            </td>
-            <td
-              class="week"
-              class:week-label={weekCell?.isLabelRow}
-              class:week-top={weekCell?.isFirstOfWeek}
-              class:week-bottom={weekCell?.isLastOfWeek}
-              data-label="Week"
-            >
-              {#if weekCell?.week !== null && weekCell?.week !== undefined}
-                <span class="week-rail-label">W{weekCell.week}</span>
               {/if}
             </td>
             {#each activeColumns as column, colIndex (column.key)}
@@ -2405,12 +2376,6 @@ function markRowsAsBaseline() {
                   {:else}
                     <span class="cell-static">{formatLocaleDate(row.date)}</span>
                   {/if}
-                  <!-- Mobile only: the due-confirm `!` sits inline, just to the
-                       right of the date and vertically centered with it. On
-                       desktop the same badge floats in the card gutter instead. -->
-                  {#if $isMobile && dueConfirm && !rowEditing}
-                    {@render dueBadge(rowIndex, row, isExpanded)}
-                  {/if}
                   <!-- Mobile-only per-card controls live in the card's header (date)
                        row: the pencil (read) ↔ Save/Cancel/Delete (edit). Hidden on
                        desktop via .card-header-actions{display:none}. -->
@@ -2489,7 +2454,7 @@ function markRowsAsBaseline() {
         {/each}
         {#if bottomSpacerHeight > 0}
           <tr aria-hidden="true" class="virtual-spacer">
-            <td colspan={activeColumns.length + 2} style={`height:${bottomSpacerHeight}px`}></td>
+            <td colspan={activeColumns.length + 1} style={`height:${bottomSpacerHeight}px`}></td>
           </tr>
         {/if}
       </tbody>
@@ -2500,11 +2465,7 @@ function markRowsAsBaseline() {
 </div>
 
 <style>
-  /* Containing block for the due-action badge. Because the badge is positioned
-     against THIS element (an ancestor of the horizontally-scrolling
-     `.table-scroll`), the scroll container's overflow never clips it — so the
-     badge can sit out in the card gutter, on top of everything, while the table
-     still clips exactly at its own edge (no boundary change, no scroll leak). */
+  /* Shared positioning context for table overlays and controls. */
   .inputs-table-region {
     position: relative;
   }
@@ -2804,7 +2765,7 @@ function markRowsAsBaseline() {
   }
 
   /* Full gridlines: every header/cell divider. Kept at low specificity so the
-     special cases below (0-width due-action gutter, the merged week rail, and
+     special cases below (the merged week rail and
      the virtualization spacers) override it without fighting !important. The
      ≤640px card layout resets these to 0 (cards have their own borders). */
   .inputs-table th,
@@ -2824,17 +2785,21 @@ function markRowsAsBaseline() {
     width: 100%;
   }
 
-  /* ── Week rail (fixed left-most gutter column) ──────────────────────────
-   * A read-only "W#" column the user can't reorder or hide. Same-week rows are
+  .inputs-table col.col-week {
+    width: 1%;
+  }
+
+  /* ── Week rail (fixed left-most column) ─────────────────────────────────
+   * A read-only Week column the user can't reorder or hide. Same-week rows are
    * visually merged: only the block's centred row paints its number (desktop),
    * and the dividing borders between same-week rows are suppressed so the block
    * reads as one tall cell. Per-row cells (not an HTML rowspan) because the grid
    * is virtualized — a spanning cell would vanish when its top row scrolls out
    * of the render window. On mobile each card shows its own week (see ≤640px). */
   .week-rail-label {
-    font-weight: 700;
+    font-weight: 800;
     font-variant: small-caps;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.025em;
     white-space: nowrap;
   }
 
@@ -2842,8 +2807,8 @@ function markRowsAsBaseline() {
     .inputs-table td.week {
       vertical-align: middle;
       text-align: center;
-      color: color-mix(in oklab, var(--headerText) 78%, var(--text) 22%);
-      background: color-mix(in oklab, var(--headerBg) 14%, transparent);
+      color: var(--text);
+      background: color-mix(in oklab, var(--headerBg) 12%, var(--surface) 88%);
       /* Drop the generic cell gridlines so same-week rows still merge; keep only
          the divider to the next column (.week-top re-adds block separators). */
       border: 0;
@@ -2856,16 +2821,55 @@ function markRowsAsBaseline() {
       display: none;
     }
     .inputs-table td.week.week-label .week-rail-label {
-      display: inline;
+      display: inline-flex;
+      min-width: 2.2rem;
+      justify-content: center;
+      padding: 0.12rem 0.3rem;
+      border: 1px solid color-mix(in oklab, var(--cardBorder) 34%, transparent);
+      border-radius: 6px;
+      background: var(--surface);
     }
 
     /* Divider between week blocks; interior (same-week) rows get none. */
     .inputs-table td.week.week-top {
       border-top: 1px solid var(--inputs-grid);
     }
+
+    .inputs-table td.week.week-has-due {
+      padding: 0.22rem;
+    }
+
+    /* Keep the rarely-used status inside the intrinsic Week rail. Its copy may
+       stack, while the transient decision panel overlays the data columns. */
+    .inputs-table td.week.week-has-due .due-action-btn {
+      min-width: 0;
+      padding: 0.32rem 0.2rem;
+      font-size: 0.74rem;
+      white-space: normal;
+    }
+
+    .inputs-table td.week.week-has-due .due-action-label {
+      max-width: 4ch;
+      line-height: 1;
+      text-align: center;
+    }
+
+    .inputs-table td.week.week-has-due .due-action-panel {
+      position: absolute;
+      z-index: 4;
+      top: 50%;
+      left: calc(100% + 0.35rem);
+      width: max-content;
+      padding: 0.3rem;
+      transform: translateY(-50%);
+      border-radius: 9px;
+      background: var(--surface);
+      box-shadow: 0 4px 12px color-mix(in oklab, black 20%, transparent);
+    }
   }
 
   .inputs-table th.week-num-header {
+    width: 1%;
     padding-inline: 0.4rem;
   }
 
@@ -3125,54 +3129,38 @@ function markRowsAsBaseline() {
     cursor: help;
   }
 
-  .inputs-table col.col-due-action {
-    width: 1.7rem;
-  }
-
-  .inputs-table th.due-action-header {
-    background: transparent;
-    border: 0;
-    padding: 0;
-  }
-
-  .inputs-table td.due-action-cell {
-    padding: 0;
-    text-align: center;
-    vertical-align: middle;
-    overflow: visible;
-    position: relative;
-    border: 0;
-  }
-
   .due-action-wrap {
     position: relative;
-    display: inline-flex;
+    display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 0.3rem;
+    width: 100%;
   }
 
   .due-action-btn {
-    border: 1px solid var(--warning);
-    background: color-mix(in oklab, var(--headerBg) 18%, white 82%);
-    color: var(--warning);
-    font-weight: 800;
-    font-size: 0.9rem;
-    line-height: 1;
-    width: 1.4rem;
-    height: 1.4rem;
-    border-radius: 999px;
-    padding: 0;
+    width: 100%;
+    border: 1px solid color-mix(in oklab, var(--warning) 78%, #5a3300 22%);
+    background: color-mix(in oklab, var(--warning) 82%, white 18%);
+    color: color-mix(in oklab, var(--warning) 16%, #111 84%);
+    font-weight: 750;
+    font-size: 0.82rem;
+    line-height: 1.1;
+    border-radius: 8px;
+    padding: 0.38rem 0.48rem;
     cursor: pointer;
-    display: inline-grid;
-    place-items: center;
-    opacity: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.36rem;
+    white-space: nowrap;
   }
 
   .due-action-btn:hover,
   .due-action-btn.expanded {
     background: var(--warning);
-    color: color-mix(in oklab, var(--headerBg) 18%, white 82%);
-    border: 1px solid color-mix(in oklab, var(--headerBg) 18%, white 82%);
+    border-color: color-mix(in oklab, var(--warning) 72%, #5a3300 28%);
   }
 
   /* Grid selector resting on the badge. */
@@ -3184,18 +3172,10 @@ function markRowsAsBaseline() {
   }
 
   .due-action-panel {
-    position: absolute;
-    left: 1.7rem;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 4;
-    display: inline-flex;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 0.3rem;
-    padding: 0.25rem 0.35rem;
-    background: var(--surface);
-    border: 1px solid var(--cardBorder);
-    border-radius: 10px;
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+    width: 100%;
     white-space: nowrap;
   }
 
@@ -3232,41 +3212,7 @@ function markRowsAsBaseline() {
     outline-offset: 1px;
   }
 
-  /* ── Desktop (≥641px): the due-confirm badge sits in the card gutter ──
-   * On mobile each row is a card and this button floats in the card corner (see
-   * the ≤640px block); the dedicated column + zero-width header exist only to
-   * support that layout. On desktop the table is flat, so the column reserves no
-   * width and the badge is lifted out into the card gutter, on top of
-   * everything. It's positioned against `.inputs-table-region` (an ancestor of
-   * `.table-scroll`), so the scroll container's overflow never clips it — and
-   * because `.table-scroll` itself is left untouched, the table still clips at
-   * its own edge and never leaks past the card when scrolled horizontally. */
-  @media (min-width: 641px) {
-    .inputs-table col.col-due-action {
-      width: 0;
-    }
-
-    .inputs-table th.due-action-header,
-    .inputs-table td.due-action-cell {
-      width: 0;
-      padding: 0;
-      /* static so the badge's containing block is `.inputs-table-region`, not
-       * this cell — that's what lets it escape the scroll clip. */
-      position: static;
-      overflow: visible;
-    }
-
-    .inputs-table td.due-action-cell .due-action-wrap {
-      position: absolute;
-      /* `top` is set in px by positionDueBadges() (measured row center, relative
-       * to .inputs-table-region); the transform centers on it and nudges the
-       * badge left into the gutter. left:auto keeps the static horizontal spot. */
-      transform: translate(-1.6rem, -50%);
-      z-index: 30;
-    }
-  }
-
-  tbody tr.row-skipped td:not(.due-action-cell):not(.week) {
+  tbody tr.row-skipped td:not(.week) {
     color: var(--danger);
     text-decoration: line-through;
     text-decoration-color: var(--danger);
@@ -3361,8 +3307,7 @@ function markRowsAsBaseline() {
 
     .inputs-table tbody tr {
       /* Flex column (not block) so cells can be re-ordered: the date becomes the
-       * card's top line via `order`, which frees its empty right side for the
-       * due-confirm button (see td.date / td.due-action-cell below). */
+       * card's top line and dose status follows it. */
       display: flex;
       flex-direction: column;
       position: relative;
@@ -3437,8 +3382,7 @@ function markRowsAsBaseline() {
      * the top of the card. */
     .inputs-table td.date {
       order: -1;
-      /* date value + due `!` group on the left; the action cluster is pushed to
-         the far right via margin-left:auto below. */
+      /* Date value stays left; the edit action cluster is pushed right. */
       justify-content: flex-start;
       align-items: center;
       flex-wrap: wrap;
@@ -3462,7 +3406,7 @@ function markRowsAsBaseline() {
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 0.4rem;
-      /* Hug the right edge so the due `!` can sit beside the date on the left. */
+      /* Hug the right edge of the card header. */
       margin-left: auto;
     }
 
@@ -3472,11 +3416,11 @@ function markRowsAsBaseline() {
       flex: 1 1 7rem;
     }
 
-    /* The dedicated due-action gutter cell is unused on mobile — the `!` badge is
-       rendered inline in the date header instead (see the date cell). Collapse
-       the empty cell entirely. */
-    .inputs-table td.due-action-cell {
-      display: none;
+    .inputs-table td.week.week-has-due {
+      padding: 0.48rem;
+      margin-top: 0.12rem;
+      border: 1px solid color-mix(in oklab, var(--warning) 48%, transparent);
+      border-radius: 9px;
     }
 
     /* The desktop overlay (position:absolute) doesn't apply to the card layout —
@@ -3558,8 +3502,8 @@ function markRowsAsBaseline() {
       color: white;
     }
 
-    /* Delete now lives in the per-card edit actions, so the gear's gutter
-       trash-can and the Hidden-columns manager are redundant on mobile. */
+    /* Delete lives in the per-card edit actions, so the desktop row control and
+       Hidden-columns manager are redundant on mobile. */
     .row-delete-btn {
       display: none;
     }
