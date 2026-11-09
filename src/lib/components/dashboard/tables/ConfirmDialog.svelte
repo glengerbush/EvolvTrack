@@ -10,6 +10,8 @@
     message,
     confirmLabel = 'Yes',
     cancelLabel = 'Cancel',
+    busy = false,
+    errorMessage = '',
     onConfirm,
     onCancel,
   }: {
@@ -17,12 +19,14 @@
     message: string;
     confirmLabel?: string;
     cancelLabel?: string;
-    onConfirm: () => void;
+    busy?: boolean;
+    errorMessage?: string;
+    onConfirm: () => void | Promise<void>;
     onCancel: () => void;
   } = $props();
 
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && !busy) {
       event.preventDefault();
       onCancel();
     }
@@ -38,14 +42,18 @@
     aria-modal="true"
     aria-labelledby="confirm-dialog-title"
     aria-describedby="confirm-dialog-description"
+    aria-busy={busy}
     tabindex="-1"
     use:focusTrap
   >
     <h3 id="confirm-dialog-title">{title}</h3>
     <p id="confirm-dialog-description">{message}</p>
+    {#if errorMessage}
+      <p class="confirm-error" role="alert">{errorMessage}</p>
+    {/if}
     <div class="confirm-actions">
-      <button type="button" class="confirm-yes" onclick={onConfirm}>{confirmLabel}</button>
-      <button type="button" class="confirm-cancel" data-initial-focus onclick={onCancel}>{cancelLabel}</button>
+      <button type="button" class="confirm-yes" disabled={busy} onclick={onConfirm}>{confirmLabel}</button>
+      <button type="button" class="confirm-cancel" disabled={busy} data-initial-focus onclick={onCancel}>{cancelLabel}</button>
     </div>
   </div>
 </div>
@@ -80,6 +88,12 @@
     line-height: 1.38;
   }
 
+  .confirm-dialog .confirm-error {
+    margin-top: 0.7rem;
+    color: var(--danger);
+    font-weight: 700;
+  }
+
   .confirm-actions {
     display: flex;
     justify-content: flex-end;
@@ -92,6 +106,11 @@
     padding: 0.48rem 0.7rem;
     font-weight: 800;
     cursor: pointer;
+  }
+
+  .confirm-actions button:disabled {
+    cursor: wait;
+    opacity: 0.68;
   }
 
   .confirm-yes {

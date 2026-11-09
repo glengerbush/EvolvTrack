@@ -28,6 +28,7 @@
     shotLocationOptions,
   } from '$lib/stores/shotLocationStore';
   import { columnDecimals, fmtNum, lbsToDisplayNum } from '$lib/utils/format';
+  import { errorMessage } from '$lib/utils/errorMessage';
   import {
     getInputTableSettings,
     saveInputRows,
@@ -324,6 +325,8 @@
   let mobileEditId = $state<string | null>(null);
   let mobileEditSnapshot: EditableInputRow | null = null;
   let rowDeleteRequest = $state<EditableInputRow | null>(null);
+  let rowDeleteBusy = $state(false);
+  let rowDeleteError = $state('');
   // True only while a mobile card is being edited — gates the autosave path so
   // buffered edits don't persist until Save.
   const mobileEditingActive = $derived($isMobile && mobileEditId !== null);
@@ -1521,6 +1524,35 @@
     tableRows = recalculateDerived(tableRows.filter((r) => r !== row));
   }
 
+  function requestRowDelete(row: EditableInputRow) {
+    rowDeleteError = '';
+    rowDeleteRequest = row;
+  }
+
+  async function confirmRowDelete() {
+    const target = rowDeleteRequest;
+    if (!target || rowDeleteBusy) return;
+
+    rowDeleteBusy = true;
+    rowDeleteError = '';
+    try {
+      await performDeleteRow(target);
+      rowDeleteRequest = null;
+      mobileEditId = null;
+      mobileEditSnapshot = null;
+    } catch (cause) {
+      rowDeleteError = `Could not delete this row. ${errorMessage(cause)}`;
+    } finally {
+      rowDeleteBusy = false;
+    }
+  }
+
+  function cancelRowDelete() {
+    if (rowDeleteBusy) return;
+    rowDeleteRequest = null;
+    rowDeleteError = '';
+  }
+
   function syncRowsFromLiveQuery(nextRows: HealthInputRow[]) {
     // If the incoming snapshot already matches our local state by content
     // (typical immediately after a save we just did), skip the recalc + clones.
@@ -2076,15 +2108,11 @@ function markRowsAsBaseline() {
     <ConfirmDialog
       title="Delete this row?"
       message="This permanently removes this day's logged data. This cannot be undone."
-      confirmLabel="Delete"
-      onConfirm={() => {
-        const target = rowDeleteRequest;
-        rowDeleteRequest = null;
-        mobileEditId = null;
-        mobileEditSnapshot = null;
-        if (target) void performDeleteRow(target);
-      }}
-      onCancel={() => (rowDeleteRequest = null)}
+      confirmLabel={rowDeleteBusy ? 'Deleting…' : 'Delete'}
+      busy={rowDeleteBusy}
+      errorMessage={rowDeleteError}
+      onConfirm={confirmRowDelete}
+      onCancel={cancelRowDelete}
     />
   {/if}
 
@@ -2382,7 +2410,7 @@ function markRowsAsBaseline() {
                   <span class="card-header-actions">
                     {#if isRowMobileEditing(row)}
                       <button type="button" class="card-action-btn card-save" aria-label="Save" title="Save" onclick={() => saveMobileEdit(row)}><SaveIcon size="1.1rem" /></button>
-                      <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => (rowDeleteRequest = row)}><TrashIcon size="1.15rem" /></button>
+                      <button type="button" class="card-action-btn card-delete" aria-label="Delete" title="Delete" onclick={() => requestRowDelete(row)}><TrashIcon size="1.15rem" /></button>
                       <button type="button" class="card-action-btn card-cancel" aria-label="Cancel" title="Cancel" onclick={() => cancelMobileEdit(row)}><CloseIcon size="1.1rem" /></button>
                     {:else}
                       <EditPencil ariaLabel={`Edit entry for ${row.date}`} onclick={() => startMobileEdit(row)} />
