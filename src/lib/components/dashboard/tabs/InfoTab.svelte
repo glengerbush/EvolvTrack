@@ -204,7 +204,7 @@
     <details class="faq-item">
       <summary><span class="faq-chevron" aria-hidden="true">▸</span>What do the calculators do?</summary>
       <div class="faq-answer">
-        <p>The Calculators tab has three tools:</p>
+        <p>The Calculators tab has four tools:</p>
         <ul>
           <li>
             <strong>Dosage calculator</strong> - given a vial concentration and
@@ -213,6 +213,10 @@
           <li>
             <strong>Reverse dose calculator</strong> - given a number of units
             drawn, tells you the dose in milligrams.
+          </li>
+          <li>
+            <strong>Split dose calculator</strong> - converts a weekly amount
+            to doses every X days or on two selected weekdays.
           </li>
           <li>
             <strong>Vial transition calculator</strong> - helps you adjust when

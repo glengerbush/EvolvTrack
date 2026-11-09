@@ -3,6 +3,7 @@
   import DosageCalculator from '$lib/components/dashboard/calculators/DosageCalculator.svelte';
   import ReverseDoseCalculator from '$lib/components/dashboard/calculators/ReverseDoseCalculator.svelte';
   import VialTransitionCalculator from '$lib/components/dashboard/calculators/VialTransitionCalculator.svelte';
+  import SplitDoseCalculator from '$lib/components/dashboard/calculators/SplitDoseCalculator.svelte';
 
   const {} = $props();
 
@@ -40,6 +41,7 @@
 
   <DosageCalculator />
   <ReverseDoseCalculator />
+  <SplitDoseCalculator />
   <VialTransitionCalculator />
 </main>
 
