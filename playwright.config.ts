@@ -21,7 +21,7 @@ export default defineConfig({
     },
     {
       name: 'mobile-webkit',
-      testMatch: ['mobile-delete.spec.ts', 'mobile-graph.spec.ts'],
+      testMatch: ['mobile-delete.spec.ts', 'mobile-graph.spec.ts', 'mobile-dose-summary.spec.ts'],
       use: { ...devices['iPhone 13'] }
     }
   ],

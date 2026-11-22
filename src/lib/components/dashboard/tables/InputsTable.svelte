@@ -5,6 +5,7 @@
   import MultiPicker from '$lib/components/dashboard/tables/MultiPicker.svelte';
   import DateInput from '$lib/components/dashboard/tables/DateInput.svelte';
   import DoseVialPicker from '$lib/components/dashboard/tables/DoseVialPicker.svelte';
+  import DoseSummary from '$lib/components/dashboard/tables/DoseSummary.svelte';
   import ConfirmDialog from '$lib/components/dashboard/tables/ConfirmDialog.svelte';
   import EditPencil from '$lib/components/dashboard/EditPencil.svelte';
   import SaveIcon from '$lib/components/icons/SaveIcon.svelte';
@@ -2244,6 +2245,8 @@ function markRowsAsBaseline() {
           {@const weekCell = weekCells[rowIndex]}
           {@const dueConfirm = isDueConfirmation(row)}
           {@const isExpanded = !!row.entryId && expandedDueId === row.entryId}
+          {@const rowEditing = isRowMobileEditing(row)}
+          {@const showDoseSummary = $isMobile && !rowEditing && Number.isFinite(parseFloat(row.dose)) && parseFloat(row.dose) > 0}
           <tr
             class:row-alt={rowIndex % 2 === 1}
             class:new-row={isDraftRow(row)}
@@ -2286,7 +2289,6 @@ function markRowsAsBaseline() {
               {/if}
             </td>
             {#each activeColumns as column, colIndex (column.key)}
-              {@const rowEditing = isRowMobileEditing(row)}
               <!-- On mobile a cell is "editing" when its card is open (all text
                    fields at once); on desktop it's the two-state grid selection. -->
               {@const editingCell = $isMobile ? (rowEditing && isTextColumn(column.key)) : isCellEditing(rowIndex, colIndex)}
@@ -2302,6 +2304,7 @@ function markRowsAsBaseline() {
                 class:cell-selected={!$isMobile && isRingSelected(rowIndex, colIndex)}
                 class:cell-editing={editingCell && !$isMobile}
                 class:cell-readonly={READONLY_COLS.has(column.key)}
+                class:mobile-dose-summary={column.key === 'dose' && showDoseSummary}
                 class:empty-cell={isCellEmpty(row, column.key) && !rowEditing && !isSelected(rowIndex, colIndex)}
                 class:col-indicator-left={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'left'}
                 class:col-indicator-right={columnSettingsOpen && colIndicator?.col === colIndex && colIndicator?.side === 'right'}
@@ -2353,6 +2356,13 @@ function markRowsAsBaseline() {
                     <span class="cell-static">{row.shotLocation}</span>
                   {/if}
                 {:else if column.key === 'dose'}
+                  {#if showDoseSummary}
+                    <DoseSummary
+                      amount={fmtNum(parseFloat(row.dose), doseDecimals)}
+                      medication={row.medication}
+                      status={row.doseSkipped ? 'skipped' : row.dosePlanned || row.date > todayKey ? 'planned' : 'taken'}
+                    />
+                  {:else}
                   <div class="dose-entry">
                     {#if showPicker}
                     <DoseVialPicker
@@ -2399,6 +2409,7 @@ function markRowsAsBaseline() {
                       >⚠</span>
                     {/if}
                   </div>
+                  {/if}
                 {:else if column.key === 'date'}
                   {#if editingCell}
                     <DateInput
@@ -3246,7 +3257,7 @@ function markRowsAsBaseline() {
     outline-offset: 1px;
   }
 
-  tbody tr.row-skipped td:not(.week) {
+  tbody tr.row-skipped td:not(.week):not(.mobile-dose-summary) {
     color: var(--danger);
     text-decoration: line-through;
     text-decoration-color: var(--danger);
@@ -3412,10 +3423,10 @@ function markRowsAsBaseline() {
     }
 
     /* The date is the card's header row: the date/value on the left, the per-card
-     * controls (pencil, or Save/Cancel/Delete) on the right. order:-1 lifts it to
-     * the top of the card. */
+     * controls (pencil, or Save/Cancel/Delete) on the right. It precedes the
+     * dose summary, which sits above the remaining fields. */
     .inputs-table td.date {
-      order: -1;
+      order: -2;
       /* Date value stays left; the edit action cluster is pushed right. */
       justify-content: flex-start;
       align-items: center;
@@ -3430,6 +3441,17 @@ function markRowsAsBaseline() {
     }
 
     .inputs-table td.date::before {
+      content: none;
+    }
+
+    .inputs-table td.mobile-dose-summary {
+      order: -1;
+      padding: 0.35rem 0 0.25rem;
+      border-bottom: 0;
+      text-decoration: none;
+    }
+
+    .inputs-table td.mobile-dose-summary::before {
       content: none;
     }
 
