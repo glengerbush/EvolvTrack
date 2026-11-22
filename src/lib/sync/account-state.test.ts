@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthRetryableFetchError, AuthSessionMissingError } from '@supabase/supabase-js';
 
 const h = vi.hoisted(() => ({
   upsertMock: vi.fn(),
@@ -21,6 +22,7 @@ import {
   abandonSyncTransition,
   advanceSyncTransitionPhase,
   getDeviceId,
+  getAuthenticatedUserId,
   hydrateDeviceId,
   requireAuthenticatedUser,
   upsertRemoteSyncAccount,
@@ -130,6 +132,19 @@ describe('requireAuthenticatedUser', () => {
   it('throws a friendly message when there is no user and no error', async () => {
     h.getUserMock.mockResolvedValueOnce({ data: { user: null }, error: null });
     await expect(requireAuthenticatedUser()).rejects.toThrow(/sign in/i);
+  });
+});
+
+describe('background sync authentication', () => {
+  it('propagates temporary auth transport failures so sync can retry', async () => {
+    const error = new AuthRetryableFetchError('Service temporarily unavailable', 503);
+    h.getUserMock.mockResolvedValueOnce({ data: { user: null }, error });
+    await expect(getAuthenticatedUserId()).rejects.toBe(error);
+  });
+
+  it('treats an absent session as signed out', async () => {
+    h.getUserMock.mockResolvedValueOnce({ data: { user: null }, error: new AuthSessionMissingError() });
+    await expect(getAuthenticatedUserId()).resolves.toBeNull();
   });
 });
 

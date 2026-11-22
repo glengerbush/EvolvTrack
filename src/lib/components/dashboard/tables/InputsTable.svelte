@@ -797,6 +797,10 @@
   // are serialized through one promise chain and re-resolve the row by identity,
   // so a draft never double-inserts even under rapid edits.
   let pendingRowSave: Promise<void> = Promise.resolve();
+  const deletingRowIds = new Set<string>();
+  // A confirmation can still reference the draft after its save assigns a
+  // database id and a store refresh replaces the rendered row.
+  const savedDraftEntryIds = new Map<string, string>();
   function rowIdentity(row: EditableInputRow): string | undefined {
     return row.draftId ?? row.entryId;
   }
@@ -812,10 +816,11 @@
     // persists (which clears mobileEditId first, so this guard then passes).
     if (mobileEditingActive) return;
     const id = rowIdentity(row);
-    if (!id) return;
+    if (!id || deletingRowIds.has(id)) return;
     pendingRowSave = pendingRowSave.catch(() => undefined).then(() => autosaveByIdentity(id));
   }
   async function autosaveByIdentity(id: string) {
+    if (deletingRowIds.has(id)) return;
     const rowIndex = tableRows.findIndex((r) => rowIdentity(r) === id);
     if (rowIndex < 0) return;
     commitWeightDraftFor(rowIndex);
@@ -832,6 +837,7 @@
       const [saved] = await saveInputRows([saveInput], {
         defaultMedication: defaultMedication as Medication | '',
       });
+      if (row.draftId && saved.entryId) savedDraftEntryIds.set(id, saved.entryId);
       const merged = mergeSavedInputRow(row, saved) as EditableInputRow;
       tableRows = tableRows.map((r) => (rowIdentity(r) === id ? merged : r));
       markRowsAsBaseline();
@@ -1524,11 +1530,25 @@
     // Confirmation state proxies the row, and async updates can replace it.
     // Match by stable identity rather than object reference.
     const id = rowIdentity(row);
-    if (!id) return;
-    if (!isDraftRow(row) && row.entryId) await deleteEntry(row.entryId);
-    weightDrafts.delete(id);
-    draftBaseTableRows = draftBaseTableRows.filter((r) => rowIdentity(r) !== id);
-    tableRows = recalculateDerived(tableRows.filter((r) => rowIdentity(r) !== id));
+    if (!id || deletingRowIds.has(id)) return;
+    deletingRowIds.add(id);
+    try {
+      // An in-flight insert must finish before we can delete its persisted id.
+      // Queued saves for this identity are skipped while deletion is pending.
+      await pendingRowSave;
+      const entryId = savedDraftEntryIds.get(id)
+        ?? tableRows.find((r) => rowIdentity(r) === id)?.entryId
+        ?? row.entryId;
+      if (entryId) await deleteEntry(entryId);
+      const keep = (r: EditableInputRow) => rowIdentity(r) !== id && (!entryId || r.entryId !== entryId);
+      weightDrafts.delete(id);
+      if (entryId) weightDrafts.delete(entryId);
+      savedDraftEntryIds.delete(id);
+      draftBaseTableRows = draftBaseTableRows.filter(keep);
+      tableRows = recalculateDerived(tableRows.filter(keep));
+    } finally {
+      deletingRowIds.delete(id);
+    }
   }
 
   function requestRowDelete(row: EditableInputRow) {

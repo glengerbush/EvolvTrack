@@ -46,6 +46,12 @@ export const schemaV3: StoreSchema = {
   injections: null,
 };
 
+// Local-only deletion clocks remain after the outbox has been acknowledged.
+export const schemaV4: StoreSchema = {
+  ...schemaV3,
+  deletions: 'id,aggregate,updatedAt',
+};
+
 // One-time conversion of the old split tables into unified entries. Same-date
 // weight+injection pairs are zipped into one entry (preserving how the table
 // looked); extras on a date become their own entries.
@@ -106,4 +112,18 @@ export function defineDatabaseVersions(db: Dexie) {
   db.version(1).stores(schemaV1);
   db.version(2).stores(schemaV2);
   db.version(3).stores(schemaV3).upgrade(migrateToUnifiedEntries as never);
+  db.version(4).stores(schemaV4).upgrade(async (tx) => {
+    const pending = await tx.table('outbox').toArray();
+    for (const row of pending) {
+      if (row.op !== 'delete' || !['entry', 'prescription'].includes(row.aggregate)) continue;
+      await tx.table('deletions').put({
+        id: row.id, aggregate: row.aggregate, entityId: row.entityId, updatedAt: row.updatedAt,
+      });
+      // An older app may already have pulled this row back while its delete
+      // was pending. Repair only when the queued deletion still wins.
+      const table = tx.table(row.aggregate === 'entry' ? 'entries' : 'prescriptions');
+      const local = await table.get(row.entityId);
+      if (local && Date.parse(local.updatedAt) <= Date.parse(row.updatedAt)) await table.delete(row.entityId);
+    }
+  });
 }

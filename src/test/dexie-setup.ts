@@ -13,6 +13,7 @@ async function resetDb() {
     db.encrypted.clear(),
     db.migrationBackfill.clear(),
     db.outbox.clear(),
+    db.deletions.clear(),
   ]);
 }
 

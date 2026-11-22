@@ -4,6 +4,31 @@ import Dexie from 'dexie';
 import { DB_SCHEMA_VERSION, defineDatabaseVersions, schemaV1, schemaV2, schemaV3 } from '$lib/db/migrations';
 
 describe('DB_SCHEMA_VERSION', () => {
+  it('upgrades queued deletes into durable markers and repairs only stale resurrected rows', async () => {
+    const name = 'migrations-delete-markers';
+    const old = new Dexie(name);
+    old.version(3).stores(schemaV3);
+    await old.open();
+    await old.table('entries').bulkPut([
+      { id: 'stale', date: '2026-11-01', updatedAt: '2026-11-01T00:00:00.000Z', wellness: 7 },
+      { id: 'newer', date: '2026-11-03', updatedAt: '2026-11-03T00:00:00.000Z', wellness: 8 },
+    ]);
+    await old.table('outbox').bulkPut(['stale', 'newer'].map(entityId => ({
+      id: `entry:${entityId}`, aggregate: 'entry', entityId, op: 'delete',
+      updatedAt: '2026-11-02T00:00:00.000Z', payload: null, rev: entityId,
+    })));
+    old.close();
+    const upgraded = new Dexie(name);
+    defineDatabaseVersions(upgraded);
+    try {
+      await upgraded.open();
+      expect(await upgraded.table('deletions').count()).toBe(2);
+      expect(await upgraded.table('entries').get('stale')).toBeUndefined();
+      expect(await upgraded.table('entries').get('newer')).toMatchObject({ wellness: 8 });
+      expect(await upgraded.table('outbox').count()).toBe(2);
+    } finally { await upgraded.delete(); }
+  });
+
   it('is exported as a positive integer', () => {
     expect(Number.isInteger(DB_SCHEMA_VERSION)).toBe(true);
     expect(DB_SCHEMA_VERSION).toBeGreaterThanOrEqual(1);
@@ -113,6 +138,7 @@ describe('defineDatabaseVersions', () => {
     expect(versionSpy).toHaveBeenCalledWith(1);
     expect(versionSpy).toHaveBeenCalledWith(2);
     expect(versionSpy).toHaveBeenCalledWith(3);
+    expect(versionSpy).toHaveBeenCalledWith(4);
     dexie.close();
   });
 
@@ -125,6 +151,7 @@ describe('defineDatabaseVersions', () => {
 
     const tableNames = dexie.tables.map((t) => t.name).sort();
     expect(tableNames).toEqual([
+      'deletions',
       'encrypted',
       'entries',
       'migrationBackfill',

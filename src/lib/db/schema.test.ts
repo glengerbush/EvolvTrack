@@ -20,11 +20,12 @@ describe('schema.ts singleton', () => {
     expect(db.name).toBe('evolvtrack');
   });
 
-  it('exposes all seven expected tables', async () => {
+  it('exposes all expected tables', async () => {
     // Force open so dexie.tables is populated.
     if (!db.isOpen()) await db.open();
     const tableNames = db.tables.map((t) => t.name).sort();
     expect(tableNames).toEqual([
+      'deletions',
       'encrypted',
       'entries',
       'migrationBackfill',

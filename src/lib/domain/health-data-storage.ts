@@ -151,10 +151,13 @@ async function writeOutboxChange(
 }
 
 type ImportChangeOptions = {
-  /** Pre-existing row ids that the caller cleared (replace-mode only) — they
+  /** Pre-existing rows that the caller cleared (replace-mode only) — they
    *  get delete tombstones on the wire so the cloud actually drops them. Ids
    *  also present in `data` are coalesced into the upsert instead. */
-  deletedIds?: { entries: string[]; prescriptions: string[] };
+  deletedRecords?: {
+    entries: Pick<HealthEntry, 'id' | 'updatedAt'>[];
+    prescriptions: Pick<Prescription, 'id' | 'updatedAt'>[];
+  };
   /** Every symptom string found on the imported rows. Any not already known
    *  to the profile are added to `profile.symptomOptions` with a generated
    *  color, in the same Dexie write and the same outbox entry as the rest of
@@ -216,7 +219,7 @@ export async function applyHealthDataImport(
   let hasOutgoingChanges = false;
   await db.transaction(
     'rw',
-    [db.entries, db.prescriptions, db.profile, db.outbox],
+    [db.entries, db.prescriptions, db.profile, db.outbox, db.deletions],
     async () => {
       await assertDataEditAllowed('entry');
       if (input.mode === 'merge') {
@@ -231,16 +234,13 @@ export async function applyHealthDataImport(
         appliedEntries.flatMap((entry) => entry.symptoms ?? []),
       );
 
-      let deletedIds: ImportChangeOptions['deletedIds'];
+      let deletedRecords: ImportChangeOptions['deletedRecords'];
       if (input.mode === 'replace') {
-        const [entryIds, prescriptionIds] = await Promise.all([
-          db.entries.toCollection().primaryKeys(),
-          db.prescriptions.toCollection().primaryKeys(),
+        const [entries, prescriptions] = await Promise.all([
+          db.entries.toArray(),
+          db.prescriptions.toArray(),
         ]);
-        deletedIds = {
-          entries: entryIds as string[],
-          prescriptions: prescriptionIds as string[],
-        };
+        deletedRecords = { entries, prescriptions };
         await Promise.all([
           db.entries.clear(),
           db.prescriptions.clear(),
@@ -256,7 +256,7 @@ export async function applyHealthDataImport(
       ]);
       const changes = await enqueueImportChanges(
         { ...input.data, entries: appliedEntries },
-        { deletedIds, importedSymptoms },
+        { deletedRecords, importedSymptoms },
       );
       persistedProfile = changes.persistedProfile;
       hasOutgoingChanges = changes.hasOutgoingChanges;
@@ -283,7 +283,7 @@ export async function applyHealthDataImport(
  *      stub seeded with the new symptoms. If neither an imported profile
  *      nor new symptoms are present, the profile row is left untouched.
  *   2. Writes that profile to `db.profile` (if any).
- *   3. Builds outbox entries: delete tombstones for `deletedIds`, upserts
+ *   3. Builds outbox entries: delete tombstones for `deletedRecords`, upserts
  *      for every row in `data`, and a single upsert for the merged profile.
  *
  * A single profile write per import keeps push order deterministic and avoids the brief window where
@@ -293,7 +293,7 @@ async function enqueueImportChanges(
   data: HealthDataImportData,
   options: ImportChangeOptions = {},
 ): Promise<{ persistedProfile?: ProfileSettings; hasOutgoingChanges: boolean }> {
-  const { deletedIds, importedSymptoms } = options;
+  const { deletedRecords, importedSymptoms } = options;
   const profileToPersist = await mergeImportedProfile(data.profile, importedSymptoms);
   if (profileToPersist) {
     await db.profile.put(profileToPersist);
@@ -306,15 +306,15 @@ async function enqueueImportChanges(
     prescription: new Set(data.prescriptions.map((p) => p.id)),
   };
 
-  function tombstone(aggregate: SyncAggregate, ids: string[] | undefined, kept: Set<string>) {
-    for (const id of ids ?? []) {
+  function tombstone(aggregate: SyncAggregate, rows: { id: string; updatedAt: IsoDateTime }[] | undefined, kept: Set<string>) {
+    for (const { id, updatedAt } of rows ?? []) {
       if (kept.has(id)) continue;
       entries.push({
         id: `${aggregate}:${id}`,
         aggregate,
         entityId: id,
         op: 'delete',
-        updatedAt: enqueuedAt,
+        updatedAt: mutationTimeAfter(updatedAt, enqueuedAt),
         payload: null,
         enqueuedAt,
         rev: nanoid(),
@@ -335,8 +335,8 @@ async function enqueueImportChanges(
     });
   }
 
-  tombstone('entry', deletedIds?.entries, importedIds.entry);
-  tombstone('prescription', deletedIds?.prescriptions, importedIds.prescription);
+  tombstone('entry', deletedRecords?.entries, importedIds.entry);
+  tombstone('prescription', deletedRecords?.prescriptions, importedIds.prescription);
 
   for (const e of data.entries) upsert('entry', e.id, e.updatedAt, e);
   for (const p of data.prescriptions) upsert('prescription', p.id, p.updatedAt, p);
@@ -346,6 +346,9 @@ async function enqueueImportChanges(
 
   if (entries.length > 0) {
     await db.outbox.bulkPut(entries);
+    for (const entry of entries) {
+      if (entry.op === 'delete') await rememberDeletion(entry.aggregate, entry.entityId, entry.updatedAt);
+    }
   }
 
   return {
@@ -446,6 +449,20 @@ function parseTime(value: IsoDateTime): number {
   return new Date(value).getTime();
 }
 
+// A local mutation must follow the version it changes, even within the same
+// millisecond or after pulling a record from a device whose clock is ahead.
+function mutationTimeAfter(previous: IsoDateTime, candidate = now()): IsoDateTime {
+  return new Date(Math.max(parseTime(candidate), parseTime(previous) + 1)).toISOString();
+}
+
+async function rememberDeletion(aggregate: SyncAggregate, entityId: string, updatedAt: IsoDateTime) {
+  const id = `${aggregate}:${entityId}`;
+  const previous = await db.deletions.get(id);
+  if (!previous || parseTime(updatedAt) > parseTime(previous.updatedAt)) {
+    await db.deletions.put({ id, aggregate, entityId, updatedAt });
+  }
+}
+
 /**
  * Drop a pending outbox entry that a just-applied remote change has
  * superseded. Without this, a stale local edit (e.g. `X@T1`) would still be
@@ -482,19 +499,32 @@ async function applyEntityChange<T extends Mergeable>(
   remoteUpdatedAt: IsoDateTime,
 ): Promise<ApplyOutcome<T>> {
   const outcome: ApplyOutcome<T> = { result: null, stored: null };
-  await db.transaction('rw', table, db.outbox, async () => {
+  await db.transaction('rw', table, db.outbox, db.deletions, async () => {
     const local = await table.get(entityId);
+    const deletionId = `${aggregate}:${entityId}`;
+    const deletion = await db.deletions.get(deletionId);
+
+    // Absence is not proof of a new entity: a pulled creation/edit can arrive
+    // after a local delete, even after that delete was pushed and acknowledged.
+    if (op === 'upsert' && deletion && parseTime(remoteUpdatedAt) <= parseTime(deletion.updatedAt)) return;
 
     if (op === 'delete') {
       // Delete wins ties: a delete stamped at the same instant as the local
       // edit removes the row; only a strictly newer local edit keeps it.
-      if (local && parseTime(remoteUpdatedAt) >= parseTime(local.updatedAt)) {
-        await table.delete(entityId);
-        outcome.result = 'delete';
+      if (!local || parseTime(remoteUpdatedAt) >= parseTime(local.updatedAt)) {
+        await rememberDeletion(aggregate, entityId, remoteUpdatedAt);
+        if (local) {
+          await table.delete(entityId);
+          outcome.result = 'delete';
+        }
         await reconcileOutbox(aggregate, entityId, remoteUpdatedAt);
       }
       return;
     }
+
+    // A genuinely newer upsert may restore an entity under the existing LWW
+    // policy. Older snapshots and ties above cannot undo a deletion.
+    if (deletion) await db.deletions.delete(deletionId);
 
     // Brand-new entity: nothing to merge against, just take the remote.
     if (!local) {
@@ -767,7 +797,7 @@ export async function updateEntry(
     const before = await db.entries.get(id);
     if (!before) return;
     const merged = applyPatchWithClears(before, data);
-    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), mutationTimeAfter(before.updatedAt, ts));
     const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
     await db.entries.put(updated);
     await writeOutboxChange('entry', id, 'upsert', updated.updatedAt, updated);
@@ -785,12 +815,17 @@ export async function bulkUpdateEntries(
   data: Partial<Omit<HealthEntry, 'id' | 'createdAt'>>,
 ): Promise<void> {
   if (ids.length === 0) return;
-  const ts = now();
+  let ts = now();
   await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
     await assertDataEditAllowed('entry');
-    for (const id of ids) {
-      const before = await db.entries.get(id);
+    const entries = await db.entries.bulkGet(ids);
+    // One shared clock keeps the bulk event consistent with every stored row.
+    for (const before of entries) {
+      if (before) ts = mutationTimeAfter(before.updatedAt, ts);
+    }
+    for (const before of entries) {
       if (!before) continue;
+      const id = before.id;
       const merged = applyPatchWithClears(before, data);
       const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
       const updated: HealthEntry = { ...merged, fieldUpdatedAt, updatedAt };
@@ -802,12 +837,15 @@ export async function bulkUpdateEntries(
 }
 
 export async function deleteEntry(id: string): Promise<void> {
-  const deletedAt = now();
-  await db.transaction('rw', db.entries, db.profile, db.outbox, async () => {
+  await db.transaction('rw', db.entries, db.profile, db.outbox, db.deletions, async () => {
     await assertDataEditAllowed('entry');
     const existing = await db.entries.get(id);
     await db.entries.delete(id);
-    if (existing) await writeOutboxChange('entry', id, 'delete', deletedAt, null);
+    if (existing) {
+      const deletedAt = mutationTimeAfter(existing.updatedAt);
+      await rememberDeletion('entry', id, deletedAt);
+      await writeOutboxChange('entry', id, 'delete', deletedAt, null);
+    }
   });
   emitHealthChange({ action: 'delete', id });
 }
@@ -859,7 +897,7 @@ export async function updatePrescription(
     const before = await db.prescriptions.get(id);
     if (!before) return;
     const merged = applyPatchWithClears(before, data);
-    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+    const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), mutationTimeAfter(before.updatedAt, ts));
     const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
     await db.prescriptions.put(updated);
     await writeOutboxChange('prescription', id, 'upsert', updated.updatedAt, updated);
@@ -882,7 +920,7 @@ export async function bulkUpdatePrescriptions(
       const before = await db.prescriptions.get(id);
       if (!before) continue;
       const merged = applyPatchWithClears(before, data);
-      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), ts);
+      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(data), mutationTimeAfter(before.updatedAt, ts));
       const updated: Prescription = { ...merged, fieldUpdatedAt, updatedAt };
       await db.prescriptions.put(updated);
       await writeOutboxChange('prescription', id, 'upsert', updated.updatedAt, updated);
@@ -891,12 +929,15 @@ export async function bulkUpdatePrescriptions(
 }
 
 export async function deletePrescription(id: string): Promise<void> {
-  const deletedAt = now();
-  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, async () => {
+  await db.transaction('rw', db.prescriptions, db.profile, db.outbox, db.deletions, async () => {
     await assertDataEditAllowed('prescription');
     const existing = await db.prescriptions.get(id);
     await db.prescriptions.delete(id);
-    if (existing) await writeOutboxChange('prescription', id, 'delete', deletedAt, null);
+    if (existing) {
+      const deletedAt = mutationTimeAfter(existing.updatedAt);
+      await rememberDeletion('prescription', id, deletedAt);
+      await writeOutboxChange('prescription', id, 'delete', deletedAt, null);
+    }
   });
 }
 
@@ -963,7 +1004,7 @@ export async function saveProfile(
     let saved: ProfileSettings;
     if (existing) {
       const merged = applyPatchWithClears(existing, partial);
-      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(partial), ts, {
+      const { fieldUpdatedAt, updatedAt } = bumpFieldStamps(merged, Object.keys(partial), mutationTimeAfter(existing.updatedAt, ts), {
         reserved: PROFILE_DEVICE_LOCAL,
       });
       saved = { ...merged, fieldUpdatedAt, updatedAt };

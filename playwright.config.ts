@@ -6,6 +6,7 @@ const E2E_BASE_URL = `http://127.0.0.1:${E2E_PORT}`;
 
 export default defineConfig({
   testDir: 'tests',
+  testIgnore: '**/pwa/**',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

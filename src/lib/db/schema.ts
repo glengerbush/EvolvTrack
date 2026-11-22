@@ -5,6 +5,7 @@ import type {
   OutboxEntry,
   Prescription,
   ProfileSettings,
+  SyncAggregate,
   WrappedKeyBundle,
 } from '$lib/domain/types';
 import { defineDatabaseVersions } from '$lib/db/migrations';
@@ -20,6 +21,14 @@ export interface EncryptedRecord {
   updatedAt: string;
 }
 
+/** Durable deletion clock; survives outbox acknowledgments and app restarts. */
+export interface DeletionRecord {
+  id: string;
+  aggregate: SyncAggregate;
+  entityId: string;
+  updatedAt: string;
+}
+
 export class EvolvTrackDB extends Dexie {
   entries!: Table<HealthEntry, string>;
   prescriptions!: Table<Prescription, string>;
@@ -27,6 +36,7 @@ export class EvolvTrackDB extends Dexie {
   encrypted!: Table<EncryptedRecord, string>;
   migrationBackfill!: Table<MigrationBackfillEntry, string>;
   outbox!: Table<OutboxEntry, string>;
+  deletions!: Table<DeletionRecord, string>;
   wrappedKeys!: Table<WrappedKeyBundle, 'self'>;
 
   constructor() {

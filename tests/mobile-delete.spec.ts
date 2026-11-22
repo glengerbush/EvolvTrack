@@ -83,3 +83,52 @@ test('mobile row delete reports a blocked write and can be retried', async ({ pa
   await expect(page.getByRole('button', { name: editLabel!, exact: true })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });
+
+test('deleting a newly saved card waits for its in-flight local insert', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app#health');
+  await expect(page.getByRole('button', { name: 'Add input row' })).toBeVisible({ timeout: 15000 });
+  await page.evaluate(async () => {
+    const schemaPath = '/src/lib/db/schema.ts';
+    const { db } = await import(schemaPath);
+    const original = db.entries.put.bind(db.entries);
+    let release: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const state = window as any;
+    state.releaseEntryInsert = () => release();
+    state.entryInsertStarted = false;
+    state.entryInsertFinished = false;
+    db.entries.put = async (...args: any[]) => {
+      if (args[0].notes === 'Rapid save/delete regression') {
+        state.entryInsertStarted = true;
+        await db.constructor.waitFor(gate);
+        const result = await original(...args);
+        state.entryInsertFinished = true;
+        return result;
+      }
+      return original(...args);
+    };
+  });
+  await page.getByRole('button', { name: 'Add input row' }).click();
+  const card = page.locator('tr.mobile-card-editing');
+  await card.locator('td.wellness input').fill('7');
+  await card.locator('textarea.notes-input').fill('Rapid save/delete regression');
+  await card.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(() => (window as any).entryInsertStarted);
+  await page.getByRole('button', { name: /Edit entry for/ }).last().click();
+  await card.getByRole('button', { name: 'Delete', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Delete this row?' });
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.evaluate(() => (window as any).releaseEntryInsert());
+  await page.waitForFunction(() => (window as any).entryInsertFinished);
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => page.evaluate(async () => {
+    const schemaPath = '/src/lib/db/schema.ts';
+    const { db } = await import(schemaPath);
+    return db.entries.count();
+  })).toBe(0);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Add input row' })).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('.inputs-table tbody tr').filter({ hasText: 'Rapid save/delete regression' })).toHaveCount(0);
+});

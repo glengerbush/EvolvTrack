@@ -12,6 +12,7 @@
  *    state changes.
  */
 import { get } from 'svelte/store';
+import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { pullAndApply, pushOutbox } from '$lib/sync/sync-engine';
 import { e2eeLifecycle } from '$lib/sync/e2ee-lifecycle-runtime';
 import { fetchRemoteSyncAccount, getAuthenticatedUserId } from '$lib/sync/account-state';
@@ -52,6 +53,7 @@ function browserSaysOffline(): boolean {
 
 function looksLikeNetworkError(error: unknown): boolean {
   if (!error) return false;
+  if (isAuthRetryableFetchError(error)) return true;
   return /network|fetch|ECONN|timeout|offline|reach/i.test(errorMessage(error));
 }
 
@@ -174,6 +176,8 @@ async function resumeMigrationIfNeeded(): Promise<'continue' | 'halt'> {
 
 export function createSyncOrchestrator(): SyncOrchestrator {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = 5000;
   let running = false;
   let rerunQueued = false;
   let disposed = false;
@@ -187,6 +191,10 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       return;
     }
     running = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
 
     try {
       if (browserSaysOffline()) {
@@ -278,12 +286,23 @@ export function createSyncOrchestrator(): SyncOrchestrator {
       // know whether data moved; "a sync happened" is owned here.
       lastSynced.record();
       syncStatus.set('idle');
+      retryDelay = 5000;
     } catch (error) {
       const message = errorMessage(error);
       lastSyncError.set(message);
       if (looksLikeNetworkError(error) || browserSaysOffline()) {
         connectivity.set('offline');
         syncStatus.set('idle');
+        // A server/network blip need not fire a browser `online` event. Retry
+        // durably queued work without waiting for another user action.
+        // Known offline devices instead wait for the existing online listener.
+        if (!disposed && !browserSaysOffline()) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            void runCycle();
+          }, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 60000);
+        }
       } else {
         connectivity.set('online');
         syncStatus.set('error');
@@ -319,6 +338,10 @@ export function createSyncOrchestrator(): SyncOrchestrator {
 
   async function dispose(): Promise<void> {
     disposed = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
@@ -433,5 +456,10 @@ export async function syncNow(): Promise<void> {
     return;
   }
   // Not started yet (e.g. called from a test harness) — run a one-off.
-  await createSyncOrchestrator().syncNow();
+  const orchestrator = createSyncOrchestrator();
+  try {
+    await orchestrator.syncNow();
+  } finally {
+    await orchestrator.dispose();
+  }
 }

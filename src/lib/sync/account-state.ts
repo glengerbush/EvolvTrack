@@ -1,4 +1,5 @@
 import { nanoid } from 'nanoid';
+import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { supabase } from '$lib/auth/supabase';
 import { durableGet, durableSet } from '$lib/db/durableKv';
 import type { E2EEMigrationState, E2EETransitionPhase, SyncMode } from '$lib/domain/types';
@@ -93,11 +94,12 @@ export async function requireAuthenticatedUser() {
 
 /**
  * Soft auth check for the sync orchestrator: returns the user id, or null when
- * signed out. Unlike `requireAuthenticatedUser` it never throws, so background
- * sync can simply skip a cycle instead of surfacing an error.
+ * signed out. Temporary transport failures still throw so the orchestrator
+ * retries instead of silently treating a signed-in device as signed out.
  */
 export async function getAuthenticatedUserId(): Promise<string | null> {
   const { data, error } = await supabase.auth.getUser();
+  if (isAuthRetryableFetchError(error)) throw error;
   if (error || !data.user) return null;
   return data.user.id;
 }

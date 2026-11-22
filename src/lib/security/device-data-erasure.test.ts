@@ -39,6 +39,9 @@ async function populateAppStorage() {
     enqueuedAt: timestamp,
     rev: 'rev-1',
   });
+  await db.deletions.put({
+    id: 'entry:deleted-1', aggregate: 'entry', entityId: 'deleted-1', updatedAt: timestamp,
+  });
   await db.prescriptions.put({ id: 'vial-1', createdAt: timestamp, updatedAt: timestamp });
   await db.profile.put({
     id: 'profile',
@@ -105,12 +108,12 @@ afterEach(async () => {
 describe('Device Data Erasure', () => {
   it('removes all app-held data before reporting completion', async () => {
     await populateAppStorage();
-    expect(await appDatabaseCounts()).toEqual([1, 1, 1, 1, 1, 1, 1]);
+    expect(await appDatabaseCounts()).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
 
     await beginDeviceDataErasure();
 
     expect(await isDeviceDataErasurePending()).toBe(false);
-    expect(await appDatabaseCounts()).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(await appDatabaseCounts()).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
     expect(await durableGet('sb-auth-token')).toBeNull();
     expect(await durableGet('et.session.dek')).toBeNull();
     expect(localStorage.length).toBe(0);
@@ -135,7 +138,7 @@ describe('Device Data Erasure', () => {
     await expect(resumePendingDeviceDataErasure()).resolves.toBe('complete');
 
     expect(await isDeviceDataErasurePending()).toBe(false);
-    expect(await appDatabaseCounts()).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(await appDatabaseCounts()).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
   });
 
   it('does nothing when no erasure is pending', async () => {

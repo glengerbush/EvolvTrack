@@ -4,6 +4,9 @@ import { iso } from '../../test/iso';
 import { db } from '$lib/db/schema';
 import {
   addEntry,
+  deleteEntry,
+  addPrescription,
+  deletePrescription,
   applyRemoteChange,
   onHealthDataChange,
   updateEntry,
@@ -48,6 +51,79 @@ function captureChanges() {
 }
 
 describe('Health Data Storage remote Health Entry upserts', () => {
+  it('propagates rapid offline edits even when the device clock has not advanced', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2030-01-01T00:00:00.000Z'));
+    const original = await addEntry({ date: iso('2026-11-22'), wellness: 4, symptoms: [] });
+    await updateEntry(original.id, { wellness: 9, symptoms: ['Fatigue'] });
+    const edited = (await db.entries.get(original.id))!;
+    // Another device still has the original creation when this edit arrives.
+    await db.entries.put(original);
+    await db.outbox.clear();
+    await applyRemoteChange({
+      aggregate: 'entry', entityId: original.id, op: 'upsert', record: edited, remoteUpdatedAt: edited.updatedAt,
+    });
+    expect(await db.entries.get(original.id)).toMatchObject({ wellness: 9, symptoms: ['Fatigue'] });
+  });
+
+  it.each(['entry', 'prescription'] as const)('keeps %s deleted after acknowledgment and database reopening', async (aggregate) => {
+    const created = aggregate === 'entry'
+      ? await addEntry({ date: iso('2026-05-10'), wellness: 7, symptoms: ['Nausea'] })
+      : await addPrescription({ concentrationMgMl: 5 });
+    await (aggregate === 'entry' ? deleteEntry(created.id) : deletePrescription(created.id));
+    const deletion = (await db.outbox.get(`${aggregate}:${created.id}`))!;
+    await db.outbox.delete(deletion.id); // successful push acknowledgment
+    db.close();
+    await db.open();
+    for (const remoteUpdatedAt of [created.updatedAt, deletion.updatedAt]) {
+      expect(await applyRemoteChange({ aggregate, entityId: created.id, op: 'upsert', record: created, remoteUpdatedAt })).toBe(false);
+    }
+    const table = aggregate === 'entry' ? db.entries : db.prescriptions;
+    expect(await table.get(created.id)).toBeUndefined();
+    // Keep the established last-writer-wins policy for an actual newer restore.
+    const newer = new Date(Date.parse(deletion.updatedAt) + 1000).toISOString();
+    expect(await applyRemoteChange({
+      aggregate, entityId: created.id, op: 'upsert', record: { ...created, updatedAt: newer }, remoteUpdatedAt: newer,
+    })).toBe(true);
+    expect(await table.get(created.id)).toBeDefined();
+  });
+
+  it('remembers a remote deletion even when its creation has not arrived yet', async () => {
+    await applyRemoteChange({ aggregate: 'entry', entityId: 'late', op: 'delete', record: null, remoteUpdatedAt: NEW });
+    expect(await applyRemoteChange({
+      aggregate: 'entry', entityId: 'late', op: 'upsert', record: weight('late', MID), remoteUpdatedAt: MID,
+    })).toBe(false);
+    expect(await db.entries.get('late')).toBeUndefined();
+  });
+
+  it('stamps a local delete after the record even when its clock is ahead of this device', async () => {
+    const created = weight('future-clock', '2099-01-01T00:00:00.000Z');
+    await db.entries.put(created);
+    await deleteEntry(created.id);
+    const deletion = (await db.outbox.get(`entry:${created.id}`))!;
+    expect(Date.parse(deletion.updatedAt)).toBeGreaterThan(Date.parse(created.updatedAt));
+    expect(await applyRemoteChange({
+      aggregate: 'entry', entityId: created.id, op: 'upsert', record: created, remoteUpdatedAt: created.updatedAt,
+    })).toBe(false);
+  });
+
+  it('does not resurrect a newly deleted symptom/wellness entry when its creation is pulled back', async () => {
+    const created = await addEntry({ date: iso('2026-05-10'), wellness: 7, symptoms: ['Nausea'] });
+    await deleteEntry(created.id);
+    const pendingDelete = await db.outbox.get(`entry:${created.id}`);
+    expect(pendingDelete?.op).toBe('delete');
+    const { events, unsubscribe } = captureChanges();
+    try {
+      const applied = await applyRemoteChange({
+        aggregate: 'entry', entityId: created.id, op: 'upsert',
+        record: created, remoteUpdatedAt: created.updatedAt,
+      });
+      expect(applied).toBe(false);
+      expect(await db.entries.get(created.id)).toBeUndefined();
+      expect(await db.outbox.get(`entry:${created.id}`)).toEqual(pendingDelete);
+      expect(events).toEqual([]);
+    } finally { unsubscribe(); }
+  });
+
   it('inserts a brand-new entity and emits an add', async () => {
     const { events, unsubscribe } = captureChanges();
     try {

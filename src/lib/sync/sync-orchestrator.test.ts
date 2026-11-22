@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { AuthRetryableFetchError } from '@supabase/supabase-js';
 
 const h = vi.hoisted(() => {
   const pullImpl = vi.fn();
@@ -180,6 +181,70 @@ afterEach(() => {
 });
 
 describe('createSyncOrchestrator — runCycle', () => {
+  it('backs off retries, resets after recovery, and cancels them on disposal', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    h.pushImpl.mockRejectedValue(new TypeError('Failed to fetch'));
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+    for (const [delay, count] of [[5000, 2], [10000, 3], [20000, 4], [40000, 5], [60000, 6]]) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(h.pushImpl).toHaveBeenCalledTimes(count - 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.pushImpl).toHaveBeenCalledTimes(count);
+    }
+    h.pushImpl.mockResolvedValue({ pushed: 1 });
+    await vi.advanceTimersByTimeAsync(60000);
+    h.pushImpl.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await orchestrator.syncNow();
+    const beforeRetry = h.pushImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.pushImpl).toHaveBeenCalledTimes(beforeRetry + 1);
+    h.pushImpl.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await orchestrator.syncNow();
+    await orchestrator.dispose();
+    const stopped = h.pushImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.pushImpl).toHaveBeenCalledTimes(stopped);
+  });
+
+  it('waits for connectivity instead of repeatedly retrying while the browser is offline', async () => {
+    h.pushImpl.mockImplementationOnce(async () => { setOnline(false); throw new TypeError('Failed to fetch'); });
+    const orchestrator = createSyncOrchestrator();
+    try {
+      await orchestrator.syncNow();
+      await vi.advanceTimersByTimeAsync(120000);
+      expect(h.pushImpl).toHaveBeenCalledTimes(1);
+      setOnline(true);
+      orchestrator.scheduleSync();
+      await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS);
+      expect(h.pushImpl).toHaveBeenCalledTimes(2);
+    } finally { await orchestrator.dispose(); }
+  });
+
+  it('retries a temporary auth failure without requiring another edit or online event', async () => {
+    h.getUserIdImpl.mockRejectedValueOnce(new AuthRetryableFetchError('Service temporarily unavailable', 503));
+    const orchestrator = createSyncOrchestrator();
+    await orchestrator.syncNow();
+    expect(h.pushImpl).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.pushImpl).toHaveBeenCalledTimes(1);
+    expect(get(connectivity)).toBe('online');
+    await orchestrator.dispose();
+  });
+
+  it('retries a temporary network failure without requiring another edit or online event', async () => {
+    h.pushImpl.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const orchestrator = createSyncOrchestrator();
+    try {
+      await orchestrator.syncNow();
+      expect(get(connectivity)).toBe('offline');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(h.pushImpl).toHaveBeenCalledTimes(2);
+      expect(get(connectivity)).toBe('online');
+      expect(get(lastSyncError)).toBeNull();
+    } finally { await orchestrator.dispose(); }
+  });
+
   it('runs pull then push and lands on idle', async () => {
     const orchestrator = createSyncOrchestrator();
     await orchestrator.syncNow();

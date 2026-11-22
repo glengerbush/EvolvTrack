@@ -6,6 +6,7 @@ import {
   addEntry,
   addPrescription,
   applyHealthDataImport,
+  applyRemoteChange,
   clearAllData,
   getAllEntries,
   getProfile,
@@ -30,6 +31,16 @@ function importedDose(id: string, medication: typeof SEMA | typeof TIRZ) {
 }
 
 describe('Health Data Storage imports', () => {
+  it('keeps replacement deletions newer than the removed data after clock skew', async () => {
+    const old = { ...importedDose('removed', SEMA), updatedAt: '2099-01-01T00:00:00.000Z' };
+    await db.entries.put(old);
+    await applyHealthDataImport({ mode: 'replace', replaceProfile: false, data: { entries: [], prescriptions: [] } });
+    const deletion = (await db.outbox.get('entry:removed'))!;
+    expect(Date.parse(deletion.updatedAt)).toBeGreaterThan(Date.parse(old.updatedAt));
+    await applyRemoteChange({ aggregate: 'entry', entityId: old.id, op: 'upsert', record: old, remoteUpdatedAt: old.updatedAt });
+    expect(await db.entries.get(old.id)).toBeUndefined();
+  });
+
   it('deduplicates and applies a merge through one storage operation', async () => {
     await addEntry({ date: iso('2026-05-10'), weightLbs: 180 });
     const changes: HealthDataChange[] = [];
