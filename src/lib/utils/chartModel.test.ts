@@ -28,6 +28,17 @@ function build(rows: ChartHealthRow[], today: IsoDate = TODAY) {
 }
 
 describe('initial graph date', () => {
+  it('limits the scroll range to plotted data, ignoring empty dates at either end', () => {
+    const model = build([
+      row({ date: iso('2025-01-01') }),
+      row({ date: iso('2026-05-01'), weight: '180' }),
+      row({ date: iso('2026-05-08'), dose: '10', medication: SEMA }),
+      row({ date: iso('2027-01-01') }),
+    ]);
+    expect(model.dataRows[0].date).toBe('2026-05-01');
+    expect(model.dataRows.at(-1)!.date).toBe('2026-05-08');
+  });
+
   it('anchors to the latest observation rather than future plans or empty dates', () => {
     const model = build([
       row({ date: iso('2026-05-01'), weight: '180' }),
@@ -40,7 +51,11 @@ describe('initial graph date', () => {
   });
 
   it('keeps a single observation visible despite date-axis padding', () => {
-    expect(build([row({ weight: '180' })]).latestDataDate).toBe(TODAY);
+    const model = build([row({ weight: '180' })]);
+    expect(model.latestDataDate).toBe(TODAY);
+    expect(model.dataRows.map(({ date }) => date)).toEqual([TODAY]);
+    expect(model.cssXForDate(TODAY)).toBeCloseTo(model.plotWidth / 2);
+    expect(model.dateForCssX(model.plotWidth)).toBe(TODAY);
   });
 
   it('shows the first planned date when no observations exist yet', () => {

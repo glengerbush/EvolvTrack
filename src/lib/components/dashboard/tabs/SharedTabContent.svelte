@@ -317,6 +317,21 @@
     color: string;
     planned: boolean;
   };
+
+  // Keep the whole label on the plot, including after font/viewport changes.
+  function fitDoseLabel(el: SVGTextElement, bounds: { x: number; right: number }) {
+    function position() {
+      el.setAttribute('x', String(Math.max(PLOT.left + 4,
+        Math.min(bounds.x + 4, bounds.right - el.getComputedTextLength() - 4))));
+    }
+    const observer = new ResizeObserver(position);
+    observer.observe(el);
+    position();
+    return {
+      update(next: typeof bounds) { bounds = next; position(); },
+      destroy() { observer.disconnect(); },
+    };
+  }
   const doseChangeMarkers = $derived.by<DoseChangeMarker[]>(() => {
     const markers: DoseChangeMarker[] = [];
     for (const series of chartModel.systemSeries) {
@@ -897,9 +912,12 @@
           onpointerdown={onPlotPointerDown}
           onpointerup={onPlotPointerUp}
         >
+          <!-- Keep x units equal to CSS pixels even at the shorter mobile
+               height; aspect-ratio centering adds blank scrollable gutters. -->
           <svg
             class="data-svg"
             viewBox={`${CHART.margin.left} 0 ${chartModel.plotWidth} ${CHART.height}`}
+            preserveAspectRatio="none"
             style:width={`${chartModel.plotWidth}px`}
             aria-hidden="true"
             focusable="false"
@@ -973,7 +991,9 @@
             {#each doseChangeMarkers as marker (marker.key)}
               <g class:planned={marker.planned} class="dose-change" style:--system-color={marker.color}>
                 <line x1={marker.x} x2={marker.x} y1={PLOT.top} y2={PLOT.bottom} />
-                <text x={marker.x + 4} y={PLOT.top + 25}>{marker.label}</text>
+                <text y={PLOT.top + 25}
+                  use:fitDoseLabel={{ x: marker.x, right: chartModel.plotRight }}
+                >{marker.label}</text>
               </g>
             {/each}
 

@@ -223,21 +223,23 @@ export function buildChartModel(
   const symptomsByDate = collectSymptoms(datedRows);
   const projectedDoseDates = doses.filter((dose) => dose.planned).map((dose) => dose.date);
   const confirmedDoseDates = doses.filter((dose) => !dose.planned).map((dose) => dose.date);
-  const dataDates = datedRows.map((row) => row.date);
+  // Notes and empty entries have nothing to plot and must not create weeks of
+  // empty scrolling before/after the actual observations or planned doses.
+  const dataDates = [
+    ...doses.map((dose) => dose.date),
+    ...weights.map((point) => point.date),
+    ...wellnessByDate.keys(),
+    ...symptomsByDate.keys(),
+  ];
 
   // Date range covers all data. xRange only controls how many days fit in the
   // viewport at once — content outside the viewport is reachable by scrolling.
-  let startDate = minDateKey(dataDates) ?? addDays(today, -28);
-  let endDate = maxDateKey(dataDates) ?? today;
-
-  if (daysBetween(startDate, endDate) < 1) {
-    startDate = addDays(startDate, -7);
-    endDate = addDays(endDate, 7);
-  }
+  const startDate = minDateKey(dataDates) ?? addDays(today, -28);
+  const endDate = maxDateKey(dataDates) ?? today;
 
   const dateKeys = enumerateDateKeys(startDate, endDate);
   const totalDays = dateKeys.length;
-  const daySpan = Math.max(daysBetween(startDate, endDate), 1);
+  const daySpan = daysBetween(startDate, endDate);
 
   // dayPixelWidth: how many CSS pixels each day occupies. Drives total chart
   // width and date-tick decimation.
@@ -260,6 +262,7 @@ export function buildChartModel(
   const plotRight = widthPx - CHART.margin.right;
   const usablePlotWidth = Math.max(plotWidth - X_AXIS_PADDING * 2, 1);
   const xForDate = (date: IsoDate) => {
+    if (daySpan === 0) return PLOT.left + plotWidth / 2;
     return PLOT.left + X_AXIS_PADDING + (daysBetween(startDate, date) / daySpan) * usablePlotWidth;
   };
 
@@ -448,7 +451,7 @@ export function buildChartModel(
     .map((row) => row.date);
 
   return {
-    hasAnyData: datedRows.length > 0,
+    hasAnyData: dataDates.length > 0,
     latestDataDate: maxDateKey(plottedDates.filter((date) => date <= today)) ?? minDateKey(plottedDates) ?? null,
     widthPx,
     plotRight,
