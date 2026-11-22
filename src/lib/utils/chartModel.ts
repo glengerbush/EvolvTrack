@@ -235,7 +235,13 @@ export function buildChartModel(
   // Date range covers all data. xRange only controls how many days fit in the
   // viewport at once — content outside the viewport is reachable by scrolling.
   const startDate = minDateKey(dataDates) ?? addDays(today, -28);
-  const endDate = maxDateKey(dataDates) ?? today;
+  const latestDoseDate = maxDateKey(doses.map((dose) => dose.date));
+  // Include the decay after the last taken or planned dose. This extends the
+  // scrollable forecast only; latestDataDate still anchors to recorded data.
+  const endDate = maxDateKey([
+    ...dataDates,
+    ...(latestDoseDate ? [addDays(latestDoseDate, 14)] : []),
+  ]) ?? today;
 
   const dateKeys = enumerateDateKeys(startDate, endDate);
   const totalDays = dateKeys.length;

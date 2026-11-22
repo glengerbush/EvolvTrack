@@ -36,7 +36,7 @@ describe('initial graph date', () => {
       row({ date: iso('2027-01-01') }),
     ]);
     expect(model.dataRows[0].date).toBe('2026-05-01');
-    expect(model.dataRows.at(-1)!.date).toBe('2026-05-08');
+    expect(model.dataRows.at(-1)!.date).toBe('2026-05-22');
   });
 
   it('anchors to the latest observation rather than future plans or empty dates', () => {
@@ -68,6 +68,40 @@ describe('initial graph date', () => {
   it('does not choose a date when nothing can be plotted', () => {
     expect(build([]).latestDataDate).toBeNull();
     expect(build([row()]).latestDataDate).toBeNull();
+  });
+});
+
+describe('dose forecast horizon', () => {
+  it.each([false, true])('shows fourteen days after the latest dose (planned: %s)', (planned) => {
+    const doseDate = iso(planned ? '2026-08-01' : '2026-05-10');
+    const endDate = iso(planned ? '2026-08-15' : '2026-05-24');
+    const model = build([
+      row({ date: TODAY, weight: '180' }),
+      row({ date: doseDate, dose: '5', medication: SEMA, dosePlanned: planned }),
+    ]);
+    expect(model.dataRows.at(-1)!.date).toBe(endDate);
+    expect(model.latestDataDate).toBe(TODAY);
+    const afterDose = model.dataRows.filter(({ date }) => date > doseDate);
+    expect(afterDose).toHaveLength(14);
+    expect(afterDose.every(({ system }) => system[0].value > 0)).toBe(true);
+    expect(afterDose.at(-1)!.system[0].value).toBeLessThan(afterDose[0].system[0].value);
+    expect(model.systemSeries[0].predictionPath).not.toBe('');
+  });
+
+  it('retains observations beyond the dose forecast without adding more empty dates', () => {
+    const model = build([
+      row({ date: iso('2026-04-01'), dose: '5', medication: SEMA }),
+      row({ date: TODAY, weight: '180' }),
+    ]);
+    expect(model.dataRows.at(-1)!.date).toBe(TODAY);
+  });
+
+  it('does not extend the forecast for skipped doses', () => {
+    const model = build([
+      row({ date: TODAY, dose: '5', medication: SEMA }),
+      row({ date: iso('2026-08-01'), dose: '10', medication: SEMA, doseSkipped: true }),
+    ]);
+    expect(model.dataRows.at(-1)!.date).toBe('2026-05-24');
   });
 });
 
@@ -106,7 +140,8 @@ describe('buildChartModel — skipped row contributes nothing', () => {
   });
 
   it("does not pull the chart's right edge forward to the skipped date", () => {
-    expect(model.todayX).toBeNull();
+    const withoutSkipped = build(rows.filter((entry) => !entry.doseSkipped));
+    expect(model.dataRows.at(-1)!.date).toBe(withoutSkipped.dataRows.at(-1)!.date);
   });
 });
 
@@ -176,9 +211,11 @@ describe('buildChartModel — projection start (same-day-zero rule)', () => {
       ?? series.plannedDosePoints.find((p) => p.date === TODAY);
     expect(todayDot, 'a marker should exist at today').toBeDefined();
 
-    const xToday = todayDot!.x.toFixed(1);
-    expect(series.actualPath).toContain(xToday);
-    expect(series.predictionPath).not.toContain(xToday);
+    const todayCoordinate = `${todayDot!.x.toFixed(1)},${todayDot!.y.toFixed(1)}`;
+    // The solid line reaches today; the new forecast connects from that same
+    // point into tomorrow, without replacing today's recorded segment.
+    expect(series.actualPath.endsWith(todayCoordinate)).toBe(true);
+    expect(series.predictionPath.startsWith(`M${todayCoordinate} L`)).toBe(true);
   });
 });
 
