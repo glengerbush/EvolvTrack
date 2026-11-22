@@ -64,7 +64,18 @@ sw.addEventListener('fetch', (event) => {
 async function navigationHandler(request: Request): Promise<Response> {
   const cache = await caches.open(CACHE);
   const cached = (await cache.match(request)) || (await cache.match(APP_SHELL));
-  if (cached) return cached;
+  if (cached) {
+    // Hosts can redirect /index.html to /. Cache Storage keeps that redirect
+    // history, which is invalid for navigation responses (Safari rejects it).
+    // Rebuild the response, since clone() also preserves the redirect history.
+    return cached.redirected
+      ? new Response(cached.body, {
+          status: cached.status,
+          statusText: cached.statusText,
+          headers: cached.headers,
+        })
+      : cached;
+  }
   const response = await fetch(request);
   if (response.ok) await cache.put(request, response.clone());
   return response;

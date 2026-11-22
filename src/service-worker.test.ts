@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$service-worker', () => ({
   base: '',
@@ -12,11 +13,11 @@ type FetchEventHarness = {
   waitUntil: (work: Promise<unknown>) => void;
 };
 
-async function loadWorker(cachedPaths: Record<string, string> = {}) {
+async function loadWorker(cachedPaths: Record<string, string | Response> = {}) {
   vi.resetModules();
   const origin = 'https://evolvtrack.test';
   const entries = new Map(Object.entries(cachedPaths).map(([path, body]) => [
-    new URL(path, origin).href, new Response(body),
+    new URL(path, origin).href, typeof body === 'string' ? new Response(body) : body,
   ]));
   const key = (request: Request | string) => new URL(
     typeof request === 'string' ? request : request.url, origin,
@@ -41,7 +42,7 @@ async function loadWorker(cachedPaths: Record<string, string> = {}) {
   await import(workerModule);
 
   function navigate(path: string) {
-    const request = new Request(new URL(path, origin));
+    const request = new Request(new URL(path, origin), { redirect: 'manual' });
     Object.defineProperty(request, 'mode', { value: 'navigate' });
     let response: Promise<Response> | undefined;
     const background: Promise<unknown>[] = [];
@@ -67,6 +68,43 @@ async function loadWorker(cachedPaths: Record<string, string> = {}) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('PWA reopening', () => {
+  // Real HTTP redirects retain their URL history through Response.clone(),
+  // like Cache Storage. Synthetic Response fixtures cannot reproduce this.
+  const server = createServer((request, response) => {
+    if (request.url === '/index.html') {
+      response.writeHead(302, { Location: '/' });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/html', 'X-Shell': 'installed' });
+    response.end('<html>installed app shell</html>');
+  });
+  let redirectedShell: Response;
+  beforeAll(async () => {
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    redirectedShell = await fetch(`http://127.0.0.1:${address.port}/index.html`);
+    expect(redirectedShell.redirected).toBe(true);
+  });
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+
+  it.each(['/index.html', '/auth'])('reopens offline when cached %s was fetched through a redirect', async (cachedPath) => {
+    const network = vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', network);
+    const worker = await loadWorker({ [cachedPath]: redirectedShell.clone() });
+    const response = await worker.navigate('/auth').response;
+    // WebKit rejects redirected responses to navigation requests with this error.
+    expect(response.redirected, 'Response served by service worker has redirections').toBe(false);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('text/html');
+    expect(response.headers.get('X-Shell')).toBe('installed');
+    expect(await response.text()).toBe('<html>installed app shell</html>');
+    expect(network).not.toHaveBeenCalled();
+  });
+
   it('serves the cached dashboard without waiting for a stalled network', async () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
     const worker = await loadWorker({ '/app': 'saved dashboard', '/': 'homepage' });
@@ -100,5 +138,15 @@ describe('PWA reopening', () => {
     network.mockRejectedValue(new Error('offline'));
     expect(await (await worker.navigate('/app').response).text()).toBe('downloaded app');
     expect(network).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves live navigation redirects for the browser to follow', async () => {
+    const redirect = Response.redirect('https://evolvtrack.test/auth', 307);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(redirect));
+    const worker = await loadWorker();
+    const response = await worker.navigate('/app').response;
+    expect(response).toBe(redirect);
+    expect(response.headers.get('Location')).toBe('https://evolvtrack.test/auth');
+    expect(worker.cache.put).not.toHaveBeenCalled();
   });
 });
