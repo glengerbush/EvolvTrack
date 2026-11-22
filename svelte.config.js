@@ -1,8 +1,4 @@
 import adapter from '@sveltejs/adapter-static';
-import { readFileSync } from 'node:fs';
-
-const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'));
-
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
   kit: {
@@ -11,9 +7,7 @@ const config = {
       assets: 'build',
       fallback: 'index.html'
     }),
-    version: {
-      name: pkg.version
-    },
+    // Use SvelteKit's per-build version so cached HTML and chunks update together.
     serviceWorker: {
       register: false
     },

@@ -27,6 +27,35 @@ function build(rows: ChartHealthRow[], today: IsoDate = TODAY) {
   return buildChartModel(rows, 'lbs', {}, 180, today, new SvelteSet<GraphSeriesKey>());
 }
 
+describe('initial graph date', () => {
+  it('anchors to the latest observation rather than future plans or empty dates', () => {
+    const model = build([
+      row({ date: iso('2026-05-01'), weight: '180' }),
+      row({ date: iso('2026-05-08'), wellness: '7' }),
+      row({ date: iso('2026-05-09'), doseSkipped: true, weight: '179' }),
+      row({ date: iso('2026-05-20'), dose: '5', medication: SEMA, dosePlanned: true }),
+      row({ date: iso('2026-06-01') }),
+    ]);
+    expect(model.latestDataDate).toBe('2026-05-08');
+  });
+
+  it('keeps a single observation visible despite date-axis padding', () => {
+    expect(build([row({ weight: '180' })]).latestDataDate).toBe(TODAY);
+  });
+
+  it('shows the first planned date when no observations exist yet', () => {
+    expect(build([
+      row({ date: iso('2026-05-20'), dose: '5', medication: SEMA, dosePlanned: true }),
+      row({ date: iso('2026-05-27'), dose: '5', medication: SEMA, dosePlanned: true }),
+    ]).latestDataDate).toBe('2026-05-20');
+  });
+
+  it('does not choose a date when nothing can be plotted', () => {
+    expect(build([]).latestDataDate).toBeNull();
+    expect(build([row()]).latestDataDate).toBeNull();
+  });
+});
+
 describe('buildChartModel — skipped row contributes nothing', () => {
   const rows: ChartHealthRow[] = [
     // Several confirmed past entries so the chart has data to render around.

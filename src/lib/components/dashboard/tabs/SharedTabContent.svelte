@@ -197,17 +197,25 @@
     },
     stickyTopSelector: '.tabbar',
   });
-  let dataScrollEl: HTMLButtonElement | null = null;
+  let dataScrollEl = $state.raw<HTMLButtonElement | null>(null);
   let hasAutoScrolled = false;
   let lastNotifiedUnsavedChanges = false;
   let lastDiscardSignal = getInitialDiscardSignal();
 
   $effect(() => {
-    if (!active || !dataScrollEl || hasAutoScrolled || !chartModel.hasAnyData) return;
-    hasAutoScrolled = true;
-    requestAnimationFrame(() => {
-      if (dataScrollEl) dataScrollEl.scrollLeft = dataScrollEl.scrollWidth;
+    if (!active || !dataScrollEl || hasAutoScrolled || viewportPlotWidth <= 0 || !chartModel.latestDataDate) return;
+    const el = dataScrollEl;
+    const targetX = chartModel.cssXForDate(chartModel.latestDataDate);
+    let cancelled = false;
+    // Wait for the measured chart geometry, then show the latest recorded data
+    // with room for its marker. Future plans/notes must not open a blank range.
+    void tick().then(() => {
+      if (cancelled) return;
+      el.scrollLeft = Math.max(0, targetX - el.clientWidth + 24);
+      hasAutoScrolled = true;
+      refreshVisibleRange();
     });
+    return () => { cancelled = true; };
   });
 
   /**

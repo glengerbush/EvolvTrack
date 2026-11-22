@@ -3,14 +3,16 @@
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
 
-import { base, version } from '$service-worker';
+import { base, build, version } from '$service-worker';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 
 const CACHE = `evolvtrack-${version}`;
-const APP_SHELL = `${base}/`;
+// adapter-static's route-independent SPA shell; boot the current URL locally.
+const APP_SHELL = `${base}/index.html`;
 const PRECACHE = [
   APP_SHELL,
+  ...build,
   `${base}/manifest.webmanifest`,
   `${base}/icon-192.png`,
   `${base}/icon-512.png`,
@@ -61,15 +63,11 @@ sw.addEventListener('fetch', (event) => {
 
 async function navigationHandler(request: Request): Promise<Response> {
   const cache = await caches.open(CACHE);
-  try {
-    const response = await fetch(request);
-    if (response.ok) cache.put(APP_SHELL, response.clone());
-    return response;
-  } catch (error) {
-    const cached = (await cache.match(request)) || (await cache.match(APP_SHELL));
-    if (cached) return cached;
-    throw error;
-  }
+  const cached = (await cache.match(request)) || (await cache.match(APP_SHELL));
+  if (cached) return cached;
+  const response = await fetch(request);
+  if (response.ok) await cache.put(request, response.clone());
+  return response;
 }
 
 async function cacheFirst(request: Request): Promise<Response> {

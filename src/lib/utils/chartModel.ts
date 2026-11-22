@@ -105,6 +105,8 @@ export type ChartDataRow = {
 
 export type ChartModel = {
   hasAnyData: boolean;
+  /** Latest plotted observation through today; first planned date if none exist. */
+  latestDataDate: IsoDate | null;
   widthPx: number;
   plotRight: number;
   plotWidth: number;
@@ -441,9 +443,13 @@ export function buildChartModel(
       })),
     };
   });
+  const plottedDates = dataRows
+    .filter((row) => row.weight !== null || row.wellness !== null || row.symptoms.length > 0 || row.doses.length > 0)
+    .map((row) => row.date);
 
   return {
     hasAnyData: datedRows.length > 0,
+    latestDataDate: maxDateKey(plottedDates.filter((date) => date <= today)) ?? minDateKey(plottedDates) ?? null,
     widthPx,
     plotRight,
     plotWidth,

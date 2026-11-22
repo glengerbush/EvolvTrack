@@ -1520,8 +1520,14 @@
   // The destructive half of deleteRow, without the native confirm — the mobile
   // per-card flow gates it behind the styled ConfirmDialog instead.
   async function performDeleteRow(row: EditableInputRow) {
+    // Confirmation state proxies the row, and async updates can replace it.
+    // Match by stable identity rather than object reference.
+    const id = rowIdentity(row);
+    if (!id) return;
     if (!isDraftRow(row) && row.entryId) await deleteEntry(row.entryId);
-    tableRows = recalculateDerived(tableRows.filter((r) => r !== row));
+    weightDrafts.delete(id);
+    draftBaseTableRows = draftBaseTableRows.filter((r) => rowIdentity(r) !== id);
+    tableRows = recalculateDerived(tableRows.filter((r) => rowIdentity(r) !== id));
   }
 
   function requestRowDelete(row: EditableInputRow) {

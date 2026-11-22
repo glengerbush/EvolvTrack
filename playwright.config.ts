@@ -18,6 +18,11 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'], launchOptions: { executablePath: SYSTEM_CHROMIUM } }
+    },
+    {
+      name: 'mobile-webkit',
+      testMatch: ['mobile-delete.spec.ts', 'mobile-graph.spec.ts'],
+      use: { ...devices['iPhone 13'] }
     }
   ],
   webServer: {
